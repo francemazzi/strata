@@ -79,7 +79,15 @@ QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const Q
   request.setRawHeader( "Authorization", ( u"Bearer %1"_s.arg( mRouter->planSessionToken().trimmed() ) ).toUtf8() );
   request.setTransferTimeout( timeoutMs );
 
-  QNetworkReply *reply = networkManager->post( request, QJsonDocument( body ).toJson( QJsonDocument::Compact ) );
+  QNetworkReply *reply = networkManager->post(
+    request,
+    QJsonDocument( [&]() {
+      auto managed = body;
+      mRouter->appendManagedToolContext( managed );
+      return managed;
+    }() )
+      .toJson( QJsonDocument::Compact )
+  );
   if ( !reply )
     return QgsAiToolResult::error( u"Unable to start the Strata Plan search request."_s );
 
@@ -145,6 +153,8 @@ QJsonObject QgsAiCatalogSearchTool::schema() const
   QJsonObject properties;
   properties.insert( u"query"_s, prop( u"string"_s, u"GIS dataset or layer query."_s ) );
   properties.insert( u"limit"_s, integerProp( u"Maximum number of results, 1-10. Default 5."_s, 1, 10 ) );
+  properties.insert( u"territory"_s, prop( u"string"_s, u"Geographic coverage, separate from the dataset theme."_s ) );
+  properties.insert( u"bbox"_s, QJsonObject { { u"type"_s, u"array"_s }, { u"items"_s, QJsonObject { { u"type"_s, u"number"_s } } }, { u"minItems"_s, 4 }, { u"maxItems"_s, 4 } } );
   properties.insert( u"trustedOnly"_s, prop( u"boolean"_s, u"If true, filters out unknown source hosts. Default true."_s ) );
   return schemaObject( properties, QJsonArray { u"query"_s } );
 }
@@ -159,5 +169,8 @@ QgsAiToolResult QgsAiCatalogSearchTool::execute( const QJsonObject &args )
   body.insert( u"trustedOnly"_s, args.value( u"trustedOnly"_s ).toBool( true ) );
   if ( args.contains( u"limit"_s ) )
     body.insert( u"limit"_s, args.value( u"limit"_s ).toInt() );
+  for ( const auto &key : { u"territory"_s, u"bbox"_s } )
+    if ( args.contains( key ) )
+      body.insert( key, args.value( key ) );
   return postSearch( u"/v1/tools/catalog-search"_s, body );
 }

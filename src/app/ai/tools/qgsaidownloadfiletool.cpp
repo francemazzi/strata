@@ -15,6 +15,7 @@
 
 #include "qgsaidownloadfiletool.h"
 
+#include "../discovery/qgsaidiscoveryfiles.h"
 #include "qgsaiauditlog.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaisettingsutils.h"
@@ -147,12 +148,17 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
   if ( destPath.isEmpty() )
     return QgsAiToolResult::error( u"Destination path is outside the workspace: '%1'."_s.arg( destRequest ) );
 
+  const QString destinationError = QgsAiDiscoveryFiles::destinationError( mContextProvider->workspaceRoot(), destPath );
+  if ( !destinationError.isEmpty() )
+    return QgsAiToolResult::error( destinationError );
+  if ( !QgsAiDiscoveryFiles::safeUrl( url ) )
+    return QgsAiToolResult::error( u"Invalid download URL or embedded credentials."_s );
   const bool overwrite = args.value( u"overwrite"_s ).toBool( false );
   if ( !overwrite && QFileInfo::exists( destPath ) )
     return QgsAiToolResult::error( u"Destination file already exists: '%1'. Pass overwrite=true to replace it."_s.arg( destPath ) );
 
   const QString expectedSha256 = args.value( u"expected_sha256"_s ).toString().trimmed().toLower();
-  if ( !expectedSha256.isEmpty() && expectedSha256.size() != 64 )
+  if ( !expectedSha256.isEmpty() && !QgsAiDiscoveryFiles::validDigest( expectedSha256 ) )
     return QgsAiToolResult::error( u"expected_sha256 must be a 64-character SHA-256 hex digest."_s );
 
   qint64 maxBytes = DEFAULT_MAX_BYTES;

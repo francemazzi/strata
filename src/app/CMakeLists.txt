@@ -347,6 +347,14 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaiworkspacetrust.cpp
     ai/tools/qgsaiattributetabletools.cpp
     ai/tools/qgsaidatabasetools.cpp
+    ai/discovery/qgsaidiscoveryclient.cpp
+    ai/discovery/qgsaidiscoveryfiles.cpp
+    ai/discovery/qgsaidiscoverydownload.cpp
+    ai/discovery/qgsaidiscoverypreview.cpp
+    ai/discovery/qgsaidiscoverycontroller.cpp
+    ai/discovery/qgsaidiscoverydelivery.cpp
+    ai/discovery/qgsaidiscoveryimport.cpp
+    ai/tools/qgsaidiscoverytool.cpp
     ai/tools/qgsaidatahubextracttool.cpp
     ai/tools/qgsaitreesdetecttool.cpp
     ai/tools/qgsaidownloadfiletool.cpp
@@ -662,6 +670,7 @@ add_dependencies(qgis_gui ui)
 target_link_libraries(qgis_app
   PUBLIC
   ${QWT_LIBRARY}
+  ${LIBZIP_LIBRARY}
   ${QT_VERSION_BASE}::QuickControls2
   ${QT_VERSION_BASE}::Sql
   ${QT_VERSION_BASE}::UiTools
@@ -829,3 +838,7 @@ install(TARGETS qgis
   LIBRARY DESTINATION ${QGIS_LIB_DIR}
   ARCHIVE DESTINATION ${QGIS_LIB_DIR}
   PUBLIC_HEADER DESTINATION ${QGIS_INCLUDE_DIR})
+
+if (ENABLE_AI_ASSISTANT)
+  target_include_directories(qgis_app PRIVATE ${LIBZIP_INCLUDE_DIRS})
+endif()

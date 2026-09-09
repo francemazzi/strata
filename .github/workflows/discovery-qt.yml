@@ -1,0 +1,16 @@
+name: Discovery Qt contract
+on:
+  pull_request:
+    paths: ['src/app/ai/discovery/**', 'src/app/ai/tools/qgsaidiscoverytool.*', 'tests/discovery/**', '.github/workflows/discovery-qt.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libzip-dev ninja-build
+      - run: cmake -S tests/discovery -B "$RUNNER_TEMP/discovery-qt" -G Ninja
+      - run: cmake --build "$RUNNER_TEMP/discovery-qt" -j2
+      - run: ctest --test-dir "$RUNNER_TEMP/discovery-qt" --output-on-failure

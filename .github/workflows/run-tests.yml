@@ -198,6 +198,14 @@ jobs:
                      qgis3-build-deps \
                      /root/QGIS/.docker/docker-qgis-build.sh
 
+      - name: Discovery QGIS import gate
+        if: ${{ matrix.distro == 'ubuntu' }}
+        run: |
+          docker run --rm -v "$(pwd):/root/QGIS" \
+            --env-file .docker/docker-variables.env --env QT_QPA_PLATFORM=offscreen \
+            qgis3-build-deps ctest --test-dir /root/QGIS/build \
+            -R '^test_app_aidiscoveryworkflow$' --no-tests=error --output-on-failure
+
       - name: Save build cache for push only
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.event_name == 'push' }}

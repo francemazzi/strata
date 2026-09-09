@@ -188,6 +188,7 @@ RUN  apt-get update \
     clang-22 \
     cmake \
     flex \
+    g++ \
     mold \
     grass-dev \
     libdraco-dev \

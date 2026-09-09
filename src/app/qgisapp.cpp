@@ -125,6 +125,8 @@ using namespace Qt::StringLiterals;
 #include "ai/tools/qgsaitoolregistry.h"
 #include "ai/tools/qgsaiwebfetchtool.h"
 #include "ai/tools/qgsaiwebsearchtool.h"
+#include "ai/tools/qgsaidiscoverytool.h"
+#include "ai/discovery/qgsaidiscoverycontroller.h"
 #endif
 #include "qgstaskmanager.h"
 #include "qgsziputils.h"
@@ -1488,6 +1490,9 @@ QgisApp::QgisApp(
   mAiToolRegistry->registerTool( std::make_unique<QgsAiRunPythonTool>( this ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiInstallPythonPackageTool>( this ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiDownloadFileTool>( mAiFileContextProvider.get(), this ) );
+  auto discoveryController = new QgsAiDiscoveryController( mAiModelRouter.get(), mAiFileContextProvider.get(), mMapCanvas, QgsProject::instance(), this );
+  for ( const auto &name : { u"discovery_resolve"_s, u"discovery_search"_s, u"discovery_status"_s, u"discovery_run"_s, u"discovery_cancel"_s } )
+    mAiToolRegistry->registerTool( std::make_unique<QgsAiDiscoveryTool>( name, discoveryController ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiDataHubExtractTool>( mAiModelRouter.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiTreesDetectTool>( mAiModelRouter.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiWebSearchTool>( mAiModelRouter.get() ) );
@@ -1558,6 +1563,7 @@ QgisApp::QgisApp(
 
   mAiChatDock = new QgsAiChatDockWidget( mAiSessionManager.get(), mAiModelRouter.get(), mAiReviewPatchEngine.get(), this );
   connect( mAiChatHistoryStore.get(), &QgsAiChatHistoryStore::sessionListChanged, mAiChatDock, &QgsAiChatDockWidget::rebuildHistoryMenu );
+  mAiChatDock->setDiscoveryController( discoveryController );
   mAiChatDock->setLayerIndexCoordinator( mAiLayerIndexCoordinator.get() );
   connect( mAiChatDock, &QgsAiChatDockWidget::embeddingProviderSettingsChanged, this, [this]() {
     if ( !mAiWorkspaceIndex )

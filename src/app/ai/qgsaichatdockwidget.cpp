@@ -1,3 +1,8 @@
+#include "discovery/qgsaidiscoverycontroller.h"
+#include "discovery/qgsaidiscoverypreview.h"
+
+#include <QString>
+
 /***************************************************************************
     qgsaichatdockwidget.cpp
     ---------------------
@@ -3340,4 +3345,21 @@ void QgsAiChatDockWidget::recordLayerIndexingConsent()
   settings.setValue( u"strata/index/layer_indexing_consented"_s, true );
   settings.remove( u"geoai/index/layer_indexing_consented"_s );
   settings.remove( u"qgis_ai/index/layer_indexing_consented"_s );
+}
+
+void QgsAiChatDockWidget::setDiscoveryController( QgsAiDiscoveryController *controller )
+{
+  connect( controller, &QgsAiDiscoveryController::previewReady, this, [this]( QgsAiDiscoveryPreview *preview ) {
+    mTranscriptLayout->insertWidget( std::max( 0, mTranscriptLayout->count() - 1 ), preview );
+    scrollTranscriptToBottom();
+  } );
+  connect( controller, &QgsAiDiscoveryController::message, this, [this]( const QString &message ) {
+    appendTranscriptMessage( u"tool"_s, message.toHtmlEscaped() );
+    scrollTranscriptToBottom();
+  } );
+  connect( controller, &QgsAiDiscoveryController::controlsReady, this, [this]( QWidget *widget ) {
+    mTranscriptLayout->insertWidget( std::max( 0, mTranscriptLayout->count() - 1 ), widget );
+    scrollTranscriptToBottom();
+  } );
+  controller->resume();
 }

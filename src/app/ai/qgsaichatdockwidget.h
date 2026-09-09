@@ -41,6 +41,7 @@ class QVBoxLayout;
 struct QgsAiGisSuggestion;
 
 class QgsAiChatPromptEdit;
+class QgsAiDiscoveryController;
 class QgsAiLayerIndexCoordinator;
 class QgsAiModelRouter;
 class QgsAiPlanClient;
@@ -54,6 +55,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
   public:
     QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManager, QgsAiModelRouter *modelRouter, QgsAiReviewPatchEngine *reviewEngine, QWidget *parent = nullptr );
 
+    void setDiscoveryController( QgsAiDiscoveryController *controller );
     void setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *coordinator );
 
   signals:
