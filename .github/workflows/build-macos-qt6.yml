@@ -140,11 +140,7 @@ jobs:
 
           STRATA_VERSION_OPT=""
           if [[ "${{ env.IS_STRATA_RELEASE }}" == "true" ]]; then
-            if [[ "${{ github.event_name }}" == "release" ]]; then
-              STRATA_TAG="${{ github.event.release.tag_name }}"
-            else
-              STRATA_TAG="${GITHUB_REF#refs/tags/}"
-            fi
+            STRATA_TAG="${GITHUB_REF#refs/tags/}"
             STRATA_VERSION_OPT="-DSTRATA_VERSION=${STRATA_TAG#strata-v}"
           fi
 
@@ -255,6 +251,32 @@ jobs:
       - name: Archive app
         run: |
           gtar -cpvzf strata-app-${{steps.workflow-artifact-ids.outputs.filename}}-${{ matrix.triplet }}.tar.gz ./build/_CPack_Packages/Darwin/External/*/*.app
+
+      - name: Sign, notarize and staple DMG
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        env:
+          MACOS_DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_APPLE_TEAM_ID: ${{ secrets.MACOS_APPLE_TEAM_ID }}
+          MACOS_APPLE_APP_PASSWORD: ${{ secrets.MACOS_APPLE_APP_PASSWORD }}
+        run: |
+          DMGS=(./*.dmg)
+          test "${#DMGS[@]}" = 1
+          DMG_FILE="${DMGS[0]}"
+          codesign --force --timestamp --sign "$MACOS_DEVELOPER_ID" "$DMG_FILE"
+          codesign --verify --strict "$DMG_FILE"
+          xcrun notarytool submit "$DMG_FILE" \
+            --apple-id "$MACOS_APPLE_ID" \
+            --team-id "$MACOS_APPLE_TEAM_ID" \
+            --password "$MACOS_APPLE_APP_PASSWORD" \
+            --wait --output-format json > notary-result.json
+          jq -e '.status == "Accepted"' notary-result.json
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$DMG_FILE"; then break; fi
+            if [ "$attempt" -eq 5 ]; then exit 1; fi
+            sleep 30
+          done
+          xcrun stapler validate "$DMG_FILE"
 
       - name: 📤 Upload app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -564,32 +586,6 @@ jobs:
           name: strata-${{steps.workflow-artifact-ids.outputs.filename}}-dmg
           path: |
             *.dmg
-
-      - name: Sign, notarize and staple DMG
-        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
-        env:
-          MACOS_DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
-          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
-          MACOS_APPLE_TEAM_ID: ${{ secrets.MACOS_APPLE_TEAM_ID }}
-          MACOS_APPLE_APP_PASSWORD: ${{ secrets.MACOS_APPLE_APP_PASSWORD }}
-        run: |
-          DMGS=(./*.dmg)
-          test "${#DMGS[@]}" = 1
-          DMG_FILE="${DMGS[0]}"
-          codesign --force --timestamp --sign "$MACOS_DEVELOPER_ID" "$DMG_FILE"
-          codesign --verify --strict "$DMG_FILE"
-          xcrun notarytool submit "$DMG_FILE" \
-            --apple-id "$MACOS_APPLE_ID" \
-            --team-id "$MACOS_APPLE_TEAM_ID" \
-            --password "$MACOS_APPLE_APP_PASSWORD" \
-            --wait --output-format json > notary-result.json
-          jq -e '.status == "Accepted"' notary-result.json
-          for attempt in 1 2 3 4 5; do
-            if xcrun stapler staple "$DMG_FILE"; then break; fi
-            if [ "$attempt" -eq 5 ]; then exit 1; fi
-            sleep 30
-          done
-          xcrun stapler validate "$DMG_FILE"
 
       - name: Upload release assets
         if: ${{ env.IS_STRATA_RELEASE == 'true' }}
