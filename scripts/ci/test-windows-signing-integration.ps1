@@ -14,13 +14,18 @@ function Assert-Fails {
   throw "Expected failure: $Expected"
 }
 try {
+  Write-Host "Compile unsigned PE fixture"
   New-Item -ItemType Directory "$root/payload" | Out-Null
   $library = "$root/payload/OpenCL.dll"
   Add-Type -TypeDefinition 'public class StrataSignatureFixture { public static int Value() { return 42; } }' -OutputAssembly $library
   Assert-Fails { & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode verify -Path $library } 'Unsigned or invalid'
+  Write-Host "Create ephemeral test certificate"
   $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Strata CI test $([guid]::NewGuid())" -CertStoreLocation Cert:\CurrentUser\My
   Export-Certificate -Cert $certificate -FilePath "$root/test.cer" | Out-Null
-  Import-Certificate -FilePath "$root/test.cer" -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+  # LocalMachine avoids the interactive CurrentUser root-store consent dialog.
+  # GitHub hosted Windows runners are isolated administrators; cleanup is below.
+  Import-Certificate -FilePath "$root/test.cer" -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+  Write-Host "Sign fixture and verify installed trust"
   Set-AuthenticodeSignature -FilePath $library -Certificate $certificate -HashAlgorithm SHA256 | Out-Null
   Copy-Item $library "$root/payload/module.pyd"
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode verify -Path "$root/payload" -Recurse -ReportPath "$root/report.json"
@@ -39,7 +44,7 @@ try {
   Write-Host 'Real Windows Authenticode integration tests passed.'
 } finally {
   if ($certificate) {
-    Remove-Item "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue
+    Remove-Item "Cert:\LocalMachine\Root\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue
     Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $root -Recurse -Force

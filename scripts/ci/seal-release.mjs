@@ -1,8 +1,8 @@
 import { mkdtemp, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkoutSha, downloadRelease, ensureDraft, readRelease, repository, run, sha256, uploadFile } from './release-github.mjs';
-import { platformAssets, platformPatterns, readJson, validateWindowsReport } from './release-integrity.mjs';
+import { checkoutSha, downloadRelease, ensureDraft, run, sha256, uploadFile } from './release-github.mjs';
+import { platformAssets, platformPatterns, readJson, sealedAssetNames, validateWindowsReport } from './release-integrity.mjs';
 
 const [tag] = process.argv.slice(2);
 const release = ensureDraft(tag);
@@ -33,6 +33,7 @@ if (!/^https:\/\/github\.com\/francemazzi\/strata\/\.github\/workflows\/sign-rel
   throw new Error('Sealing requires the trusted GitHub signing workflow.');
 }
 const manifest = { tag, sourceSha: checkoutSha(), signerIdentity: identity, artifacts: [...files.values()].sort((a, b) => a.name.localeCompare(b.name)) };
+sealedAssetNames(manifest);
 const manifestPath = join(directory, 'release-manifest.json');
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 await uploadFile(tag, manifestPath);

@@ -31,7 +31,7 @@ export function validateWindowsReport(report, assets, sourceSha) {
   }
 }
 
-export const acceptanceScenarios = ['install', 'launch', 'restart', 'portable', 'uninstall', 'upgrade-preserves-data', 'project', 'raster-vector', 'processing', 'pyqgis', 'opencl'];
+export const acceptanceScenarios = ['install', 'launch', 'restart', 'portable', 'uninstall', 'upgrade-preserves-data', 'project', 'raster-vector', 'processing', 'pyqgis', 'opencl', 'opencl-gpu', 'opencl-no-platform'];
 
 export function validateAcceptance(report, manifest) {
   if (report.tag !== manifest.tag || report.sourceSha !== manifest.sourceSha) throw new Error('Acceptance refers to another release.');
@@ -42,10 +42,33 @@ export function validateAcceptance(report, manifest) {
   for (const scenario of acceptanceScenarios) {
     if (report.scenarios?.[scenario] !== 'passed') throw new Error(`Acceptance scenario incomplete: ${scenario}`);
   }
-  for (const artifact of manifest.artifacts.filter(file => /-win64\.(exe|zip)$/.test(file.name))) {
+  for (const artifact of platformAssets(manifest.artifacts, 'windows')) {
     if (!report.packages?.some(file => file.name === artifact.name && file.sha256 === artifact.sha256)) throw new Error('Acceptance package hash mismatch.');
   }
   if (report.colleagueConfirmed !== true) throw new Error('The affected colleague has not confirmed resolution.');
+}
+
+export function sealedAssetNames(manifest) {
+  if (!Array.isArray(manifest.artifacts)) throw new Error('Missing sealed artifact inventory.');
+  const names = manifest.artifacts.map(file => file.name);
+  if (new Set(names).size !== names.length || manifest.artifacts.some(file =>
+    !/^[A-Za-z0-9._-]+$/.test(file.name) || !/^[a-f0-9]{64}$/.test(file.sha256))) {
+    throw new Error('Invalid sealed artifact inventory.');
+  }
+  const binaries = Object.keys(platformPatterns).flatMap(platform => platformAssets(manifest.artifacts, platform)).map(file => file.name);
+  const receipts = ['windows-verification.json', ...Object.keys(platformPatterns).map(platform => `build-${platform}.json`)];
+  if (names.length !== binaries.length + receipts.length || receipts.some(name => !names.includes(name))) {
+    throw new Error('Unexpected or missing sealed artifacts.');
+  }
+  const targets = [...binaries, 'release-manifest.json'];
+  return [...names, 'release-manifest.json', ...targets.flatMap(name => [`${name}.sha256`, `${name}.sigstore.json`])];
+}
+
+export function validateReleaseSnapshot(assets, expected) {
+  if (assets.length !== expected.length || new Set(assets.map(asset => asset.name)).size !== assets.length ||
+      expected.some(file => !assets.some(asset => asset.name === file.name && asset.digest === `sha256:${file.sha256}`))) {
+    throw new Error('Remote release assets changed or include unverified files.');
+  }
 }
 
 export async function readJson(path) {

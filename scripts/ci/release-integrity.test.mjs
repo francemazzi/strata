@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertDraft, assertUpload, validateTag } from './release-github.mjs';
-import { acceptanceScenarios, platformAssets, validateAcceptance, validateWindowsReport } from './release-integrity.mjs';
+import { acceptanceScenarios, platformAssets, sealedAssetNames, validateAcceptance, validateReleaseSnapshot, validateWindowsReport } from './release-integrity.mjs';
 const hash = 'a'.repeat(64);
 const sourceSha = 'b'.repeat(40);
 const artifacts = ['Strata-1.4.4-win64.exe', 'Strata-1.4.4-win64.zip'].map(name => ({ name, sha256: hash, digest: `sha256:${hash}` }));
@@ -55,5 +55,23 @@ test('publication accepts only complete Windows 11 SAC evidence', () => {
     r => r.scenarios.opencl = 'pending', r => r.sourceSha = 'old', r => r.tester = '']) {
     const report = acceptance(); mutate(report);
     assert.throws(() => validateAcceptance(report, manifest));
+  }
+});
+
+test('publication checks the entire sealed inventory including signatures', () => {
+  const full = { artifacts: [...artifacts, ...['Strata.dmg', 'Strata.AppImage', 'windows-verification.json',
+    'build-windows.json', 'build-macos.json', 'build-linux.json'].map(name => ({ name, sha256: hash }))] };
+  const names = sealedAssetNames(full);
+  assert.equal(names.length, 19);
+  const expected = names.map(name => ({ name, sha256: hash }));
+  const remote = names.map(name => ({ name, digest: `sha256:${hash}` }));
+  validateReleaseSnapshot(remote, expected);
+  assert.throws(() => validateReleaseSnapshot([...remote, { name: 'untested.exe', digest: `sha256:${hash}` }], expected));
+  const changed = structuredClone(remote);
+  changed.find(file => file.name === 'release-manifest.json.sigstore.json').digest = `sha256:${'c'.repeat(64)}`;
+  assert.throws(() => validateReleaseSnapshot(changed, expected));
+  for (const files of [full.artifacts.slice(1), [...full.artifacts, full.artifacts[0]],
+    [...full.artifacts, { name: 'unexpected.exe', sha256: hash }]]) {
+    assert.throws(() => sealedAssetNames({ artifacts: files }));
   }
 });

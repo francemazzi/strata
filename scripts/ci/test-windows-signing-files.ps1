@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/windows-signing-files.ps1"
+$unsignedImplementation = ${function:Invoke-UnsignedFile}
 $script:Records = [System.Collections.Generic.List[object]]::new()
 $script:SignatureStatus = 'Valid'
 function Get-AuthenticodeSignature {
@@ -33,6 +34,15 @@ try {
   Assert-Fails { Invoke-SignableFile $file 'OpenCL.dll' } 'Existing signature is invalid'
   $script:SignatureStatus = 'NotSigned'
   Assert-Fails { Invoke-SignableFile $file 'OpenCL.dll' -OnlyVerify } 'Unsigned or invalid'
+  $script:SignTool = Join-Path $root 'failed-signer.ps1'
+  Set-Content $script:SignTool '$global:LASTEXITCODE = 1'
+  $previousCache = $env:STRATA_SIGNED_CACHE
+  $env:STRATA_SIGNED_CACHE = $null
+  try {
+    Assert-Fails { & $unsignedImplementation $file } 'SignTool failed'
+    Set-Content $script:SignTool '$global:LASTEXITCODE = 0'
+    Assert-Fails { & $unsignedImplementation $file } 'Signature verification failed'
+  } finally { $env:STRATA_SIGNED_CACHE = $previousCache }
   $bytes[128 + 24 + 112 + 32] = 1
   [System.IO.File]::WriteAllBytes($file, $bytes)
   Assert-Fails { Invoke-SignableFile $file 'OpenCL.dll' } 'Existing signature is invalid'
@@ -50,5 +60,5 @@ try {
   foreach ($name in $required) { $originalEnv[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $null) }
   try { Assert-Fails { & "$PSScriptRoot/assert-windows-signing.ps1" } 'Missing configuration' }
   finally { foreach ($name in $required) { [Environment]::SetEnvironmentVariable($name, $originalEnv[$name]) } }
-  Write-Host 'Windows signing policy tests passed (9 scenarios).'
+  Write-Host 'Windows signing policy tests passed (11 scenarios).'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

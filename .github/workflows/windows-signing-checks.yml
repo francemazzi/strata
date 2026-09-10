@@ -11,6 +11,7 @@ permissions:
 jobs:
   verification:
     runs-on: windows-2022
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -21,5 +22,6 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/test-windows-signing-files.ps1
       - name: Verify real Authenticode signatures without Azure credentials
+        timeout-minutes: 5
         shell: powershell
         run: ./scripts/ci/test-windows-signing-integration.ps1

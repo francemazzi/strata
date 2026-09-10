@@ -88,6 +88,9 @@ After completing the scenarios, run `collect-windows-acceptance.ps1` on the test
 machine with `-ManifestPath`, `-Installer`, `-Zip`, `-InstalledRoot`, `-PortableRoot`
 and `-TestStartedAt` (ISO timestamp). It checks Windows/SAC state, package hashes
 and CodeIntegrity logs and asks the tester to confirm each performed scenario.
+The clean test session must contain no enforcement event 3077, including temporary
+NSIS paths. If unrelated software creates a block, investigate and repeat the
+session on a clean test machine; do not discard events by installation path.
 It produces `windows-acceptance.json`; it does not manufacture test success.
 Organization-managed policy exceptions remain an IT decision.
 
@@ -101,7 +104,7 @@ node scripts/ci/publish-release.mjs strata-v1.4.4 windows-acceptance.json docs/r
 
 This verifies the sealed manifest and all binary Sigstore bundles, the automatic
 Windows report and manual acceptance, then rechecks remote hashes and the tag
-before publishing. It cannot publish with absent or incomplete acceptance.
+before publishing, including signatures, checksums and unexpected assets. It cannot publish with absent or incomplete acceptance.
 Publication does not trigger rebuilding any platform.
 
 If a gate is missing, leave the draft unpublished. If a regression is found after
