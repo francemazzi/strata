@@ -92,7 +92,7 @@ function Invoke-SignablePath {
     Invoke-SignableFile $root.FullName ($Prefix + $root.Name) -OnlyVerify:$OnlyVerify
     return
   }
-  $files = @(Get-ChildItem -LiteralPath $root.FullName -File -Recurse:$Recursive | Sort-Object FullName)
+  $files = @(Get-ChildItem -LiteralPath $root.FullName -File -Force -Recurse:$Recursive | Sort-Object FullName)
   foreach ($file in $files) {
     $relative = $file.FullName.Substring($root.FullName.TrimEnd('\', '/').Length + 1).Replace('\', '/')
     Invoke-SignableFile $file.FullName ($Prefix + $relative) -OnlyVerify:$OnlyVerify

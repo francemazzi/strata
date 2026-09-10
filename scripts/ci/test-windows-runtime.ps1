@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$Root)
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/windows-process.ps1"
 $python = Join-Path $Root 'bin/python.exe'
 $qgis = @(Get-ChildItem -LiteralPath $Root -Filter '_core*.pyd' -Recurse -File |
   Where-Object { $_.Directory.Name -eq 'qgis' })
@@ -56,9 +57,7 @@ print('Windows runtime smoke passed')
   $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ('strata-runtime-' + [guid]::NewGuid().ToString('N') + '.py')
   $code | Set-Content -LiteralPath $scriptPath -Encoding utf8
   try {
-    $process = Start-Process $python -ArgumentList ('"' + $scriptPath + '"') -PassThru -NoNewWindow
-    if (-not $process.WaitForExit(180000)) { $process.Kill(); throw 'Windows runtime smoke timed out.' }
-    if ($process.ExitCode -ne 0) { throw 'Bundled Windows runtime smoke failed.' }
+    Invoke-WindowsProcess $python ('"' + $scriptPath + '"')
   } finally { Remove-Item -LiteralPath $scriptPath }
 } finally {
   foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $original[$name]) }

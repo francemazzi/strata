@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/windows-process.ps1"
 $root = Join-Path $env:RUNNER_TEMP ('strata-authenticode-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $root | Out-Null
 $tool = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
@@ -14,6 +15,8 @@ function Assert-Fails {
   throw "Expected failure: $Expected"
 }
 try {
+  Invoke-WindowsProcess $env:ComSpec '/c exit 0'
+  Assert-Fails { Invoke-WindowsProcess $env:ComSpec '/c exit 7' } 'exited with 7'
   Write-Host "Compile unsigned PE fixture"
   New-Item -ItemType Directory "$root/payload" | Out-Null
   $library = "$root/payload/OpenCL.dll"

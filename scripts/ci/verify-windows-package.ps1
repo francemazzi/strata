@@ -1,6 +1,7 @@
 param([Parameter(Mandatory)][string]$BuildDirectory, [Parameter(Mandatory)][string]$ReportPath)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/windows-signing-files.ps1"
+. "$PSScriptRoot/windows-process.ps1"
 $packages = @(Get-ChildItem $BuildDirectory -File | Where-Object { $_.Name -match '-win64\.(exe|zip)$' })
 if ($packages.Count -ne 2) { throw 'Exactly one Windows installer and one ZIP are required.' }
 $installer = @($packages | Where-Object Extension -eq '.exe')
@@ -11,12 +12,6 @@ $installed = Join-Path $workspace 'installed'
 $expanded = Join-Path $workspace 'portable'
 New-Item -ItemType Directory -Path $workspace | Out-Null
 
-function Invoke-InstallerProcess {
-  param([string]$Executable, [string]$Arguments)
-  $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru
-  if (-not $process.WaitForExit(180000)) { $process.Kill(); throw "Installer timed out: $Executable" }
-  if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode): $Executable" }
-}
 
 try {
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode package -PackageFiles $packages.FullName -VerifyOnly -ReportPath "$workspace/packages.json"
@@ -27,7 +22,7 @@ try {
   if ((Get-PeInfo $roots[0].FullName).Machine -ne 0x8664) { throw 'OpenCL.dll must be x64.' }
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode verify -Path $portable -Recurse -ReportPath "$workspace/portable.json"
   & "$PSScriptRoot/test-windows-runtime.ps1" -Root $portable
-  Invoke-InstallerProcess $installer[0].FullName "/S /D=$installed"
+  Invoke-WindowsProcess $installer[0].FullName "/S /D=$installed"
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode verify -Path $installed -Recurse -ReportPath "$workspace/installed.json"
   $portableReport = Get-Content "$workspace/portable.json" -Raw | ConvertFrom-Json
   $installedReport = Get-Content "$workspace/installed.json" -Raw | ConvertFrom-Json
@@ -37,7 +32,7 @@ try {
   }
   if (-not (Test-Path "$installed/Uninstall.exe")) { throw 'Signed uninstaller is missing.' }
   & "$PSScriptRoot/test-windows-runtime.ps1" -Root $installed
-  Invoke-InstallerProcess "$installed/Uninstall.exe" "/S _?=$installed"
+  Invoke-WindowsProcess "$installed/Uninstall.exe" "/S _?=$installed"
   $report = [ordered]@{
     result = 'passed'; sourceSha = (& git rev-parse HEAD).Trim()
     smartAppControlTested = $false
