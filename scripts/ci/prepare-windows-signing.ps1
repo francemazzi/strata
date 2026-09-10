@@ -185,6 +185,8 @@ Add-CiEnvironment -Name "STRATA_SIGNTOOL_PATH" -Value $signToolPath
 Add-CiEnvironment -Name "STRATA_AZURE_CODESIGN_DLIB_PATH" -Value $dlibPath
 Add-CiEnvironment -Name "STRATA_AZURE_CODESIGN_METADATA_PATH" -Value $MetadataPath
 Add-CiEnvironment -Name "STRATA_WINDOWS_CODESIGN_READY" -Value "true"
+# Reuse identical signed bytes between the NSIS and ZIP staging trees.
+Add-CiEnvironment -Name "STRATA_SIGNED_CACHE" -Value (Join-Path $ToolsRoot 'signed-files')
 
 Add-CiOutput -Name "signtool" -Value $signToolPath
 Add-CiOutput -Name "dlib" -Value $dlibPath

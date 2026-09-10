@@ -1,235 +1,44 @@
 name: Sign release assets
-
 on:
-  push:
-    branches:
-      - master
-    tags:
-      - 'strata-v*'
   workflow_run:
     workflows:
       - '🍎 Build - MacOS Qt6'
       - '🪟 Windows Qt6'
       - '🐧 Build AppImage (Linux)'
-    types:
-      - completed
+      - '🪟 Windows Release Manual'
+      - 'Package macOS release from artifacts'
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to sign, for example strata-v1.3.0
+        description: Explicit draft release tag to seal
         required: true
         type: string
-
 permissions:
   contents: write
   id-token: write
-
 concurrency:
-  group: sign-release-assets-v2
+  group: seal-strata-${{ inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
-
 jobs:
-  sign-release-assets:
-    name: Sign release assets
+  seal:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+       startsWith(github.event.workflow_run.head_branch, 'strata-v'))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      TAG: ${{ inputs.tag }}
-
+    timeout-minutes: 30
     steps:
-      - name: Resolve release tag
-        id: resolve-tag
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG="${TAG:-}"
-          if [ -z "${TAG}" ]; then
-            if [ "${{ github.event_name }}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
-              TAG="${GITHUB_REF#refs/tags/}"
-            elif [ "${{ github.event_name }}" = "workflow_run" ]; then
-              HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
-              if [[ "${HEAD_BRANCH}" == strata-v* ]]; then
-                TAG="${HEAD_BRANCH}"
-              else
-                TAG=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1 --json tagName,isDraft --jq '.[] | select(.isDraft == false) | .tagName' | head -1)
-                if [ -z "${TAG}" ]; then
-                  echo "No published release found to sign after workflow run on ${HEAD_BRANCH}."
-                  echo "skip=true" >> "$GITHUB_OUTPUT"
-                  exit 0
-                fi
-                echo "Build finished on ${HEAD_BRANCH}; signing latest release ${TAG}."
-              fi
-            else
-              TAG=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1 --json tagName,isDraft --jq '.[] | select(.isDraft == false) | .tagName' | head -1)
-            fi
-          fi
-
-          case "${TAG}" in
-            strata-v*) ;;
-            *)
-              echo "::error::Release tag must start with strata-v: ${TAG}"
-              exit 1
-              ;;
-          esac
-
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: ${TAG}"
-
-      - name: Wait for release binaries
-        if: steps.resolve-tag.outputs.skip != 'true' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG="${{ steps.resolve-tag.outputs.tag }}"
-
-          for attempt in $(seq 1 120); do
-            mapfile -t asset_lines < <(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
-            assets="$(printf '%s\n' "${asset_lines[@]}")"
-
-            missing=0
-            for spec in '\.AppImage$' '\.dmg$' '\.exe$' '-win64\.zip$'; do
-              base=""
-              while IFS= read -r asset; do
-                [ -n "${asset}" ] || continue
-                if [[ "${asset}" =~ ${spec} ]]; then
-                  base="${asset}"
-                  break
-                fi
-              done <<< "${assets}"
-              if [ -z "${base}" ]; then
-                echo "missing:${spec}"
-                missing=1
-              else
-                echo "present:${base}"
-              fi
-            done
-
-            if [ "${missing}" -eq 0 ]; then
-              echo "All required release binaries are present."
-              exit 0
-            fi
-
-            echo "Attempt ${attempt}/120: waiting for missing release binaries on ${TAG}"
-            sleep 300
-          done
-
-          echo "::error::Timed out waiting for release binaries on ${TAG}"
-          exit 1
-
-      - name: Validate release tag
-        if: steps.resolve-tag.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.resolve-tag.outputs.tag }}"
-          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
-          echo "TAG=${TAG}" >> "$GITHUB_ENV"
-
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - name: Install cosign
-        if: steps.resolve-tag.outputs.skip != 'true'
         uses: sigstore/cosign-installer@v3.9.2
-
-      - name: Download release assets
-        if: steps.resolve-tag.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p release-assets release-signatures
-          gh release download "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir release-assets \
-            --clobber
-
-          find release-assets -maxdepth 1 -type f -print | sort
-
-      - name: Sign and verify release assets
-        if: steps.resolve-tag.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t release_assets < <(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
-
-          pick_first() {
-            local pattern="$1"
-            find release-assets -maxdepth 1 -type f -printf '%f\n' | sort | grep -E -- "${pattern}" | grep -Ev -- '\.(sha256|sigstore\.json)$' | head -1 || true
-          }
-
-          needs_signature() {
-            local base="$1"
-            printf '%s\n' "${release_assets[@]}" | grep -qx "${base}.sigstore.json"
-          }
-
-          targets=()
-          for pattern in '\.AppImage$' '\.dmg$' '\.exe$' '-win64\.zip$'; do
-            base="$(pick_first "${pattern}")"
-            if [ -z "${base}" ]; then
-              echo "Skipping missing release binary matching ${pattern}"
-              continue
-            fi
-            if needs_signature "${base}"; then
-              echo "Already signed: ${base}"
-              continue
-            fi
-            targets+=("release-assets/${base}")
-          done
-
-          if [ "${#targets[@]}" -eq 0 ]; then
-            echo "All release binaries already have Sigstore bundles."
-            exit 0
-          fi
-
-          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
-
-          for file in "${targets[@]}"; do
-            base="$(basename "${file}")"
-            checksum="release-signatures/${base}.sha256"
-            bundle="release-signatures/${base}.sigstore.json"
-
-            (
-              cd release-assets
-              sha256sum "${base}"
-            ) > "${checksum}"
-
-            cosign sign-blob --yes \
-              --bundle "${bundle}" \
-              "${file}"
-
-            (
-              cd release-assets
-              sha256sum -c "../${checksum}"
-            )
-
-            cosign verify-blob \
-              --bundle "${bundle}" \
-              --certificate-identity "${identity}" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              "${file}"
-          done
-
-          {
-            echo "### Signed release assets"
-            for file in "${targets[@]}"; do
-              echo "- $(basename "${file}")"
-            done
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload signature assets
-        if: steps.resolve-tag.outputs.skip != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -d release-signatures ] || [ -z "$(ls -A release-signatures 2>/dev/null || true)" ]; then
-            echo "No new signature assets to upload."
-            exit 0
-          fi
-
-          gh release upload "${TAG}" release-signatures/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+      - name: Seal complete draft without publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+        run: node scripts/ci/seal-release.mjs "$RELEASE_TAG"

@@ -58,6 +58,14 @@ set(CPACK_PACKAGE_INSTALL_DIRECTORY "Strata ${COMPLETE_VERSION}")
 set(CPACK_PACKAGE_EXECUTABLES "${QGIS_APP_NAME}" "Strata")
 set(CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_SOURCE_DIR}/README.md")
 
+if(WIN32 AND STRATA_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  # Keep the existing installation directory/registry identity for upgrades.
+  # QGIS version constants must continue to describe the QGIS ABI.
+  set(CPACK_PACKAGE_INSTALL_REGISTRY_KEY "Strata ${COMPLETE_VERSION}")
+  set(CPACK_PACKAGE_VERSION "${STRATA_VERSION}")
+  set(CPACK_PACKAGE_FILE_NAME "Strata-${STRATA_VERSION}-win64")
+endif()
+
 if(CREATE_NSIS)
   list(APPEND CPACK_GENERATOR "NSIS")
   # The win_build/sidebar.bmp referenced by upstream QGIS does not exist in
@@ -76,6 +84,14 @@ if(CREATE_ZIP)
 endif()
 
 if(WIN32 AND STRATA_WINDOWS_CODE_SIGN)
+  if(CREATE_NSIS)
+    if(NOT EXISTS "$ENV{STRATA_NSIS_EXECUTABLE}")
+      message(FATAL_ERROR "Signed NSIS plugin toolchain is required for release packaging")
+    endif()
+    set(CPACK_NSIS_EXECUTABLE "$ENV{STRATA_NSIS_EXECUTABLE}")
+    set(CPACK_NSIS_DEFINES
+      "!uninstfinalize '\"powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"${CMAKE_SOURCE_DIR}/scripts/ci/sign-windows-artifacts.ps1\" -Mode staging -Path \"%1\"' = 0")
+  endif()
   configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/StrataWindowsCodeSignPreBuild.cmake.in"
     "${CMAKE_BINARY_DIR}/StrataWindowsCodeSignPreBuild.cmake"

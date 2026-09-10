@@ -19,8 +19,11 @@ foreach(_strata_sign_env STRATA_SIGNTOOL_PATH STRATA_AZURE_CODESIGN_DLIB_PATH ST
 endforeach()
 
 message(STATUS "Signing/verifying Windows package files: ${CPACK_PACKAGE_FILES}")
+set(_strata_package_manifest "@CMAKE_BINARY_DIR@/strata-signing-packages.txt")
+string(REPLACE ";" "\n" _strata_package_lines "${CPACK_PACKAGE_FILES}")
+file(WRITE "${_strata_package_manifest}" "${_strata_package_lines}\n")
 execute_process(
-  COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${_strata_sign_script}" -Mode package -PackageFiles ${CPACK_PACKAGE_FILES}
+  COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${_strata_sign_script}" -Mode package -PackageManifest "${_strata_package_manifest}"
   RESULT_VARIABLE _strata_sign_result
 )
 

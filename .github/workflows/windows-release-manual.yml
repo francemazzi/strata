@@ -31,11 +31,11 @@ permissions:
 jobs:
   build:
     name: build and upload Windows release asset
+    environment: windows-release
     runs-on: windows-2022
     timeout-minutes: 360
     env:
-      IS_STRATA_RELEASE: ${{ startsWith(inputs.release_tag, 'strata-v') }}
-      WINDOWS_CODESIGN_CONFIGURED: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && vars.AZURE_ARTIFACT_SIGNING_ENDPOINT != '' && vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME != '' && vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE_NAME != '' }}
+      IS_STRATA_RELEASE: 'true'
 
     steps:
       - name: 🐣 Checkout
@@ -44,6 +44,23 @@ jobs:
           ref: ${{ inputs.ref_to_build }}
           fetch-depth: 2
           persist-credentials: false
+
+      - name: Require signed draft release
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          AZURE_ARTIFACT_SIGNING_CERT_PROFILE_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE_NAME }}
+        run: |
+          ./scripts/ci/assert-windows-signing.ps1
+          node scripts/ci/release-assets.mjs draft $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Release target validation failed.' }
 
       - name: 🔨 Uninstall system cmake
         shell: bash
@@ -119,7 +136,7 @@ jobs:
         shell: bash
 
       - name: 🔐 Azure login for Windows code signing
-        if: ${{ env.IS_STRATA_RELEASE == 'true' && env.WINDOWS_CODESIGN_CONFIGURED == 'true' }}
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
         uses: azure/login@2dd0bbf4064d5a1812889dc200bb8eed2597f82a # v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -127,7 +144,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: 🔏 Prepare Windows code signing tools
-        if: ${{ env.IS_STRATA_RELEASE == 'true' && env.WINDOWS_CODESIGN_CONFIGURED == 'true' }}
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
         shell: powershell
         env:
           AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -135,11 +152,12 @@ jobs:
           AZURE_ARTIFACT_SIGNING_CERT_PROFILE_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE_NAME }}
         run: .\scripts\ci\prepare-windows-signing.ps1
 
-      - name: ⚠️ Windows code signing not configured
-        if: ${{ env.IS_STRATA_RELEASE == 'true' && env.WINDOWS_CODESIGN_CONFIGURED != 'true' }}
-        shell: bash
+      - name: Verify signing service and prepare signed NSIS plugins
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        shell: powershell
         run: |
-          echo "::warning::Windows code signing is disabled because Azure signing secrets/variables are not configured. Release assets will be uploaded unsigned."
+          ./scripts/ci/test-windows-signing-service.ps1
+          ./scripts/ci/prepare-nsis-signing.ps1
 
       - name: 🌱 Install dependencies and generate project files
         shell: bash
@@ -156,11 +174,7 @@ jobs:
             APP_NAME_OPT="-DQGIS_APP_NAME=Strata"
             NSIS_OPT="-DCREATE_NSIS=TRUE"
             STRATA_VERSION_OPT="-DSTRATA_VERSION=${RELEASE_TAG#strata-v}"
-            if [[ "${WINDOWS_CODESIGN_CONFIGURED}" == "true" ]]; then
-              CODE_SIGN_OPT="-DSTRATA_WINDOWS_CODE_SIGN=ON"
-            else
-              CODE_SIGN_OPT=""
-            fi
+            CODE_SIGN_OPT='-DSTRATA_WINDOWS_CODE_SIGN=ON'
           else
             STRATA_VERSION_OPT=""
             CODE_SIGN_OPT=""
@@ -207,10 +221,10 @@ jobs:
                 -D FLEX_EXECUTABLE="${SOURCE_DIR}/win_flex.exe" \
                 -D BISON_EXECUTABLE="${SOURCE_DIR}/win_bison.exe" \
                 -D WITH_QTWEBENGINE=OFF \
-                "${VCPKG_OPTS[@]}" || true
+                "${VCPKG_OPTS[@]}"
 
           if [ -z "${WINDOWS_SDK_PATH:-}" ]; then
-            cmake -D VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:/src" "${BUILD_DIR}" || true
+            cmake -D VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:/src" "${BUILD_DIR}"
           fi
 
       - name: 🌋 Build
@@ -230,15 +244,10 @@ jobs:
           }
           python scripts/ci/verify_pyqgis_bundle.py --platform windows "$($zip.FullName)"
 
-      - name: 🔎 Verify signed Windows release artifacts
-        if: ${{ env.IS_STRATA_RELEASE == 'true' && env.WINDOWS_CODESIGN_CONFIGURED == 'true' }}
+      - name: Verify installed and portable Windows packages
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
         shell: powershell
-        run: |
-          $files = @(Get-ChildItem -Path "${{ github.workspace }}\build" -File | Where-Object { $_.Name -like "*.exe" -or $_.Name -like "*-win64.zip" } | Select-Object -ExpandProperty FullName)
-          if ($files.Count -eq 0) {
-            throw "No Windows release artifacts found under build/."
-          }
-          .\scripts\ci\sign-windows-artifacts.ps1 -Mode package -PackageFiles $files -VerifyOnly
+        run: ./scripts/ci/verify-windows-package.ps1 -BuildDirectory build -ReportPath build/windows-verification.json
 
       - name: 📤 Upload bundle artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -249,12 +258,12 @@ jobs:
             build/*.exe
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          files: |
-            build/*-win64.zip
-            build/*.exe
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" windows build/*-win64.exe build/*-win64.zip build/windows-verification.json
 
       - name: 📑 Upload dep build logs
         if: failure()
@@ -263,3 +272,14 @@ jobs:
           name: build-logs-windows-${{ inputs.release_tag }}
           path: |
             C:/src/**/*.log
+
+      - name: Upload Windows verification evidence
+        if: ${{ always() && env.IS_STRATA_RELEASE == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-verification-evidence
+          path: |
+            build/windows-verification.json
+            ${{ runner.temp }}/signing-probe.json
+            ${{ runner.temp }}/nsis-signatures.json
+            ${{ runner.temp }}/strata-package-*/*.json

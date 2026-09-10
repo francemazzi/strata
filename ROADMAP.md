@@ -111,10 +111,12 @@ Cosa evitare:
 - [x] Pipeline release multi-piattaforma su tag `strata-v`* (`release-strata.yml`) + fix macOS PyQGIS (ignore user site-packages)
 - [ ] Installer firmati
   - [x] macOS sign + notarize in CI (`build-macos-qt6.yml`)
-  - [x] Windows code signing via Azure Artifact Signing (`windows-qt6.yml`, `windows-release-manual.yml`)
+  - [x] Windows code signing integration via Azure Artifact Signing (`windows-qt6.yml`, `windows-release-manual.yml`); production configuration and acceptance are separate gates
+  - [ ] Windows 1.4.4: mandatory Authenticode, installed-payload verification, signed NSIS helpers and immutable draft releases — implementation under verification; see `docs/releases/windows-signing.md`
   - [x] cosign release assets in CI
   - [ ] Checksum SHA256 pubblici nelle release
   - [ ] Dry-run firma Windows con account Azure configurato
+  - [ ] Windows 11 Smart App Control On: installer, portable, upgrade and colleague acceptance on exact release hashes
 - [ ] Auto-update in-app
   - [x] Check versione + banner welcome (`qgsversioninfo.cpp`, `qgswelcomescreen.cpp`)
   - [ ] Download/install in-app
