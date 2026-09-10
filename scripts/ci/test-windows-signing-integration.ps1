@@ -49,3 +49,6 @@ try {
   }
   Remove-Item -LiteralPath $root -Recurse -Force
 }
+
+# Expected failing native verification commands must not become the CI step exit.
+$global:LASTEXITCODE = 0

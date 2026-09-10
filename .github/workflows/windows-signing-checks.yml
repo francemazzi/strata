@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
   push:
-    branches: [master, 'codex/windows-signing-1.4.4']
+    branches: [master]
     paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
   workflow_dispatch:
 permissions:

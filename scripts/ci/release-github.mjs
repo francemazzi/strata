@@ -19,7 +19,12 @@ export function validateTag(tag) {
 
 export function tagSha(tag) {
   validateTag(tag);
-  return run('gh', ['api', `repos/${repository}/commits/${tag}`, '--jq', '.sha']);
+  let object = JSON.parse(run('gh', ['api', `repos/${repository}/git/ref/tags/${tag}`])).object;
+  for (let depth = 0; depth < 8 && object.type === 'tag'; depth++) {
+    object = JSON.parse(run('gh', ['api', `repos/${repository}/git/tags/${object.sha}`])).object;
+  }
+  if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw new Error('Release tag must resolve to a commit.');
+  return object.sha;
 }
 
 export function checkoutSha() { return run('git', ['rev-parse', 'HEAD']); }
