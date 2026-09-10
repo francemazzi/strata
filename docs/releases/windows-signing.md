@@ -41,7 +41,10 @@ verified source; the pipeline will not silently replace that signature.
 The hotfix starts at released commit `e0bc105616a3b11277297fb5898d646431417fa3`.
 Only release/signing changes belong in the candidate; keep ongoing feature work in
 its existing checkout. The local `strata-v1.4.3` tag was divergent when investigated.
-Use an immutable new `strata-v1.4.4` tag on the completed hotfix commit.
+Merge the release-workflow corrections into `master` before tagging, so the sole
+sealing workflow runs from the corrected default branch. Use an immutable new
+`strata-v1.4.4` tag on the completed hotfix commit, without merging feature changes
+from `master` into the release candidate.
 
 Tag-triggered builds prepare a draft and upload platform receipts bound to the
 source commit and SHA-256 hashes. Windows additionally uploads
@@ -115,3 +118,21 @@ immediate SmartScreen reputation or override a company's application-control pol
 Sources: [Azure setup](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart),
 [OIDC](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect),
 [Smart App Control tests](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/test-your-app-with-smart-app-control).
+
+## Implementation evidence (2026-09-10)
+
+[PR 51](https://github.com/francemazzi/strata/pull/51) carries the isolated hotfix
+and the corrections back to `master`. The candidate release is a draft with no
+packages and no new release tag while Azure setup is blocked.
+
+[Windows CI run 34464326361](https://github.com/francemazzi/strata/actions/runs/34464326361)
+passed 10 Node integrity/CPack checks, 11 PowerShell failure scenarios, real
+Authenticode DLL/PYD/ZIP verification, preservation of existing valid signatures,
+rejection of modified binaries and native-process exit-code checks. The certificate
+was a temporary test certificate trusted only on the disposable runner and removed
+at the end. This is not an Azure Public Trust signature or a Windows 11 SAC test.
+
+Local pre-commit and workflow syntax checks passed; legacy local-action metadata
+and pre-existing shellcheck findings are outside the targeted actionlint pass.
+Full application builds and release acceptance remain separate gates. No claim of
+resolution on the affected PC is made until its exact candidate hashes pass.
