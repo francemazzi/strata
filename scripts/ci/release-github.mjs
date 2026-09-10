@@ -1,0 +1,96 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { basename } from 'node:path';
+
+export const repository = process.env.GITHUB_REPOSITORY || 'francemazzi/strata';
+if (repository !== 'francemazzi/strata') throw new Error('Release commands only support francemazzi/strata.');
+
+export function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...options });
+  if (result.error || result.status !== 0) throw new Error(`${command} failed: ${result.error?.message || result.stderr}`);
+  return result.stdout?.trim();
+}
+
+export function validateTag(tag) {
+  if (!/^strata-v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(tag || '')) throw new Error('Explicit Strata release tag required.');
+  return tag;
+}
+
+export function tagSha(tag) {
+  validateTag(tag);
+  let object = JSON.parse(run('gh', ['api', `repos/${repository}/git/ref/tags/${tag}`])).object;
+  for (let depth = 0; depth < 8 && object.type === 'tag'; depth++) {
+    object = JSON.parse(run('gh', ['api', `repos/${repository}/git/tags/${object.sha}`])).object;
+  }
+  if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw new Error('Release tag must resolve to a commit.');
+  return object.sha;
+}
+
+export function checkoutSha() { return run('git', ['rev-parse', 'HEAD']); }
+
+export function releaseApiUrl(tag, execute = spawnSync) {
+  validateTag(tag);
+  // REST releases/tags only resolves published tags. GitHub CLI also resolves
+  // draft pending tags through GraphQL, then gives us the stable release ID.
+  const result = execute('gh', ['release', 'view', tag, '--repo', repository, '--json', 'apiUrl', '--jq', '.apiUrl'], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    if (result.stderr?.trim() === 'release not found') return null;
+    throw new Error(`Cannot inspect release: ${result.stderr || result.error}`);
+  }
+  const url = result.stdout.trim();
+  const prefix = `https://api.github.com/repos/${repository}/releases/`;
+  if (!url.startsWith(prefix) || !/^[0-9]+$/.test(url.slice(prefix.length))) throw new Error('Unexpected release API URL.');
+  return url;
+}
+
+export function readRelease(tag) {
+  const url = releaseApiUrl(tag);
+  return url ? JSON.parse(run('gh', ['api', url])) : null;
+}
+
+export function assertDraft(release) {
+  if (!release?.draft) throw new Error('Release must exist and remain a draft. Published assets are immutable.');
+}
+
+export function ensureDraft(tag) {
+  if (tagSha(tag) !== checkoutSha()) throw new Error('Checkout does not match the remote release tag.');
+  let release = readRelease(tag);
+  if (!release) {
+    try {
+      run('gh', ['release', 'create', tag, '--repo', repository, '--verify-tag', '--draft', '--title', `Strata ${tag.slice(8)}`, '--notes', 'Release candidate: verification and Windows acceptance pending.']);
+    } catch (error) {
+      // Concurrent platform builds may have created the same draft.
+      if (!readRelease(tag)) throw error;
+    }
+    release = readRelease(tag);
+  }
+  assertDraft(release);
+  return release;
+}
+
+export async function sha256(file) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+export function assertUpload(release, name, digest) {
+  assertDraft(release);
+  const existing = release.assets.find(asset => asset.name === name);
+  if (!existing) return true;
+  if (existing.digest !== `sha256:${digest}`) throw new Error(`Refusing to replace changed asset: ${name}`);
+  return false;
+}
+
+export async function uploadFile(tag, file) {
+  const digest = await sha256(file);
+  if (assertUpload(readRelease(tag), basename(file), digest)) {
+    run('gh', ['release', 'upload', tag, file, '--repo', repository]);
+  }
+}
+
+export function downloadRelease(tag, directory) {
+  assertDraft(readRelease(tag));
+  run('gh', ['release', 'download', tag, '--repo', repository, '--dir', directory]);
+}

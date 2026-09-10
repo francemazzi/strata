@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'strata-v*'
-  release:
-    types: ['published']
   workflow_dispatch:
     inputs:
       version:
@@ -16,7 +14,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,15 +33,14 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          DEVELOPMENT_VERSION: ${{ inputs.version || 'dev' }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-            VERSION="${TAG#strata-v}"
-          elif [ "${{ github.event_name }}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          if [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#strata-v}"
           else
-            VERSION="${{ inputs.version }}"
+            VERSION="$DEVELOPMENT_VERSION"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -53,7 +49,7 @@ jobs:
         with:
           max-size: 1G
           key: build-ccache-appimage-${{ github.ref_name }}
-          save: ${{ github.event_name == 'push' || github.event_name == 'release' }}
+          save: ${{ github.event_name == 'push' }}
 
       - name: Build AppImage
         env:
@@ -62,30 +58,6 @@ jobs:
           chmod +x scripts/build-appimage.sh
           scripts/build-appimage.sh
 
-      - name: Install cosign
-        if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/strata-v') }}
-        uses: sigstore/cosign-installer@v3.9.2
-
-      - name: Sign AppImage and create checksum
-        if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/strata-v') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APPIMAGE=$(find . -maxdepth 1 -type f -name 'Strata-*.AppImage' -print -quit)
-          if [ -z "${APPIMAGE}" ]; then
-            echo "ERROR: AppImage not found"
-            exit 1
-          fi
-          APPIMAGE_NAME=$(basename "${APPIMAGE}")
-
-          sha256sum "${APPIMAGE_NAME}" > "${APPIMAGE_NAME}.sha256"
-          cosign sign-blob --yes --bundle "${APPIMAGE_NAME}.sigstore.json" "${APPIMAGE_NAME}"
-          cosign verify-blob \
-            --bundle "${APPIMAGE_NAME}.sigstore.json" \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/build-appimage\\.yml@refs/(tags/strata-v.*|heads/.*)$" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${APPIMAGE_NAME}"
 
       - name: 📤 Upload AppImage as workflow artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -93,15 +65,11 @@ jobs:
           name: strata-appimage-x86_64
           path: |
             Strata-*.AppImage
-            Strata-*.AppImage.sha256
-            Strata-*.AppImage.sigstore.json
 
       - name: Upload release assets
-        if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/strata-v') }}
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
-        with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          files: |
-            Strata-*.AppImage
-            Strata-*.AppImage.sha256
-            Strata-*.AppImage.sigstore.json
+        if: ${{ startsWith(github.ref, 'refs/tags/strata-v') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" linux Strata-*.AppImage

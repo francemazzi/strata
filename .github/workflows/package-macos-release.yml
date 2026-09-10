@@ -15,7 +15,7 @@ on:
       sign_and_notarize:
         description: 'Sign and notarize the DMG'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -30,7 +30,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.release_tag }}
           persist-credentials: false
+
+      - name: Validate signed source artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SIGN_AND_NOTARIZE: ${{ inputs.sign_and_notarize }}
+        run: |
+          test "$SIGN_AND_NOTARIZE" = true
+          node scripts/ci/release-assets.mjs draft "$RELEASE_TAG"
+          SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')
+          test "$SOURCE_SHA" = "$(git rev-parse HEAD)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
 
       - name: Prepare build env
         run: |
@@ -272,31 +287,36 @@ jobs:
             "${QGIS_APP_NAME}-Installer.dmg" \
             universal/*.app
 
-      - name: Notarize and staple DMG
+      - name: Sign, notarize and staple DMG
         if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
+        env:
+          MACOS_DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_APPLE_TEAM_ID: ${{ secrets.MACOS_APPLE_TEAM_ID }}
+          MACOS_APPLE_APP_PASSWORD: ${{ secrets.MACOS_APPLE_APP_PASSWORD }}
         run: |
-          DMG_FILE=$(ls *.dmg | head -n1)
-          echo "Notarizing ${DMG_FILE}..."
-          xcrun notarytool submit "${DMG_FILE}" \
-            --apple-id "${{ secrets.MACOS_APPLE_ID }}" \
-            --team-id "${{ secrets.MACOS_APPLE_TEAM_ID }}" \
-            --password "${{ secrets.MACOS_APPLE_APP_PASSWORD }}" \
-            --wait
+          DMGS=(./*.dmg)
+          test "${#DMGS[@]}" = 1
+          DMG_FILE="${DMGS[0]}"
+          codesign --force --timestamp --sign "$MACOS_DEVELOPER_ID" "$DMG_FILE"
+          codesign --verify --strict "$DMG_FILE"
+          xcrun notarytool submit "$DMG_FILE" \
+            --apple-id "$MACOS_APPLE_ID" \
+            --team-id "$MACOS_APPLE_TEAM_ID" \
+            --password "$MACOS_APPLE_APP_PASSWORD" \
+            --wait --output-format json > notary-result.json
+          jq -e '.status == "Accepted"' notary-result.json
           for attempt in 1 2 3 4 5; do
-            if xcrun stapler staple "${DMG_FILE}"; then
-              echo "Stapled on attempt ${attempt}"
-              break
-            fi
-            if [ "${attempt}" -eq 5 ]; then
-              echo "WARN: stapler failed after 5 attempts. DMG is signed and notarized but ticket is not stapled."
-              exit 0
-            fi
+            if xcrun stapler staple "$DMG_FILE"; then break; fi
+            if [ "$attempt" -eq 5 ]; then exit 1; fi
             sleep 30
           done
-          xcrun stapler validate "${DMG_FILE}" || echo "WARN: stapler validate failed but ticket should still be online"
+          xcrun stapler validate "$DMG_FILE"
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          files: '*.dmg'
+        if: ${{ success() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" macos ./*.dmg

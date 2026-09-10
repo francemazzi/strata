@@ -1,0 +1,27 @@
+name: Windows release signing checks
+on:
+  pull_request:
+    paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
+  push:
+    branches: [master]
+    paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verification:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Test release integrity and publication gates
+        run: node --test scripts/ci/release-integrity.test.mjs scripts/ci/windows-packaging.test.mjs
+      - name: Test unsigned and invalid file handling
+        shell: pwsh
+        run: ./scripts/ci/test-windows-signing-files.ps1
+      - name: Verify real Authenticode signatures without Azure credentials
+        timeout-minutes: 5
+        shell: powershell
+        run: ./scripts/ci/test-windows-signing-integration.ps1
