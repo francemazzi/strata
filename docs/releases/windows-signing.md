@@ -136,3 +136,8 @@ Local pre-commit and workflow syntax checks passed; legacy local-action metadata
 and pre-existing shellcheck findings are outside the targeted actionlint pass.
 Full application builds and release acceptance remain separate gates. No claim of
 resolution on the affected PC is made until its exact candidate hashes pass.
+
+The live draft lookup was additionally checked against GitHub release 386172503.
+Pending draft tags are resolved through GitHub CLI's GraphQL lookup before reading
+the REST release by ID; `releases/tags` alone cannot find such drafts. The Node
+suite now contains 11 tests, including this lookup and authentication failures.

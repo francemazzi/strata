@@ -29,12 +29,24 @@ export function tagSha(tag) {
 
 export function checkoutSha() { return run('git', ['rev-parse', 'HEAD']); }
 
-export function readRelease(tag) {
+export function releaseApiUrl(tag, execute = spawnSync) {
   validateTag(tag);
-  const result = spawnSync('gh', ['api', `repos/${repository}/releases/tags/${tag}`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  if (result.status === 0) return JSON.parse(result.stdout);
-  if (result.stderr?.includes('HTTP 404')) return null;
-  throw new Error(`Cannot inspect release: ${result.stderr || result.error}`);
+  // REST releases/tags only resolves published tags. GitHub CLI also resolves
+  // draft pending tags through GraphQL, then gives us the stable release ID.
+  const result = execute('gh', ['release', 'view', tag, '--repo', repository, '--json', 'apiUrl', '--jq', '.apiUrl'], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    if (result.stderr?.trim() === 'release not found') return null;
+    throw new Error(`Cannot inspect release: ${result.stderr || result.error}`);
+  }
+  const url = result.stdout.trim();
+  const prefix = `https://api.github.com/repos/${repository}/releases/`;
+  if (!url.startsWith(prefix) || !/^[0-9]+$/.test(url.slice(prefix.length))) throw new Error('Unexpected release API URL.');
+  return url;
+}
+
+export function readRelease(tag) {
+  const url = releaseApiUrl(tag);
+  return url ? JSON.parse(run('gh', ['api', url])) : null;
 }
 
 export function assertDraft(release) {

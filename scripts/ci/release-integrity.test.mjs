@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertDraft, assertUpload, validateTag } from './release-github.mjs';
+import { assertDraft, assertUpload, releaseApiUrl, validateTag } from './release-github.mjs';
 import { acceptanceScenarios, platformAssets, sealedAssetNames, validateAcceptance, validateReleaseSnapshot, validateWindowsReport } from './release-integrity.mjs';
 const hash = 'a'.repeat(64);
 const sourceSha = 'b'.repeat(40);
@@ -74,4 +74,16 @@ test('publication checks the entire sealed inventory including signatures', () =
     [...full.artifacts, { name: 'unexpected.exe', sha256: hash }]]) {
     assert.throws(() => sealedAssetNames({ artifacts: files }));
   }
+});
+
+test('pending draft tags resolve through GitHub CLI and authentication failures stay fatal', () => {
+  const url = 'https://api.github.com/repos/francemazzi/strata/releases/386172503';
+  assert.equal(releaseApiUrl('strata-v1.4.4', (command, args) => {
+    assert.equal(command, 'gh');
+    assert.deepEqual(args.slice(0, 3), ['release', 'view', 'strata-v1.4.4']);
+    return { status: 0, stdout: `${url}\n` };
+  }), url);
+  assert.equal(releaseApiUrl('strata-v1.4.4', () => ({ status: 1, stderr: 'release not found\n' })), null);
+  assert.throws(() => releaseApiUrl('strata-v1.4.4', () => ({ status: 1, stderr: 'HTTP 401: Bad credentials' })), /Cannot inspect/);
+  assert.throws(() => releaseApiUrl('strata-v1.4.4', () => ({ status: 0, stdout: 'https://example.com/release' })), /Unexpected/);
 });

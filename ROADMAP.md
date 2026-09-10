@@ -112,7 +112,7 @@ Cosa evitare:
 - [ ] Installer firmati
   - [x] macOS sign + notarize in CI (`build-macos-qt6.yml`)
   - [x] Windows code signing integration via Azure Artifact Signing (`windows-qt6.yml`, `windows-release-manual.yml`); production configuration and acceptance are separate gates
-  - [ ] Windows 1.4.4: mandatory Authenticode, installed-payload verification, signed NSIS helpers and immutable draft releases — code implemented with 10 Node tests, 11 signing-failure scenarios and real Authenticode verification on Windows CI; Azure Public Trust, full packages and Windows 11 acceptance pending. See `docs/releases/windows-signing.md`
+  - [ ] Windows 1.4.4: mandatory Authenticode, installed-payload verification, signed NSIS helpers and immutable draft releases — code implemented with 11 Node tests, 11 signing-failure scenarios and real Authenticode verification on Windows CI; Azure Public Trust, full packages and Windows 11 acceptance pending. See `docs/releases/windows-signing.md`
   - [x] cosign release assets in CI
   - [ ] Checksum SHA256 pubblici nelle release
   - [ ] Dry-run firma Windows con account Azure configurato
