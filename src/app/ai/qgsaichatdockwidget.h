@@ -115,6 +115,9 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QWidget *createToolLimitActionsWidget( const QString &messageId, const QVariantMap &metadata );
     void clearTranscriptWidgets();
     void scrollTranscriptToBottom();
+    void showRequestError( const QgsAiChatMessage &message );
+    void hideRequestError();
+    void openProviderSettingsSection( const QString &section );
     void setModeLabel( const QString &label );
     void markMessageStatus( const QString &messageId, const QVariantMap &metadata, const QString &key, const QString &value );
     void acceptPlan( const QString &messageId, const QString &planMarkdown, const QVariantMap &metadata );
@@ -197,6 +200,11 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QWidget *mGisCardBody = nullptr;
     QVBoxLayout *mGisCardBodyLayout = nullptr;
     QTimer *mGisCardRefreshTimer = nullptr;
+
+    QFrame *mErrorBanner = nullptr;
+    QLabel *mErrorTitleLabel = nullptr;
+    QLabel *mErrorBodyLabel = nullptr;
+    QPushButton *mErrorActionButton = nullptr;
 
     QFrame *mMentionPopup = nullptr;
     QListWidget *mMentionList = nullptr;

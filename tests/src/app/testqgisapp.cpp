@@ -25,6 +25,7 @@
 #include "qgssinglesymbolrenderer.h"
 #include "qgsstyle.h"
 #include "qgstest.h"
+#include "qgsvectorlayer.h"
 
 #include <QApplication>
 #include <QString>
@@ -50,6 +51,7 @@ class TestQgisApp : public QObject
     //! Test for issue GH #63346
     void pasteRasterStyleCategory();
     void copyPasteMultipleStyles();
+    void autoSelectAddedLayerIgnoresStalePointers();
 
   public slots:
     void addVectorLayerShp();
@@ -286,6 +288,27 @@ void TestQgisApp::copyPasteMultipleStyles()
   QVERIFY( sourceLayer->styleManager()->styles().contains( u"third style" ) );
 }
 
+
+void TestQgisApp::autoSelectAddedLayerIgnoresStalePointers()
+{
+  const QString filePath = mTestDataDir + u"points.shp"_s;
+  QgsVectorLayer *live = mQgisApp->addVectorLayer( filePath, "live", u"ogr"_s );
+  QVERIFY( live );
+  QVERIFY( live->isValid() );
+
+  auto *stale = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"stale"_s, u"memory"_s );
+  QVERIFY( stale->isValid() );
+
+  QList<QgsMapLayer *> layers;
+  layers << nullptr << stale << live;
+  delete stale;
+
+  // Must not SIGSEGV on the destroyed layer / nullptr; should select the live layer.
+  mQgisApp->autoSelectAddedLayer( layers );
+  QCOMPARE( mQgisApp->activeLayer(), static_cast<QgsMapLayer *>( live ) );
+
+  QgsProject::instance()->layerStore()->removeMapLayers( QStringList() << live->id() );
+}
 
 QGSTEST_MAIN( TestQgisApp )
 #include "testqgisapp.moc"

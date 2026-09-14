@@ -54,7 +54,7 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     void accept() override;
 
   public slots:
-    //! Selects a sidebar section: account, providers, agent, rules, indexing, workspace, privacy or onboarding.
+    //! Selects a sidebar section: account, providers, agent, rules, gallery, indexing, workspace, privacy or onboarding.
     void showSection( const QString &key );
 
   signals:
@@ -75,6 +75,7 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QWidget *buildProvidersPage();
     QWidget *buildAgentPage();
     QWidget *buildRulesSkillsPage();
+    QWidget *buildGalleryConnectorsPage();
     QWidget *buildIndexingPage();
     QWidget *buildWorkspacePage();
     QWidget *buildPrivacyPage();
@@ -113,6 +114,8 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     void syncRulesSkillsToCloud();
     //! Downloads cloud rules/skills and previews every local write before applying it.
     void importRulesSkillsFromCloud();
+    void refreshGalleryAndConnectors();
+    void importSelectedGalleryPack();
     void refreshEmbeddingStatusLabel();
     void refreshRemoteEmbeddingModelField();
     void refreshIndexStatusLabel();
@@ -199,6 +202,12 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QPushButton *mSyncRulesSkillsCloudButton = nullptr;
     QPushButton *mImportRulesSkillsCloudButton = nullptr;
     QLabel *mRulesSkillsCloudStatusLabel = nullptr;
+
+    QListWidget *mGalleryPacksList = nullptr;
+    QPushButton *mImportGalleryPackButton = nullptr;
+    QLabel *mGalleryStatusLabel = nullptr;
+    QListWidget *mMcpConnectorsList = nullptr;
+    QLabel *mConnectorsStatusLabel = nullptr;
 
     QComboBox *mEmbeddingProvider = nullptr;
     QLineEdit *mRemoteEmbeddingModel = nullptr;

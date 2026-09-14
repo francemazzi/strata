@@ -258,6 +258,23 @@ QgsAiManagedAgentPolicy QgsAiPlanClient::parseAgentPolicyJson( const QByteArray 
     if ( !preset.mode.isEmpty() )
       policy.presets << preset;
   }
+  const QJsonArray mcpTools = root.value( u"mcpTools"_s ).toArray();
+  policy.mcpTools.reserve( mcpTools.size() );
+  for ( const QJsonValue &value : mcpTools )
+  {
+    const QJsonObject item = value.toObject();
+    QgsAiManagedMcpTool tool;
+    tool.name = item.value( u"name"_s ).toString();
+    if ( tool.name.isEmpty() )
+      continue;
+    tool.description = item.value( u"description"_s ).toString();
+    const QJsonValue schema = item.value( u"inputSchema"_s );
+    tool.inputSchema = schema.isObject() ? schema.toObject() : QJsonObject { { u"type"_s, u"object"_s }, { u"properties"_s, QJsonObject() } };
+    tool.mutating = item.value( u"mutating"_s ).toBool( false );
+    tool.serverId = item.value( u"serverId"_s ).toString();
+    tool.enabled = item.value( u"enabled"_s ).toBool( true );
+    policy.mcpTools << tool;
+  }
   return policy;
 }
 
@@ -424,6 +441,19 @@ void QgsAiPlanClient::writeCachedAgentPolicy( const QgsAiManagedAgentPolicy &pol
   for ( const QgsAiManagedAgentPreset &preset : policy.presets )
     presets << agentPresetJson( preset );
 
+  QJsonArray mcpTools;
+  for ( const QgsAiManagedMcpTool &tool : policy.mcpTools )
+  {
+    QJsonObject item;
+    item.insert( u"name"_s, tool.name );
+    item.insert( u"description"_s, tool.description );
+    item.insert( u"inputSchema"_s, tool.inputSchema );
+    item.insert( u"mutating"_s, tool.mutating );
+    item.insert( u"serverId"_s, tool.serverId );
+    item.insert( u"enabled"_s, tool.enabled );
+    mcpTools << item;
+  }
+
   QJsonObject root;
   root.insert( u"toolCatalogVersion"_s, policy.toolCatalogVersion );
   root.insert( u"tier"_s, policy.tier );
@@ -431,6 +461,7 @@ void QgsAiPlanClient::writeCachedAgentPolicy( const QgsAiManagedAgentPolicy &pol
   root.insert( u"allowedTools"_s, QJsonArray::fromStringList( policy.allowedTools ) );
   root.insert( u"allowedModels"_s, QJsonArray::fromStringList( policy.allowedModels ) );
   root.insert( u"presets"_s, presets );
+  root.insert( u"mcpTools"_s, mcpTools );
 
   QFile file( agentPolicyCacheFilePath() );
   if ( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) )

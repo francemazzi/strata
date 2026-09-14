@@ -1770,6 +1770,43 @@
       "enabled": true,
       "path": "skills/zoning-and-codes/SKILL.md",
       "sha256": "23aba477681ea7d8915d83727c91b61d2275a75fb58dd31805a595d783bd6fa4"
+    },
+    {
+      "type": "pack",
+      "slug": "urban-green-nbs",
+      "name": "Verde urbano NBS",
+      "description": "Pack con la skill Nature-Based Solutions e la rule di sicurezza raster per analisi di verde urbano verificabili.",
+      "category": "urban-green",
+      "tags": [
+        "nbs",
+        "urban-forestry",
+        "landsat",
+        "raster"
+      ],
+      "source": {
+        "kind": "paper",
+        "url": "https://doi.org/10.3390/ijgi15060256",
+        "doi": "10.3390/ijgi15060256",
+        "title": "Beyond the 3-30-300 Rule: Construction of a Scalable Composite Index for the Evaluation of Urban Green—The Ferrara Case Study",
+        "author": "Giovanna Galeota Lanza et al.",
+        "year": 2026
+      },
+      "license": "CC-BY-4.0",
+      "attribution": "Pack Strata: skill urban-green-nbs e rule safe-raster-workflows. Metodo 3-30-300 adattato da Galeota Lanza et al. (2026).",
+      "trustLevel": "CURATED",
+      "enabled": true,
+      "path": "packs/urban-green-nbs/plugin.json",
+      "sha256": "495a412a07959f3f95f1442fd8da392b96674357429f89360e4253685caabb81",
+      "skills": [
+        "urban-green-nbs"
+      ],
+      "rules": [
+        "safe-raster-workflows"
+      ],
+      "connectors": [
+        { "slug": "nominatim", "enabled": true },
+        { "slug": "stac", "enabled": true }
+      ]
     }
   ]
 }

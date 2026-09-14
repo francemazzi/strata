@@ -2206,7 +2206,15 @@ QString QgsAiModelRouter::extractErrorMessageFromBody( Provider provider, const 
   }
   else if ( errorValue.isString() )
   {
-    return errorValue.toString();
+    // Strata backend envelope:
+    // { "error": "tool_not_allowed", "message": "...", "statusCode": 403 }
+    // Keep both the human explanation and the stable code so callers can
+    // distinguish policy failures from authentication failures.
+    const QString code = errorValue.toString();
+    const QString message = root.value( u"message"_s ).toString();
+    if ( !message.isEmpty() )
+      return code.isEmpty() ? message : u"%1 · code=%2"_s.arg( message, code );
+    return code;
   }
 
   // Anthropic: { "type": "error", "error": { "type": "invalid_request_error", "message": "..." } }

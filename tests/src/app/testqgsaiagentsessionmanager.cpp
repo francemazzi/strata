@@ -268,6 +268,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void managedPolicyRestrictsAgentTools();
     void managedPolicyBelowV4IsIgnored();
     void managedPolicyWithUnknownToolIsIgnored();
+    void managedPolicyAllowsNamespacedMcpTools();
     void managedPolicyDoesNotRestrictByokProviders();
     void agentModeOmitsUnavailableTools();
     void collectsInlineRulesAndSkills();
@@ -292,6 +293,8 @@ class TestQgsAiAgentSessionManager : public QObject
     void retrievalFailureStillDispatches();
     void preDispatchFailureUnlocksRunningState();
     void fallbackPreDispatchFailuresAreDrained();
+    void planPolicyErrorIsActionableAndStopsFallback();
+    void planAuthenticationErrorOffersRelogin();
     void sendWithoutConfiguredProvidersFailsActionably();
     void sessionUsageSignalAccumulatesAndResets();
     void validatesAgentPlanJson();
@@ -1343,6 +1346,62 @@ void TestQgsAiAgentSessionManager::managedPolicyWithUnknownToolIsIgnored()
   settings.remove( u"qgis_ai/agent"_s );
 }
 
+void TestQgsAiAgentSessionManager::managedPolicyAllowsNamespacedMcpTools()
+{
+  QgsSettings settings;
+  settings.remove( u"strata/agent"_s );
+  settings.remove( u"geoai/agent"_s );
+  settings.remove( u"qgis_ai/agent"_s );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<AvailabilityTool>( u"read_file"_s, true ) );
+  registry.registerTool( std::make_unique<AvailabilityTool>( u"run_python"_s, true, true ) );
+
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+
+  QgsAiAgentBehaviorSettings updated = manager.agentBehaviorSettings();
+  updated.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( updated );
+
+  QgsAiManagedAgentPolicy policy;
+  policy.toolCatalogVersion = 11;
+  policy.tier = u"FREE"_s;
+  policy.allowedTools = QStringList { u"read_file"_s, u"mcp__nominatim__geocode"_s };
+  policy.allowedModels = QStringList { u"managed-plan"_s };
+  QgsAiManagedAgentPreset editor;
+  editor.mode = u"editor"_s;
+  editor.allowedTools = QStringList { u"read_file"_s };
+  editor.allowedModels = QStringList { u"managed-plan"_s };
+  policy.presets << editor;
+  QgsAiManagedMcpTool mcp;
+  mcp.name = u"mcp__nominatim__geocode"_s;
+  mcp.description = u"Geocode"_s;
+  mcp.mutating = false;
+  mcp.serverId = u"nominatim"_s;
+  mcp.enabled = true;
+  policy.mcpTools << mcp;
+
+  manager.setManagedAgentPolicy( policy );
+  manager.setActiveAgent( u"editor"_s );
+
+  QVERIFY( router.allowedTools().contains( u"read_file"_s ) );
+  QVERIFY( !router.allowedTools().contains( u"run_python"_s ) );
+
+  settings.remove( u"strata/agent"_s );
+  settings.remove( u"geoai/agent"_s );
+  settings.remove( u"qgis_ai/agent"_s );
+}
+
 void TestQgsAiAgentSessionManager::managedPolicyDoesNotRestrictByokProviders()
 {
   QgsSettings settings;
@@ -2262,6 +2321,98 @@ void TestQgsAiAgentSessionManager::fallbackPreDispatchFailuresAreDrained()
   QCOMPARE( runningSpy.last().at( 0 ).toBool(), false );
 
   clearProviderSettings();
+}
+
+void TestQgsAiAgentSessionManager::planPolicyErrorIsActionableAndStopsFallback()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.setValue( u"ai/provider/plan/token"_s, u"plan-test-token"_s );
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"openrouter-test-key"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    clearProviderSettings();
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 403, "Forbidden", QByteArrayLiteral( "{\"error\":\"tool_not_allowed\",\"message\":\"Tool run_python is not available for tier FREE\",\"statusCode\":403}" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Fallback must not run\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings plan = router.providerSettings( QgsAiModelRouter::Provider::Plan );
+  plan.endpoint = u"http://127.0.0.1:%1/ai/messages"_s.arg( server.serverPort() );
+  plan.model = u"managed-plan"_s;
+  plan.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Plan, plan );
+  QgsAiModelRouter::ProviderSettings fallback = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  fallback.endpoint = u"http://127.0.0.1:%1/openrouter"_s.arg( server.serverPort() );
+  fallback.model = u"fallback/model"_s;
+  fallback.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, fallback );
+  router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+
+  manager.sendUserMessage( u"run python"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+
+  QCOMPARE( server.requestCount, 1 );
+  const QgsAiChatMessage error = manager.history().last();
+  QCOMPARE( error.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QCOMPARE( error.metadata.value( u"error_kind"_s ).toString(), u"policy"_s );
+  QCOMPARE( error.metadata.value( u"error_code"_s ).toString(), u"tool_not_allowed"_s );
+  QVERIFY( error.content.contains( u"run_python"_s ) );
+  QVERIFY( error.content.contains( u"Run the saved workflow"_s ) );
+  QVERIFY( !error.content.contains( u"authentication failed"_s, Qt::CaseInsensitive ) );
+}
+
+void TestQgsAiAgentSessionManager::planAuthenticationErrorOffersRelogin()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.setValue( u"ai/provider/plan/token"_s, u"expired-plan-token"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    clearProviderSettings();
+    settings.remove( u"ai/network/maxRetries"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 401, "Unauthorized", QByteArrayLiteral( "{\"error\":\"unauthorized\",\"message\":\"Session token expired\",\"statusCode\":401}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings plan = router.providerSettings( QgsAiModelRouter::Provider::Plan );
+  plan.endpoint = u"http://127.0.0.1:%1/ai/messages"_s.arg( server.serverPort() );
+  plan.model = u"managed-plan"_s;
+  plan.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Plan, plan );
+  router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+
+  manager.sendUserMessage( u"hello"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+
+  const QgsAiChatMessage error = manager.history().last();
+  QCOMPARE( error.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QCOMPARE( error.metadata.value( u"error_kind"_s ).toString(), u"authentication"_s );
+  QCOMPARE( error.metadata.value( u"error_provider"_s ).toString(), u"Plan Account"_s );
+  QVERIFY( error.content.contains( u"Log out below"_s ) );
+  QVERIFY( error.content.contains( u"sign in again"_s ) );
 }
 
 void TestQgsAiAgentSessionManager::sendWithoutConfiguredProvidersFailsActionably()

@@ -821,6 +821,72 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mGisCardContainer->setVisible( false );
   layout->addWidget( mGisCardContainer );
 
+  mErrorBanner = new QFrame( container );
+  mErrorBanner->setObjectName( u"aiRequestErrorBanner"_s );
+  QVBoxLayout *errorLayout = new QVBoxLayout( mErrorBanner );
+  errorLayout->setContentsMargins( 12, 10, 12, 10 );
+  errorLayout->setSpacing( 6 );
+  mErrorTitleLabel = new QLabel( mErrorBanner );
+  mErrorTitleLabel->setObjectName( u"aiRequestErrorTitle"_s );
+  QFont errorTitleFont = mErrorTitleLabel->font();
+  errorTitleFont.setBold( true );
+  errorTitleFont.setPointSize( errorTitleFont.pointSize() + 1 );
+  mErrorTitleLabel->setFont( errorTitleFont );
+  errorLayout->addWidget( mErrorTitleLabel );
+  mErrorBodyLabel = new QLabel( mErrorBanner );
+  mErrorBodyLabel->setObjectName( u"aiRequestErrorBody"_s );
+  mErrorBodyLabel->setWordWrap( true );
+  mErrorBodyLabel->setTextInteractionFlags( Qt::TextSelectableByMouse );
+  errorLayout->addWidget( mErrorBodyLabel );
+  QHBoxLayout *errorActions = new QHBoxLayout();
+  errorActions->setContentsMargins( 0, 2, 0, 0 );
+  mErrorActionButton = new QPushButton( mErrorBanner );
+  mErrorActionButton->setObjectName( u"aiRequestErrorAction"_s );
+  errorActions->addWidget( mErrorActionButton );
+  errorActions->addStretch( 1 );
+  QPushButton *dismissErrorButton = new QPushButton( tr( "Dismiss" ), mErrorBanner );
+  dismissErrorButton->setObjectName( u"aiRequestErrorDismiss"_s );
+  errorActions->addWidget( dismissErrorButton );
+  errorLayout->addLayout( errorActions );
+  mErrorBanner->hide();
+  layout->addWidget( mErrorBanner );
+  connect( dismissErrorButton, &QPushButton::clicked, this, &QgsAiChatDockWidget::hideRequestError );
+  connect( mErrorActionButton, &QPushButton::clicked, this, [this]() {
+    const QString provider = mErrorActionButton->property( "error_provider" ).toString();
+    const QString kind = mErrorActionButton->property( "error_kind" ).toString();
+    if ( kind == "authentication"_L1 )
+    {
+      QString error;
+      if ( provider == "Plan Account"_L1 )
+      {
+        if ( !mModelRouter || !mModelRouter->clearPlanSessionToken( &error ) )
+        {
+          QMessageBox::warning( this, tr( "Plan Account logout failed" ), error.isEmpty() ? tr( "Unable to clear the Plan Account session." ) : error );
+          return;
+        }
+        if ( mSessionManager )
+          mSessionManager->setManagedAgentPolicy( QgsAiManagedAgentPolicy() );
+        rebuildModelMenu();
+        hideRequestError();
+        openProviderSettingsSection( u"account"_s );
+        return;
+      }
+      if ( provider == "Codex"_L1 )
+      {
+        if ( !QgsAiCodexOAuthClient::clearRefreshToken( &error ) )
+        {
+          QMessageBox::warning( this, tr( "Codex logout failed" ), error );
+          return;
+        }
+        rebuildModelMenu();
+        hideRequestError();
+        openProviderSettingsSection( u"providers"_s );
+        return;
+      }
+    }
+    openProviderSettingsSection( provider == "Plan Account"_L1 ? u"account"_s : u"providers"_s );
+  } );
+
   mFileContextChipRow = new QWidget( container );
   mFileContextChipRow->setObjectName( u"aiAttachmentChipRow"_s );
   mFileContextChipLayout = new QHBoxLayout( mFileContextChipRow );
@@ -972,6 +1038,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
     }
 
     connect( mSessionManager, &QgsAiAgentSessionManager::messageAdded, this, [this]( const QgsAiChatMessage &message ) {
+      if ( message.metadata.value( u"ui_kind"_s ).toString() == "request_error"_L1 )
+        showRequestError( message );
       if ( mStreamingInProgress && message.role == QgsAiChatRole::Assistant )
       {
         if ( mStreamingTextEdit )
@@ -1325,6 +1393,12 @@ void QgsAiChatDockWidget::applyPillStyling()
     "QListWidget#aiMentionList::item:selected { color: palette(highlighted-text); background: palette(highlight); } "
     "QListWidget#aiMentionList::item:hover { background: palette(alternate-base); }"
   ) );
+  mErrorBanner->setStyleSheet( QStringLiteral(
+    "QFrame#aiRequestErrorBanner { color: palette(window-text); background: rgba(211, 47, 47, 36); border: 2px solid #d32f2f; border-radius: 8px; } "
+    "QLabel#aiRequestErrorTitle, QLabel#aiRequestErrorBody { color: palette(window-text); background: transparent; border: 0; } "
+    "QPushButton { color: palette(window-text); background: palette(button); border: 1px solid #d32f2f; border-radius: 5px; padding: 5px 9px; font-weight: 600; } "
+    "QPushButton:hover { background: palette(alternate-base); }"
+  ) );
   mRuntimeStatusLabel->setStyleSheet( u"QLabel#aiRuntimeStatusLabel { color: palette(mid); }"_s );
   mCancelButton->setStyleSheet( QStringLiteral(
     "QPushButton#aiCancelRequestButton { color: palette(window-text); background: palette(button); border: 0; border-radius: 6px; padding: 3px 9px; } "
@@ -1396,12 +1470,24 @@ QWidget *QgsAiChatDockWidget::createMessageWidget( const QString &role, const QS
   card->setObjectName( u"aiMessage"_s );
   card->setFrameShape( QFrame::NoFrame );
   applyTranscriptWidthPolicy( card );
-  card->setStyleSheet( QStringLiteral(
-    "QFrame#aiMessage { border: 0; border-radius: 0; background: palette(base); } "
-    "QLabel#aiMessageRole { color: palette(mid); font-weight: 600; } "
-    "QLabel#aiMessageBody { color: palette(text); } "
-    "QLabel#aiPlanStatusLabel, QLabel#aiQuestionsStatusLabel, QLabel#aiToolLimitStatusLabel { color: palette(highlight); font-weight: 600; }"
-  ) );
+  const QString uiKind = metadata.value( u"ui_kind"_s ).toString();
+  if ( uiKind == "request_error"_L1 )
+  {
+    card->setStyleSheet( QStringLiteral(
+      "QFrame#aiMessage { border: 2px solid #d32f2f; border-radius: 8px; background: rgba(211, 47, 47, 30); } "
+      "QLabel#aiMessageRole { color: #d32f2f; font-weight: 700; } "
+      "QLabel#aiMessageBody { color: palette(text); }"
+    ) );
+  }
+  else
+  {
+    card->setStyleSheet( QStringLiteral(
+      "QFrame#aiMessage { border: 0; border-radius: 0; background: palette(base); } "
+      "QLabel#aiMessageRole { color: palette(mid); font-weight: 600; } "
+      "QLabel#aiMessageBody { color: palette(text); } "
+      "QLabel#aiPlanStatusLabel, QLabel#aiQuestionsStatusLabel, QLabel#aiToolLimitStatusLabel { color: palette(highlight); font-weight: 600; }"
+    ) );
+  }
 
   QVBoxLayout *cardLayout = new QVBoxLayout( card );
   cardLayout->setContentsMargins( 8, 6, 8, 8 );
@@ -1409,11 +1495,10 @@ QWidget *QgsAiChatDockWidget::createMessageWidget( const QString &role, const QS
 
   QHBoxLayout *headerLayout = new QHBoxLayout();
   headerLayout->setContentsMargins( 0, 0, 0, 0 );
-  QLabel *roleLabel = new QLabel( role, card );
+  QLabel *roleLabel = new QLabel( uiKind == "request_error"_L1 ? tr( "AI ERROR" ) : role, card );
   roleLabel->setObjectName( u"aiMessageRole"_s );
   headerLayout->addWidget( roleLabel );
   headerLayout->addStretch( 1 );
-  const QString uiKind = metadata.value( u"ui_kind"_s ).toString();
   const bool isPlanUi = uiKind == "plan"_L1 || uiKind == "agent_plan"_L1;
   if ( isPlanUi )
   {
@@ -2266,6 +2351,7 @@ QString QgsAiChatDockWidget::renderToolMessageMarkdown( const QgsAiChatMessage &
 
 void QgsAiChatDockWidget::onNewChatClicked()
 {
+  hideRequestError();
   if ( mSessionManager )
     mSessionManager->startNewSession();
 }
@@ -2274,6 +2360,7 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
 {
   if ( !mTranscriptLayout )
     return;
+  hideRequestError();
   closeStreamingAssistantMessage();
   clearTranscriptWidgets();
   if ( !mSessionManager )
@@ -2484,8 +2571,42 @@ void QgsAiChatDockWidget::updateRuntimeState( const QString &state, const QStrin
 {
   const QString text = tr( "Provider state: %1 - %2" ).arg( state, detail );
   mRuntimeStatusLabel->setText( text );
+  if ( state == "sending"_L1 )
+    hideRequestError();
   if ( mSendButton )
     mSendButton->setToolTip( mRequestRunning ? tr( "Stop (%1)" ).arg( text ) : tr( "Send (Enter)" ) );
+}
+
+void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
+{
+  if ( !mErrorBanner || !mErrorTitleLabel || !mErrorBodyLabel || !mErrorActionButton )
+    return;
+
+  const QString provider = message.metadata.value( u"error_provider"_s ).toString();
+  const QString kind = message.metadata.value( u"error_kind"_s ).toString();
+  if ( kind == "authentication"_L1 )
+    mErrorTitleLabel->setText( tr( "Sign-in required — %1" ).arg( provider ) );
+  else if ( kind == "policy"_L1 )
+    mErrorTitleLabel->setText( tr( "Request blocked by policy" ) );
+  else
+    mErrorTitleLabel->setText( tr( "AI request failed — %1" ).arg( provider ) );
+
+  mErrorBodyLabel->setText( message.content );
+  mErrorActionButton->setProperty( "error_provider", provider );
+  mErrorActionButton->setProperty( "error_kind", kind );
+  if ( kind == "authentication"_L1 && ( provider == "Plan Account"_L1 || provider == "Codex"_L1 ) )
+    mErrorActionButton->setText( tr( "Log out and sign in again" ) );
+  else if ( provider == "Plan Account"_L1 )
+    mErrorActionButton->setText( tr( "Open Plan Account" ) );
+  else
+    mErrorActionButton->setText( tr( "Open Provider Settings" ) );
+  mErrorBanner->show();
+}
+
+void QgsAiChatDockWidget::hideRequestError()
+{
+  if ( mErrorBanner )
+    mErrorBanner->hide();
 }
 
 void QgsAiChatDockWidget::updateSessionUsage( const QgsAiUsage &total )
@@ -3259,10 +3380,17 @@ void QgsAiChatDockWidget::rejectProposal()
 
 void QgsAiChatDockWidget::openProviderSettings()
 {
+  openProviderSettingsSection( QString() );
+}
+
+void QgsAiChatDockWidget::openProviderSettingsSection( const QString &section )
+{
   if ( !mModelRouter )
     return;
 
   QgsAiSettingsDialog dialog( mSessionManager, mModelRouter, mLayerIndexCoordinator, this );
+  if ( !section.isEmpty() )
+    dialog.showSection( section );
   connect( &dialog, &QgsAiSettingsDialog::embeddingProviderSettingsChanged, this, &QgsAiChatDockWidget::embeddingProviderSettingsChanged );
   connect( &dialog, &QgsAiSettingsDialog::planAuthStateChanged, this, &QgsAiChatDockWidget::rebuildModelMenu );
   connect( &dialog, &QgsAiSettingsDialog::demoProjectCreated, this, &QgsAiChatDockWidget::refreshGisSuggestionCard );

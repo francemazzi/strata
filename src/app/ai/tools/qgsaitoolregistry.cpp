@@ -16,6 +16,7 @@
 #include "qgsaitoolregistry.h"
 
 #include "qgsaiauditlog.h"
+#include "qgsaimcpcalltool.h"
 
 #include <QCryptographicHash>
 #include <QJsonDocument>
@@ -102,6 +103,31 @@ bool QgsAiToolRegistry::registerTool( std::unique_ptr<QgsAiTool> tool )
   return true;
 }
 
+void QgsAiToolRegistry::setMcpCallProxy( std::unique_ptr<QgsAiMcpCallTool> proxy )
+{
+  mMcpProxy = std::move( proxy );
+}
+
+void QgsAiToolRegistry::setManagedMcpTools( const QList<QgsAiManagedMcpTool> &tools )
+{
+  mManagedMcpTools = tools;
+}
+
+const QgsAiManagedMcpTool *QgsAiToolRegistry::findManagedMcpTool( const QString &name ) const
+{
+  for ( const QgsAiManagedMcpTool &tool : mManagedMcpTools )
+  {
+    if ( tool.name == name )
+      return &tool;
+  }
+  return nullptr;
+}
+
+bool QgsAiToolRegistry::mcpProxyAvailable() const
+{
+  return mMcpProxy && mMcpProxy->isAvailable();
+}
+
 QgsAiTool *QgsAiToolRegistry::find( const QString &name ) const
 {
   const auto it = mTools.find( name );
@@ -126,6 +152,14 @@ QStringList QgsAiToolRegistry::availableToolNames() const
     const QgsAiTool *tool = entry.second.get();
     if ( tool && tool->isAvailable() )
       names.append( entry.first );
+  }
+  if ( mcpProxyAvailable() )
+  {
+    for ( const QgsAiManagedMcpTool &tool : mManagedMcpTools )
+    {
+      if ( tool.enabled && !tool.name.isEmpty() )
+        names.append( tool.name );
+    }
   }
   return names;
 }
@@ -198,11 +232,75 @@ QJsonArray QgsAiToolRegistry::schemasJsonForFormat( WireFormat format, const QSt
     }
     array.append( entry );
   }
+  if ( mcpProxyAvailable() )
+  {
+    for ( const QgsAiManagedMcpTool &tool : mManagedMcpTools )
+    {
+      if ( !tool.enabled || tool.name.isEmpty() )
+        continue;
+      if ( !filter.isEmpty() && !filter.contains( tool.name ) )
+        continue;
+      array.append( mcpSchemaEntry( tool, format ) );
+    }
+  }
   return array;
+}
+
+QJsonObject QgsAiToolRegistry::mcpSchemaEntry( const QgsAiManagedMcpTool &tool, WireFormat format ) const
+{
+  QJsonObject schema = tool.inputSchema;
+  if ( schema.isEmpty() )
+  {
+    schema.insert( u"type"_s, u"object"_s );
+    schema.insert( u"properties"_s, QJsonObject() );
+  }
+  QJsonObject entry;
+  switch ( format )
+  {
+    case WireFormat::AnthropicTools:
+      entry.insert( u"name"_s, tool.name );
+      entry.insert( u"description"_s, tool.description );
+      entry.insert( u"input_schema"_s, schema );
+      break;
+    case WireFormat::OpenAiResponses:
+      entry.insert( u"type"_s, u"function"_s );
+      entry.insert( u"name"_s, tool.name );
+      entry.insert( u"description"_s, tool.description );
+      entry.insert( u"parameters"_s, schema );
+      break;
+    case WireFormat::OpenAiChatCompletions:
+    {
+      QJsonObject function;
+      function.insert( u"name"_s, tool.name );
+      function.insert( u"description"_s, tool.description );
+      function.insert( u"parameters"_s, schema );
+      entry.insert( u"type"_s, u"function"_s );
+      entry.insert( u"function"_s, function );
+      break;
+    }
+  }
+  return entry;
 }
 
 QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObject &args ) const
 {
+  if ( name.startsWith( u"mcp__"_s ) )
+  {
+    if ( !mMcpProxy )
+      return QgsAiToolResult::error( u"MCP gateway is not configured."_s );
+    if ( !mMcpProxy->isAvailable() )
+    {
+      const QString reason = mMcpProxy->availabilityReason();
+      return QgsAiToolResult::error( reason.isEmpty() ? u"MCP gateway is not available."_s : reason );
+    }
+    const QgsAiManagedMcpTool *definition = findManagedMcpTool( name );
+    if ( !definition || !definition->enabled )
+      return QgsAiToolResult::error( u"MCP tool is not enabled: %1"_s.arg( name ) );
+    const QgsAiToolResult result = mMcpProxy->executeNamed( name, args );
+    auditToolExecution( mMcpProxy.get(), args, result );
+    return result;
+  }
+
   QgsAiTool *tool = find( name );
   if ( !tool )
     return QgsAiToolResult::error( u"Unknown tool: %1"_s.arg( name ) );
@@ -219,4 +317,5 @@ QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObje
 void QgsAiToolRegistry::clear()
 {
   mTools.clear();
+  mManagedMcpTools.clear();
 }

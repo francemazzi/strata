@@ -83,6 +83,7 @@ using namespace Qt::StringLiterals;
 #include <QActionGroup>
 
 #include "qgsmaplayerutils.h"
+#include "qgsmaplayerlistutils_p.h"
 #include "qgsscreenhelper.h"
 #include "qgssettingsregistrycore.h"
 #include "qgssettingsentryenumflag.h"
@@ -125,6 +126,7 @@ using namespace Qt::StringLiterals;
 #include "ai/tools/qgsaitoolregistry.h"
 #include "ai/tools/qgsaiwebfetchtool.h"
 #include "ai/tools/qgsaiwebsearchtool.h"
+#include "ai/tools/qgsaimcpcalltool.h"
 #include "ai/tools/qgsaidiscoverytool.h"
 #include "ai/discovery/qgsaidiscoverycontroller.h"
 #endif
@@ -1498,6 +1500,7 @@ QgisApp::QgisApp(
   mAiToolRegistry->registerTool( std::make_unique<QgsAiWebSearchTool>( mAiModelRouter.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiCatalogSearchTool>( mAiModelRouter.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiWebFetchTool>( mAiModelRouter.get() ) );
+  mAiToolRegistry->setMcpCallProxy( std::make_unique<QgsAiMcpCallTool>( mAiModelRouter.get() ) );
   mAiEmbeddingProvider = QgsAiEmbeddingProviderRegistry::createProviderFromSettings( this );
   mAiWorkspaceIndex = std::make_unique<QgsAiWorkspaceIndex>( mAiFileContextProvider.get(), mAiEmbeddingProvider.get(), this );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiIndexStatusTool>( mAiWorkspaceIndex.get() ) );
@@ -2648,7 +2651,11 @@ void QgisApp::dropEvent( QDropEvent *event )
       }
     }
 
-    QList<QgsMapLayer *> addedLayers;
+    // Hold weak pointers from the moment each layer is created. A later file in the
+    // same drop (invalid PDF/raster, missing shapefile, or a .qgz that replaces the
+    // project) can destroy earlier layers before we select them — that is the Brescia
+    // SIGSEGV in autoSelectAddedLayer().
+    QgsWeakMapLayerPointerList addedLayerPtrs;
     for ( const QString &file : std::as_const( filesToProcess ) )
     {
       bool handled = false;
@@ -2666,14 +2673,20 @@ void QgisApp::dropEvent( QDropEvent *event )
 
       if ( !handled )
       {
-        addedLayers.append( openFile( file, QString(), true, false ) );
+        const QList<QgsMapLayer *> opened = openFile( file, QString(), true, false );
+        for ( QgsMapLayer *layer : opened )
+          addedLayerPtrs.append( layer );
       }
     }
 
     if ( !lst.isEmpty() )
     {
-      addedLayers.append( handleDropUriList( lst, true, false ) );
+      const QList<QgsMapLayer *> dropped = handleDropUriList( lst, true, false );
+      for ( QgsMapLayer *layer : dropped )
+        addedLayerPtrs.append( layer );
     }
+
+    const QList<QgsMapLayer *> addedLayers = _qgis_listQPointerToRaw( addedLayerPtrs );
 
     // Manually run autoSelectAddedLayer()
     mBlockAutoSelectAddedLayer = false;
@@ -5468,18 +5481,25 @@ QgsAppGpsSettingsMenu *QgisApp::gpsSettingsMenu()
 
 void QgisApp::autoSelectAddedLayer( QList<QgsMapLayer *> layers )
 {
-  if ( mBlockAutoSelectAddedLayer )
+  if ( mBlockAutoSelectAddedLayer || !mLayerTreeView )
     return;
 
-  if ( !layers.isEmpty() )
+  // Drop batches and failed datasources can leave stale pointers in `layers`.
+  // Only touch objects that are still owned by the current project (pointer
+  // identity — do not call methods on candidates that are not registered).
+  const QList<QgsMapLayer *> registered = QgsProject::instance()->mapLayers().values();
+  for ( QgsMapLayer *layer : layers )
   {
-    QgsLayerTreeLayer *nodeLayer = QgsProject::instance()->layerTreeRoot()->findLayer( layers[0]->id() );
+    if ( !layer || !registered.contains( layer ) )
+      continue;
 
+    QgsLayerTreeLayer *nodeLayer = QgsProject::instance()->layerTreeRoot()->findLayer( layer->id() );
     if ( !nodeLayer )
-      return;
+      continue;
 
-    QModelIndex index = mLayerTreeView->node2index( nodeLayer );
+    const QModelIndex index = mLayerTreeView->node2index( nodeLayer );
     mLayerTreeView->setCurrentIndex( index );
+    return;
   }
 }
 

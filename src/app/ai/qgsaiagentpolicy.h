@@ -18,6 +18,7 @@
 
 #include "qgis_app.h"
 
+#include <QJsonObject>
 #include <QList>
 #include <QMetaType>
 #include <QString>
@@ -33,6 +34,16 @@ struct APP_EXPORT QgsAiManagedAgentPreset
     QStringList allowedModels;
 };
 
+struct APP_EXPORT QgsAiManagedMcpTool
+{
+    QString name;
+    QString description;
+    QJsonObject inputSchema;
+    bool mutating = false;
+    QString serverId;
+    bool enabled = true;
+};
+
 struct APP_EXPORT QgsAiManagedAgentPolicy
 {
     int toolCatalogVersion = 0;
@@ -41,8 +52,9 @@ struct APP_EXPORT QgsAiManagedAgentPolicy
     QStringList allowedTools;
     QStringList allowedModels;
     QList<QgsAiManagedAgentPreset> presets;
+    QList<QgsAiManagedMcpTool> mcpTools;
 
-    bool isEmpty() const { return tier.isEmpty() && modes.isEmpty() && allowedTools.isEmpty() && allowedModels.isEmpty() && presets.isEmpty(); }
+    bool isEmpty() const { return tier.isEmpty() && modes.isEmpty() && allowedTools.isEmpty() && allowedModels.isEmpty() && presets.isEmpty() && mcpTools.isEmpty(); }
 
     QStringList allowedToolsForPreset( const QString &presetMode ) const
     {
@@ -86,6 +98,7 @@ inline QString QgsAiPresetModeForAgent( const QString &agentName )
 }
 
 Q_DECLARE_METATYPE( QgsAiManagedAgentPreset )
+Q_DECLARE_METATYPE( QgsAiManagedMcpTool )
 Q_DECLARE_METATYPE( QgsAiManagedAgentPolicy )
 Q_DECLARE_METATYPE( QList<QgsAiManagedAgentPreset> )
 

@@ -50,7 +50,7 @@ namespace
   QByteArray policyBody()
   {
     return QByteArrayLiteral(
-      R"({"toolCatalogVersion":3,"tier":"PRO","modes":["ask","plan","ask_before_edits","auto_edit"],"allowedTools":["read_file","web_search","run_python"],"allowedModels":["managed-plan","gpt-4o"],"presets":[{"mode":"reviewer","label":"Reviewer","allowedTools":["read_file","web_search"],"allowedModels":["managed-plan"]},{"mode":"editor","label":"Editor","allowedTools":["read_file","run_python"],"allowedModels":["managed-plan","gpt-4o"]}]})"
+      R"({"toolCatalogVersion":11,"tier":"PRO","modes":["ask","plan","ask_before_edits","auto_edit"],"allowedTools":["read_file","web_search","run_python"],"allowedModels":["managed-plan","gpt-4o"],"presets":[{"mode":"reviewer","label":"Reviewer","allowedTools":["read_file","web_search"],"allowedModels":["managed-plan"]},{"mode":"editor","label":"Editor","allowedTools":["read_file","run_python"],"allowedModels":["managed-plan","gpt-4o"]}],"mcpTools":[{"name":"mcp__nominatim__geocode","description":"Geocode a place","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}},"mutating":false,"serverId":"nominatim","enabled":true}]})"
     );
   }
 } //namespace
@@ -100,12 +100,16 @@ void TestQgsAiPlanClient::parsesAgentPolicy()
   QVERIFY( agents.first().allowedTools.contains( u"web_search"_s ) );
 
   const QgsAiManagedAgentPolicy policy = QgsAiPlanClient::parseAgentPolicyJson( policyBody() );
-  QCOMPARE( policy.toolCatalogVersion, 3 );
+  QCOMPARE( policy.toolCatalogVersion, 11 );
   QCOMPARE( policy.tier, u"PRO"_s );
   QVERIFY( policy.modes.contains( u"ask_before_edits"_s ) );
   QVERIFY( policy.allowedModels.contains( u"gpt-4o"_s ) );
   QCOMPARE( policy.allowedToolsForPreset( u"reviewer"_s ), QStringList( { u"read_file"_s, u"web_search"_s } ) );
   QCOMPARE( policy.allowedModelsForPreset( u"editor"_s ), QStringList( { u"managed-plan"_s, u"gpt-4o"_s } ) );
+  QCOMPARE( policy.mcpTools.size(), 1 );
+  QCOMPARE( policy.mcpTools.first().name, u"mcp__nominatim__geocode"_s );
+  QVERIFY( !policy.mcpTools.first().mutating );
+  QVERIFY( policy.mcpTools.first().enabled );
 }
 
 void TestQgsAiPlanClient::loginMintsDesktopToken()

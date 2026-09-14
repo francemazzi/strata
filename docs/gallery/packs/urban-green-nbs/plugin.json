@@ -1,0 +1,11 @@
+{
+  "name": "urban-green-nbs",
+  "description": "Nature-based urban green analysis with Landsat indices, 3-30-300 scoring, and safe raster rules.",
+  "version": "1.0.0",
+  "skills": ["urban-green-nbs"],
+  "rules": ["safe-raster-workflows"],
+  "connectors": [
+    { "slug": "nominatim", "enabled": true },
+    { "slug": "stac", "enabled": true }
+  ]
+}

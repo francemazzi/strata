@@ -20,12 +20,17 @@
 #include <memory>
 
 #include "qgis_app.h"
+#include "qgsaiagentpolicy.h"
 #include "qgsaitool.h"
 
 #include <QJsonArray>
+#include <QJsonObject>
+#include <QList>
 #include <QMap>
 #include <QObject>
 #include <QStringList>
+
+class QgsAiMcpCallTool;
 
 class APP_EXPORT QgsAiToolRegistry : public QObject
 {
@@ -37,6 +42,15 @@ class APP_EXPORT QgsAiToolRegistry : public QObject
 
     //! Registers \a tool. Takes ownership. Returns false if a tool with same name already exists.
     bool registerTool( std::unique_ptr<QgsAiTool> tool );
+
+    //! Gateway used for namespaced mcp__* tools. Takes ownership.
+    void setMcpCallProxy( std::unique_ptr<QgsAiMcpCallTool> proxy );
+
+    //! Replaces the curated MCP tools advertised from the managed agent policy.
+    void setManagedMcpTools( const QList<QgsAiManagedMcpTool> &tools );
+
+    //! Returns the policy MCP tool with \a name, or nullptr.
+    const QgsAiManagedMcpTool *findManagedMcpTool( const QString &name ) const;
 
     //! Returns pointer to registered tool, or nullptr.
     QgsAiTool *find( const QString &name ) const;
@@ -86,7 +100,12 @@ class APP_EXPORT QgsAiToolRegistry : public QObject
     void toolRegistered( const QString &name );
 
   private:
+    QJsonObject mcpSchemaEntry( const QgsAiManagedMcpTool &tool, WireFormat format ) const;
+    bool mcpProxyAvailable() const;
+
     std::map<QString, std::unique_ptr<QgsAiTool>> mTools;
+    std::unique_ptr<QgsAiMcpCallTool> mMcpProxy;
+    QList<QgsAiManagedMcpTool> mManagedMcpTools;
 };
 
 #endif // QGSAITOOLREGISTRY_H

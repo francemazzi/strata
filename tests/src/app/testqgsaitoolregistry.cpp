@@ -8,6 +8,7 @@
 #include <cmath>
 #include <memory>
 
+#include "ai/qgsaiagentpolicy.h"
 #include "ai/qgsaiauditlog.h"
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/qgsaiworkspacetrust.h"
@@ -126,6 +127,7 @@ class TestQgsAiToolRegistry : public QObject
     void rejectsEmptyNameAndNull();
     void schemasJsonContainsAllTools();
     void schemasJsonFilter();
+    void mcpGatewayExecuteRequiresProxy();
     void unavailableToolsAreHiddenAndNotExecuted();
     void unavailableToolReasonsAreReported();
     void executeRoundTrip();
@@ -219,6 +221,20 @@ void TestQgsAiToolRegistry::schemasJsonFilter()
   const QJsonArray filtered = registry.schemasJson( QStringList() << u"read_file"_s );
   QCOMPARE( filtered.size(), 1 );
   QCOMPARE( filtered.first().toObject().value( u"name"_s ).toString(), u"read_file"_s );
+}
+
+void TestQgsAiToolRegistry::mcpGatewayExecuteRequiresProxy()
+{
+  QgsAiToolRegistry registry;
+  QgsAiManagedMcpTool mcp;
+  mcp.name = u"mcp__nominatim__geocode"_s;
+  mcp.description = u"Geocode a place"_s;
+  mcp.enabled = true;
+  registry.setManagedMcpTools( { mcp } );
+
+  const QgsAiToolResult result = registry.execute( u"mcp__nominatim__geocode"_s, QJsonObject() );
+  QVERIFY( !result.success );
+  QVERIFY( result.errorMessage.contains( u"MCP gateway"_s ) );
 }
 
 void TestQgsAiToolRegistry::unavailableToolsAreHiddenAndNotExecuted()

@@ -77,6 +77,33 @@ namespace
   constexpr int MAX_PACKAGE_INSTALL_CALLS_PER_TURN = 2;
   constexpr int MAX_CONSECUTIVE_FAILED_TOOL_ROUNDS = 3;
 
+  QString errorCodeFromText( const QString &text )
+  {
+    static const QRegularExpression codeRe( u"(?:^|[·\\s])code=([a-z0-9_]+)"_s, QRegularExpression::CaseInsensitiveOption );
+    return codeRe.match( text ).captured( 1 ).toLower();
+  }
+
+  bool isAuthenticationError( const QString &providerName, const QString &errorMessage, int httpStatus )
+  {
+    const QString lower = errorMessage.toLower();
+    const QString code = errorCodeFromText( errorMessage );
+    if ( httpStatus == 401 )
+      return true;
+    if ( code == "unauthorized"_L1 || code == "invalid_credentials"_L1 || code == "token_expired"_L1 || code == "invalid_token"_L1 )
+      return true;
+    if ( httpStatus != 0 )
+      return false;
+    if ( providerName == "Plan Account"_L1 )
+      return lower.contains( "session token"_L1 );
+    return lower.contains( "refresh token"_L1 ) || lower.contains( "oauth"_L1 );
+  }
+
+  bool isPolicyError( const QString &errorMessage, int httpStatus )
+  {
+    Q_UNUSED( errorMessage )
+    return httpStatus == 403;
+  }
+
   int managedToolRoundLimit( const QString &model )
   {
     const QList<QgsAiPlanClient::ModelInfo> catalog = QgsAiPlanClient::cachedModels();
@@ -254,10 +281,21 @@ namespace
     for ( const QString &toolName : registry->toolNames() )
       knownTools.insert( toolName );
 
-    const auto containsUnknown = [&knownTools]( const QStringList &tools ) {
+    const auto mcpKnown = [&policy]( const QString &toolName ) {
+      if ( !toolName.startsWith( u"mcp__"_s ) )
+        return false;
+      for ( const QgsAiManagedMcpTool &tool : policy.mcpTools )
+      {
+        if ( tool.name == toolName )
+          return true;
+      }
+      return false;
+    };
+
+    const auto containsUnknown = [&knownTools, &mcpKnown]( const QStringList &tools ) {
       for ( const QString &toolName : tools )
       {
-        if ( !knownTools.contains( toolName ) )
+        if ( !knownTools.contains( toolName ) && !mcpKnown( toolName ) )
           return true;
       }
       return false;
@@ -271,6 +309,28 @@ namespace
         return true;
     }
     return false;
+  }
+
+  const QgsAiManagedMcpTool *managedMcpTool( const QgsAiManagedAgentPolicy &policy, const QString &toolName )
+  {
+    for ( const QgsAiManagedMcpTool &tool : policy.mcpTools )
+    {
+      if ( tool.name == toolName )
+        return &tool;
+    }
+    return nullptr;
+  }
+
+  bool mcpToolAllowedForAgent( const QgsAiManagedAgentPolicy &policy, const QString &toolName, const QString &agentName )
+  {
+    const QgsAiManagedMcpTool *tool = managedMcpTool( policy, toolName );
+    if ( !tool || !tool->enabled )
+      return false;
+    if ( agentName == "planner"_L1 )
+      return false;
+    if ( agentName == "reviewer"_L1 && tool->mutating )
+      return false;
+    return true;
   }
 
   QString extractProposedPlanMarkdown( const QString &text )
@@ -451,7 +511,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
         return;
       }
 
-      if ( !mPendingProviders.isEmpty() )
+      // Authentication and policy errors require user action. Falling back
+      // would hide the real failure behind a second provider's error.
+      const bool requiresUserAction = httpStatus == 401 || httpStatus == 403;
+      if ( !requiresUserAction && !mPendingProviders.isEmpty() )
       {
         if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
           completeManagedAgentRun();
@@ -462,7 +525,17 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       }
 
       const QString finalError = actionableError( providerName, errorMessage, httpStatus );
-      const QgsAiChatMessage assistant = buildAssistantMessage( finalError );
+      QgsAiChatMessage assistant = buildAssistantMessage( finalError );
+      assistant.metadata.insert( u"ui_kind"_s, u"request_error"_s );
+      assistant.metadata.insert( u"error_provider"_s, providerName );
+      assistant.metadata.insert( u"error_code"_s, errorCodeFromText( errorMessage ) );
+      assistant.metadata.insert( u"http_status"_s, httpStatus );
+      if ( isAuthenticationError( providerName, errorMessage, httpStatus ) )
+        assistant.metadata.insert( u"error_kind"_s, u"authentication"_s );
+      else if ( isPolicyError( errorMessage, httpStatus ) )
+        assistant.metadata.insert( u"error_kind"_s, u"policy"_s );
+      else
+        assistant.metadata.insert( u"error_kind"_s, u"request"_s );
       recordHistoryMessage( assistant );
       emit requestStateChanged( u"failed"_s, finalError );
       mActiveRequestId.clear();
@@ -1375,6 +1448,7 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
 {
   const QString sanitized = mRouter ? mRouter->sanitizeErrorText( errorMessage ) : errorMessage;
   const QString lower = sanitized.toLower();
+  const QString code = errorCodeFromText( sanitized );
 
   if ( httpStatus == 0 )
   {
@@ -1385,22 +1459,39 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
     if ( lower.contains( "no api key configured"_L1 ) )
       return u"%1 API key is missing. Add an API key in Provider Settings or switch provider."_s.arg( providerName );
     if ( providerName == "Codex"_L1 && ( lower.contains( "missing codex refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
-      return u"Codex authentication failed. Sign in with Codex again in Provider Settings, then retry."_s;
+      return u"Codex sign-in is missing or expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 && ( lower.contains( "missing claude refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
       return u"Claude authentication failed. Sign in with Claude again or configure an API key in Provider Settings."_s;
     if ( providerName == "Plan Account"_L1 && lower.contains( "session token"_L1 ) )
-      return u"Plan Account authentication failed. Check the session token or authcfg in Provider Settings."_s;
+      return u"Plan Account sign-in is missing or expired. Log out below, then sign in again and retry."_s;
   }
 
-  if ( httpStatus == 401 || httpStatus == 403 )
+  if ( isAuthenticationError( providerName, sanitized, httpStatus ) )
   {
     if ( providerName == "Plan Account"_L1 )
-      return u"%1 authentication failed. Check session token or authcfg in Provider Settings."_s.arg( providerName );
+      return u"Plan Account sign-in has expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Codex"_L1 )
-      return u"Codex authentication failed. Sign in with Codex again in Provider Settings, then retry."_s;
+      return u"Codex sign-in has expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 )
       return u"Claude authentication failed. Sign in with Claude again or configure an API key in Provider Settings."_s;
     return u"%1 authentication failed. Check the API key or OAuth login in Provider Settings."_s.arg( providerName );
+  }
+  if ( httpStatus == 403 )
+  {
+    if ( code == "tool_not_allowed"_L1 )
+      return u"%1\n\nYour current Plan tier does not allow one of the requested tools. Run the saved workflow with allowed tools, choose a different operation, or open Plan Account to upgrade."_s.arg( sanitized );
+    if ( code == "model_not_allowed"_L1 )
+      return u"%1\n\nChoose a model included in your Plan tier, or open Plan Account to upgrade."_s.arg( sanitized );
+    if ( code == "agent_mode_forbids_tools"_L1 )
+      return u"%1\n\nPlan mode can only prepare a plan. Accept it, then use Run workflow or switch to Agent mode to execute tools."_s.arg( sanitized );
+    if ( code == "agent_mode_forbids_edits"_L1 )
+      return u"%1\n\nSwitch to Ask before edits or Editor mode, then retry and approve the requested changes."_s.arg( sanitized );
+    if ( code == "agent_approval_required"_L1 || code == "agent_run_required"_L1 )
+      return u"%1\n\nRetry in Ask before edits mode and approve the task before tools run."_s.arg( sanitized );
+    if ( code == "agent_run_expired"_L1 || code == "agent_run_inactive"_L1 )
+      return u"%1\n\nStart the request again to create a fresh approved agent task."_s.arg( sanitized );
+    return sanitized.isEmpty() ? u"%1 refused the request because of an account or agent policy. Review the selected mode, model, and Plan permissions, then retry."_s.arg( providerName )
+                               : u"%1\n\nThis is a policy restriction, not a login failure. Review the selected mode, model, and Plan permissions, then retry."_s.arg( sanitized );
   }
   if ( httpStatus == 404 )
     return u"%1 endpoint not found. Verify provider endpoint in settings."_s.arg( providerName );
@@ -1564,6 +1655,8 @@ void QgsAiAgentSessionManager::setAgentBehaviorSettings( const QgsAiAgentBehavio
 void QgsAiAgentSessionManager::setManagedAgentPolicy( const QgsAiManagedAgentPolicy &policy )
 {
   mManagedAgentPolicy = policy;
+  if ( mToolRegistry )
+    mToolRegistry->setManagedMcpTools( policy.mcpTools );
   refreshRouterToolPolicy();
 }
 
@@ -1582,7 +1675,7 @@ QStringList QgsAiAgentSessionManager::allowedToolsForActiveAgent() const
     const QStringList readOnly = reviewerReadOnlyTools();
     for ( const QString &toolName : available )
     {
-      if ( readOnly.contains( toolName ) )
+      if ( readOnly.contains( toolName ) || mcpToolAllowedForAgent( mManagedAgentPolicy, toolName, mActiveAgent ) )
         localAllowed << toolName;
     }
   }
@@ -1592,7 +1685,7 @@ QStringList QgsAiAgentSessionManager::allowedToolsForActiveAgent() const
     for ( const QString &toolName : available )
     {
       const QgsAiTool *tool = mToolRegistry->find( toolName );
-      if ( readOnly.contains( toolName ) || ( tool && tool->requiresApproval() ) )
+      if ( readOnly.contains( toolName ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, toolName, mActiveAgent ) )
         localAllowed << toolName;
     }
   }
@@ -1611,7 +1704,13 @@ QStringList QgsAiAgentSessionManager::allowedToolsForActiveAgent() const
   if ( applyManagedPolicy )
   {
     managedAllowed = mActiveAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( mActiveAgent ) );
-    return intersectTools( localAllowed, managedAllowed );
+    QStringList filtered = intersectTools( localAllowed, managedAllowed );
+    for ( const QgsAiManagedMcpTool &tool : mManagedAgentPolicy.mcpTools )
+    {
+      if ( mcpToolAllowedForAgent( mManagedAgentPolicy, tool.name, mActiveAgent ) && available.contains( tool.name ) && !filtered.contains( tool.name ) )
+        filtered << tool.name;
+    }
+    return filtered;
   }
   return localAllowed;
 }
@@ -2697,6 +2796,10 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
       // code and JSON string escaping already neutralizes the wrapper markers.
       serialized = wrapUntrusted( u"tool:%1"_s.arg( call.name ), result.output.toString() );
     }
+    else if ( call.name.startsWith( u"mcp__"_s ) )
+    {
+      serialized = wrapUntrusted( u"tool:%1"_s.arg( call.name ), QString::fromUtf8( QJsonDocument( outputObject ).toJson( QJsonDocument::Compact ) ) );
+    }
     else
     {
       QJsonObject enriched = outputObject;
@@ -2802,11 +2905,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         }
         else if ( mActiveAgent == "reviewer"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
         }
         else if ( mActiveAgent == "ask_before_edits"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
         }
       }
       const bool applyManagedPolicy = mRouter
@@ -2817,7 +2920,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       const QStringList managedAllowed = applyManagedPolicy ? ( mActiveAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
                                                                                                       : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( mActiveAgent ) ) )
                                                             : QStringList();
-      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name );
+      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
       const QString blockedReason = blockedByManagedPolicy ? u"managed_policy"_s : ( toolAvailable ? u"agent_mode"_s : u"tool_unavailable"_s );
       metadata.insert( u"blocked_reason"_s, blockedReason );
       QgsAiAuditLog::appendToolEvent( u"blocked_by_policy"_s, call.name, risk, false, metadata );
@@ -2938,14 +3041,17 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
 
     QgsAiToolResult result;
     const QgsAiTool *calledTool = mToolRegistry->find( call.name );
-    const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1 && calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic;
-    if ( needsGenericApproval && !approveGenericToolCall( call.name, calledTool->riskLevel(), call.args ) )
+    const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
+    const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1
+                                       && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+    const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
+    if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
     {
       QJsonObject metadata;
       metadata.insert( u"agent_mode"_s, mActiveAgent );
       metadata.insert( u"tool_call_id"_s, call.id );
       metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
-      QgsAiAuditLog::appendToolEvent( u"rejected_by_user"_s, call.name, QgsAiToolRiskLevelName( calledTool->riskLevel() ), false, metadata );
+      QgsAiAuditLog::appendToolEvent( u"rejected_by_user"_s, call.name, QgsAiToolRiskLevelName( approvalRisk ), false, metadata );
       result = QgsAiToolResult::error( u"Tool call was rejected by the user before execution."_s );
     }
     else

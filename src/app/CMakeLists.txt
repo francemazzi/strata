@@ -334,6 +334,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaimodels.cpp
     ai/qgsaiopenroutermodelcatalog.cpp
     ai/qgsaiplanclient.cpp
+    ai/qgsaigallerycloudclient.cpp
     ai/qgsaipipinstallapprovaldialog.cpp
     ai/qgsaipythonapprovaldialog.cpp
     ai/qgsaimessagelogbuffer.cpp
@@ -372,6 +373,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/tools/qgsaitoolregistry.cpp
     ai/tools/qgsaiwebfetchtool.cpp
     ai/tools/qgsaiwebsearchtool.cpp
+    ai/tools/qgsaimcpcalltool.cpp
   )
 endif()
 

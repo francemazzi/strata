@@ -78,6 +78,11 @@ else
 
   mkdir -p "${BACKEND_STATE_DIR}"
   : > "${BACKEND_LOG}"
+  echo "Starting Docker Postgres/Chroma for Strata BE..." >&2
+  (
+    cd "${BACKEND_DIR}"
+    npm run db:up
+  ) >> "${BACKEND_LOG}" 2>&1
   echo "Starting local Strata BE at ${STRATA_BACKEND_LOCAL} (log: ${BACKEND_LOG})" >&2
   (
     cd "${BACKEND_DIR}"

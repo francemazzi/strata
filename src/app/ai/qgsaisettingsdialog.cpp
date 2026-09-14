@@ -30,6 +30,7 @@
 #include "qgsaiclaudeoauthclient.h"
 #include "qgsaigissuggestionengine.h"
 #include "qgsaimessagelogbuffer.h"
+#include "qgsaigallerycloudclient.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaiopenroutermodelcatalog.h"
 #include "qgsaiplanclient.h"
@@ -537,11 +538,16 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
   addSection( u"providers"_s, tr( "Models & Providers" ), buildProvidersPage() );
   addSection( u"agent"_s, tr( "Agent" ), buildAgentPage() );
   addSection( u"rules"_s, tr( "Rules & Skills" ), buildRulesSkillsPage() );
+  addSection( u"gallery"_s, tr( "Gallery & Connectors" ), buildGalleryConnectorsPage() );
   addSection( u"indexing"_s, tr( "Indexing & Docs" ), buildIndexingPage() );
   addSection( u"workspace"_s, tr( "Workspace" ), buildWorkspacePage() );
   addSection( u"privacy"_s, tr( "Privacy & Telemetry" ), buildPrivacyPage() );
   addSection( u"onboarding"_s, tr( "Onboarding & Release" ), buildOnboardingPage() );
 
+  connect( mSidebarList, &QListWidget::currentRowChanged, this, [this]( int ) {
+    if ( mSidebarList->currentItem() && mSidebarList->currentItem()->data( Qt::UserRole ).toString() == "gallery"_L1 )
+      refreshGalleryAndConnectors();
+  } );
   connect( mSidebarList, &QListWidget::currentRowChanged, mStack, &QStackedWidget::setCurrentIndex );
   mSidebarList->setCurrentRow( 0 );
 
@@ -1999,6 +2005,302 @@ void QgsAiSettingsDialog::importRulesSkillsFromCloud()
     client->deleteLater();
   } );
   client->ensureWorkspace( mAccountWidget->planEndpoint(), token, workspaceRoot, QFileInfo( workspaceRoot ).fileName() );
+}
+
+QWidget *QgsAiSettingsDialog::buildGalleryConnectorsPage()
+{
+  QVBoxLayout *contentLayout = nullptr;
+  QWidget *page = createPage( tr( "Gallery & Connectors" ), tr( "Install curated plugin packs into this workspace and enable Plan MCP connectors." ), contentLayout );
+
+  contentLayout->addWidget( sectionHeader( tr( "Plugin packs" ), page ) );
+  mGalleryPacksList = new QListWidget( page );
+  mGalleryPacksList->setMinimumHeight( 140 );
+  contentLayout->addWidget( mGalleryPacksList );
+  mImportGalleryPackButton = new QPushButton( tr( "Install selected pack" ), page );
+  connect( mImportGalleryPackButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::importSelectedGalleryPack );
+  contentLayout->addWidget( mImportGalleryPackButton );
+  mGalleryStatusLabel = new QLabel( page );
+  mGalleryStatusLabel->setWordWrap( true );
+  mGalleryStatusLabel->setProperty( "aiRole", u"rowDescription"_s );
+  contentLayout->addWidget( mGalleryStatusLabel );
+
+  contentLayout->addWidget( sectionHeader( tr( "MCP connectors" ), page ) );
+  mMcpConnectorsList = new QListWidget( page );
+  mMcpConnectorsList->setMinimumHeight( 120 );
+  connect( mMcpConnectorsList, &QListWidget::itemChanged, this, [this]( QListWidgetItem *item ) {
+    if ( !item || !mAccountWidget || !mModelRouter )
+      return;
+    const QString token = mModelRouter->planSessionToken().trimmed();
+    const QString apiBase = QgsAiPlanClient::apiBaseForChatEndpoint( mAccountWidget->planEndpoint() );
+    if ( token.isEmpty() || apiBase.isEmpty() )
+      return;
+    const QString slug = item->data( Qt::UserRole ).toString();
+    const bool enabled = item->checkState() == Qt::Checked;
+    QgsAiGalleryCloudClient *client = new QgsAiGalleryCloudClient( this );
+    connect( client, &QgsAiGalleryCloudClient::mcpServerUpdated, this, [this, client]( const QgsAiGalleryCloudClient::McpServer & ) {
+      QgsAiPlanClient *policyClient = new QgsAiPlanClient( this );
+      connect( policyClient, &QgsAiPlanClient::agentPolicyReady, this, [this, policyClient]( const QgsAiManagedAgentPolicy &policy, bool ) {
+        if ( mSessionManager )
+          mSessionManager->setManagedAgentPolicy( policy );
+        policyClient->deleteLater();
+      } );
+      policyClient->refreshAgentPolicy( mAccountWidget->planEndpoint(), mModelRouter->planSessionToken() );
+      client->deleteLater();
+    } );
+    connect( client, &QgsAiGalleryCloudClient::requestFailed, this, [this, client]( const QString &message ) {
+      mConnectorsStatusLabel->setText( message );
+      client->deleteLater();
+    } );
+    client->setMcpServerEnabled( apiBase, token, slug, enabled );
+  } );
+  contentLayout->addWidget( mMcpConnectorsList );
+  mConnectorsStatusLabel = new QLabel( page );
+  mConnectorsStatusLabel->setWordWrap( true );
+  mConnectorsStatusLabel->setProperty( "aiRole", u"rowDescription"_s );
+  contentLayout->addWidget( mConnectorsStatusLabel );
+  return page;
+}
+
+void QgsAiSettingsDialog::refreshGalleryAndConnectors()
+{
+  if ( !mGalleryPacksList || !mMcpConnectorsList || !mAccountWidget )
+    return;
+
+  const QString apiBase = QgsAiPlanClient::apiBaseForChatEndpoint( mAccountWidget->planEndpoint() );
+  const QString token = mModelRouter ? mModelRouter->planSessionToken().trimmed() : QString();
+  if ( apiBase.isEmpty() )
+  {
+    mGalleryStatusLabel->setText( tr( "Configure the Plan endpoint to load the gallery." ) );
+    return;
+  }
+
+  QgsAiGalleryCloudClient *client = new QgsAiGalleryCloudClient( this );
+  connect( client, &QgsAiGalleryCloudClient::packsFetched, this, [this, client]( const QList<QgsAiGalleryCloudClient::PackSummary> &packs ) {
+    mGalleryPacksList->clear();
+    for ( const QgsAiGalleryCloudClient::PackSummary &pack : packs )
+    {
+      QListWidgetItem *item = new QListWidgetItem( pack.name, mGalleryPacksList );
+      item->setToolTip( pack.description );
+      item->setData( Qt::UserRole, pack.slug );
+    }
+    mGalleryStatusLabel->setText( packs.isEmpty() ? tr( "No curated packs are published yet." ) : tr( "%n pack(s) available.", nullptr, packs.size() ) );
+    client->deleteLater();
+  } );
+  connect( client, &QgsAiGalleryCloudClient::requestFailed, this, [this, client]( const QString &message ) {
+    mGalleryStatusLabel->setText( message );
+    client->deleteLater();
+  } );
+  client->fetchPacks( apiBase, token );
+
+  if ( token.isEmpty() )
+  {
+    mMcpConnectorsList->clear();
+    mConnectorsStatusLabel->setText( tr( "Sign in to Plan Account to enable MCP connectors." ) );
+    return;
+  }
+
+  QgsAiGalleryCloudClient *mcpClient = new QgsAiGalleryCloudClient( this );
+  connect( mcpClient, &QgsAiGalleryCloudClient::mcpServersFetched, this, [this, mcpClient]( const QList<QgsAiGalleryCloudClient::McpServer> &servers ) {
+    mMcpConnectorsList->blockSignals( true );
+    mMcpConnectorsList->clear();
+    for ( const QgsAiGalleryCloudClient::McpServer &server : servers )
+    {
+      QListWidgetItem *item = new QListWidgetItem( server.name, mMcpConnectorsList );
+      item->setFlags( item->flags() | Qt::ItemIsUserCheckable );
+      item->setCheckState( server.enabled ? Qt::Checked : Qt::Unchecked );
+      item->setToolTip( server.description );
+      item->setData( Qt::UserRole, server.slug );
+    }
+    mMcpConnectorsList->blockSignals( false );
+    mConnectorsStatusLabel->setText( servers.isEmpty() ? tr( "No curated MCP connectors are available." ) : tr( "Mutating connectors still require local approval in Ask before edits." ) );
+    mcpClient->deleteLater();
+  } );
+  connect( mcpClient, &QgsAiGalleryCloudClient::requestFailed, this, [this, mcpClient]( const QString &message ) {
+    mConnectorsStatusLabel->setText( message );
+    mcpClient->deleteLater();
+  } );
+  mcpClient->fetchMcpServers( apiBase, token );
+}
+
+void QgsAiSettingsDialog::importSelectedGalleryPack()
+{
+  if ( !mGalleryPacksList || !mSessionManager || !mAccountWidget )
+    return;
+  QListWidgetItem *selected = mGalleryPacksList->currentItem();
+  if ( !selected )
+  {
+    QMessageBox::information( this, tr( "Install pack" ), tr( "Select a pack first." ) );
+    return;
+  }
+  const QString workspaceRoot = mSessionManager->workspaceRoot();
+  if ( workspaceRoot.trimmed().isEmpty() || !QgsAiWorkspaceTrust::isTrusted( workspaceRoot ) )
+  {
+    QMessageBox::warning( this, tr( "Install pack" ), tr( "Trust this workspace before installing gallery files." ) );
+    return;
+  }
+
+  const QString apiBase = QgsAiPlanClient::apiBaseForChatEndpoint( mAccountWidget->planEndpoint() );
+  const QString token = mModelRouter ? mModelRouter->planSessionToken().trimmed() : QString();
+  if ( apiBase.isEmpty() )
+    return;
+
+  mImportGalleryPackButton->setEnabled( false );
+  mGalleryStatusLabel->setText( tr( "Downloading pack…" ) );
+  QgsAiGalleryCloudClient *client = new QgsAiGalleryCloudClient( this );
+  connect( client, &QgsAiGalleryCloudClient::packImportReady, this, [this, client]( const QgsAiGalleryCloudClient::PackImport &packImport ) {
+    QHash<QString, QString> localRuleMarkdown;
+    for ( const QgsAiRuleInfo &rule : rulesSkillsStore().listRules( mRulesRelativeDirForList ) )
+      localRuleMarkdown.insert( rule.slug, rulesSkillsStore().readRuleMarkdown( rule ) );
+    QHash<QString, QString> localSkillMarkdown;
+    for ( const QgsAiSkillInfo &skill : rulesSkillsStore().listSkills( mSkillsRelativeDirForList ) )
+      localSkillMarkdown.insert( skill.slug, rulesSkillsStore().readSkillMarkdown( skill ) );
+
+    QDialog preview( this );
+    preview.setWindowTitle( tr( "Install gallery pack" ) );
+    preview.resize( 760, 430 );
+    QVBoxLayout *layout = new QVBoxLayout( &preview );
+    QLabel *intro = new QLabel( tr( "Review pack children before writing them into this workspace. Conflicts keep the local file unless you choose Replace local." ), &preview );
+    intro->setWordWrap( true );
+    layout->addWidget( intro );
+    QTableWidget *table = new QTableWidget( packImport.skills.size() + packImport.rules.size(), 4, &preview );
+    table->setHorizontalHeaderLabels( { tr( "Type" ), tr( "Slug" ), tr( "State" ), tr( "Action" ) } );
+    table->horizontalHeader()->setSectionResizeMode( 0, QHeaderView::ResizeToContents );
+    table->horizontalHeader()->setSectionResizeMode( 1, QHeaderView::Stretch );
+    table->horizontalHeader()->setSectionResizeMode( 2, QHeaderView::ResizeToContents );
+    table->horizontalHeader()->setSectionResizeMode( 3, QHeaderView::ResizeToContents );
+    table->verticalHeader()->setVisible( false );
+    layout->addWidget( table, 1 );
+
+    struct PreviewRow
+    {
+        bool skill = false;
+        int remoteIndex = -1;
+        QComboBox *action = nullptr;
+    };
+    QList<PreviewRow> rows;
+    auto addRow = [table, &rows]( int row, bool skill, int remoteIndex, const QString &slug, QgsAiRulesSkillsCloudClient::RemoteComparison comparison ) {
+      auto fixedItem = []( const QString &value ) {
+        QTableWidgetItem *item = new QTableWidgetItem( value );
+        item->setFlags( item->flags() & ~Qt::ItemIsEditable );
+        return item;
+      };
+      table->setItem( row, 0, fixedItem( skill ? tr( "Skill" ) : tr( "Rule" ) ) );
+      table->setItem( row, 1, fixedItem( slug ) );
+      const QString state = comparison == QgsAiRulesSkillsCloudClient::RemoteComparison::RemoteOnly   ? tr( "Remote only" )
+                            : comparison == QgsAiRulesSkillsCloudClient::RemoteComparison::Equivalent ? tr( "Equivalent" )
+                                                                                                      : tr( "Conflict" );
+      table->setItem( row, 2, fixedItem( state ) );
+      QComboBox *action = new QComboBox( table );
+      if ( comparison == QgsAiRulesSkillsCloudClient::RemoteComparison::RemoteOnly )
+      {
+        action->addItem( tr( "Import" ), u"import"_s );
+        action->addItem( tr( "Skip" ), u"skip"_s );
+      }
+      else if ( comparison == QgsAiRulesSkillsCloudClient::RemoteComparison::Equivalent )
+      {
+        action->addItem( tr( "Skip" ), u"skip"_s );
+        action->setEnabled( false );
+      }
+      else
+      {
+        action->addItem( tr( "Keep local" ), u"keep"_s );
+        action->addItem( tr( "Replace local" ), u"replace"_s );
+      }
+      table->setCellWidget( row, 3, action );
+      rows << PreviewRow { skill, remoteIndex, action };
+    };
+
+    int row = 0;
+    for ( int i = 0; i < packImport.rules.size(); ++i, ++row )
+    {
+      QgsAiRulesSkillsCloudClient::RemoteRule remote;
+      remote.slug = packImport.rules.at( i ).slug;
+      remote.name = packImport.rules.at( i ).name;
+      remote.description = packImport.rules.at( i ).description;
+      remote.content = packImport.rules.at( i ).content;
+      const QString markdown = QgsAiRulesSkillsCloudClient::markdownForRemoteRule( remote );
+      addRow( row, false, i, remote.slug, QgsAiRulesSkillsCloudClient::classifyRemote( localRuleMarkdown.contains( remote.slug ), localRuleMarkdown.value( remote.slug ), markdown ) );
+    }
+    for ( int i = 0; i < packImport.skills.size(); ++i, ++row )
+    {
+      QgsAiRulesSkillsCloudClient::RemoteSkill remote;
+      remote.slug = packImport.skills.at( i ).slug;
+      remote.name = packImport.skills.at( i ).name;
+      remote.description = packImport.skills.at( i ).description;
+      remote.content = packImport.skills.at( i ).content;
+      const QString markdown = QgsAiRulesSkillsCloudClient::markdownForRemoteSkill( remote );
+      addRow( row, true, i, remote.slug, QgsAiRulesSkillsCloudClient::classifyRemote( localSkillMarkdown.contains( remote.slug ), localSkillMarkdown.value( remote.slug ), markdown ) );
+    }
+
+    QDialogButtonBox *buttons = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &preview );
+    buttons->button( QDialogButtonBox::Ok )->setText( tr( "Apply selected" ) );
+    connect( buttons, &QDialogButtonBox::accepted, &preview, &QDialog::accept );
+    connect( buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject );
+    layout->addWidget( buttons );
+
+    int imported = 0;
+    QStringList errors;
+    if ( preview.exec() == QDialog::Accepted )
+    {
+      const QgsAiRulesSkillsStore destination = rulesSkillsStore();
+      for ( const PreviewRow &previewRow : rows )
+      {
+        const QString action = previewRow.action->currentData().toString();
+        if ( action != "import"_L1 && action != "replace"_L1 )
+          continue;
+        QString error;
+        bool ok = false;
+        if ( previewRow.skill )
+        {
+          QgsAiRulesSkillsCloudClient::RemoteSkill remote;
+          remote.slug = packImport.skills.at( previewRow.remoteIndex ).slug;
+          remote.name = packImport.skills.at( previewRow.remoteIndex ).name;
+          remote.description = packImport.skills.at( previewRow.remoteIndex ).description;
+          remote.content = packImport.skills.at( previewRow.remoteIndex ).content;
+          ok = destination.writeSkillMarkdown( mSkillsRelativeDirForList, remote.slug, QgsAiRulesSkillsCloudClient::markdownForRemoteSkill( remote ), &error );
+        }
+        else
+        {
+          QgsAiRulesSkillsCloudClient::RemoteRule remote;
+          remote.slug = packImport.rules.at( previewRow.remoteIndex ).slug;
+          remote.name = packImport.rules.at( previewRow.remoteIndex ).name;
+          remote.description = packImport.rules.at( previewRow.remoteIndex ).description;
+          remote.content = packImport.rules.at( previewRow.remoteIndex ).content;
+          ok = destination.writeRuleMarkdown( mRulesRelativeDirForList, remote.slug, QgsAiRulesSkillsCloudClient::markdownForRemoteRule( remote ), &error );
+        }
+        if ( ok )
+          ++imported;
+        else if ( !error.isEmpty() )
+          errors << error;
+      }
+
+      const QString token = mModelRouter ? mModelRouter->planSessionToken().trimmed() : QString();
+      const QString apiBase = QgsAiPlanClient::apiBaseForChatEndpoint( mAccountWidget->planEndpoint() );
+      if ( !token.isEmpty() && !apiBase.isEmpty() )
+      {
+        for ( const QgsAiGalleryCloudClient::Connector &connector : packImport.pack.connectors )
+        {
+          QgsAiGalleryCloudClient *toggle = new QgsAiGalleryCloudClient( this );
+          toggle->setMcpServerEnabled( apiBase, token, connector.slug, connector.enabled );
+          connect( toggle, &QgsAiGalleryCloudClient::mcpServerUpdated, toggle, &QObject::deleteLater );
+          connect( toggle, &QgsAiGalleryCloudClient::requestFailed, toggle, &QObject::deleteLater );
+        }
+      }
+    }
+
+    refreshRulesList();
+    refreshSkillsList();
+    refreshGalleryAndConnectors();
+    mImportGalleryPackButton->setEnabled( true );
+    mGalleryStatusLabel->setText( errors.isEmpty() ? tr( "Installed %n item(s) from the pack.", nullptr, imported ) : errors.join( u"\n"_s ) );
+    client->deleteLater();
+  } );
+  connect( client, &QgsAiGalleryCloudClient::requestFailed, this, [this, client]( const QString &message ) {
+    mImportGalleryPackButton->setEnabled( true );
+    mGalleryStatusLabel->setText( message );
+    client->deleteLater();
+  } );
+  client->fetchPackForImport( apiBase, token, selected->data( Qt::UserRole ).toString() );
 }
 
 QWidget *QgsAiSettingsDialog::buildIndexingPage()
