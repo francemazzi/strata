@@ -28,9 +28,9 @@
 #include "qgsaiagentsessionmanager.h"
 #include "qgsaichatdockwidget.h"
 #include "qgsaiclaudeoauthclient.h"
+#include "qgsaigallerycloudclient.h"
 #include "qgsaigissuggestionengine.h"
 #include "qgsaimessagelogbuffer.h"
-#include "qgsaigallerycloudclient.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaiopenroutermodelcatalog.h"
 #include "qgsaiplanclient.h"
@@ -2292,7 +2292,7 @@ void QgsAiSettingsDialog::importSelectedGalleryPack()
     refreshSkillsList();
     refreshGalleryAndConnectors();
     mImportGalleryPackButton->setEnabled( true );
-    mGalleryStatusLabel->setText( errors.isEmpty() ? tr( "Installed %n item(s) from the pack.", nullptr, imported ) : errors.join( u"\n"_s ) );
+    mGalleryStatusLabel->setText( errors.isEmpty() ? tr( "Installed %n item(s) from the pack.", nullptr, imported ) : errors.join( '\n'_L1 ) );
     client->deleteLater();
   } );
   connect( client, &QgsAiGalleryCloudClient::requestFailed, this, [this, client]( const QString &message ) {

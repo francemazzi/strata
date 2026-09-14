@@ -284,7 +284,7 @@ QJsonObject QgsAiToolRegistry::mcpSchemaEntry( const QgsAiManagedMcpTool &tool, 
 
 QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObject &args ) const
 {
-  if ( name.startsWith( u"mcp__"_s ) )
+  if ( name.startsWith( "mcp__"_L1 ) )
   {
     if ( !mMcpProxy )
       return QgsAiToolResult::error( u"MCP gateway is not configured."_s );

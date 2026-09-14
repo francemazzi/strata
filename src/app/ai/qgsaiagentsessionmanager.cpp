@@ -282,7 +282,7 @@ namespace
       knownTools.insert( toolName );
 
     const auto mcpKnown = [&policy]( const QString &toolName ) {
-      if ( !toolName.startsWith( u"mcp__"_s ) )
+      if ( !toolName.startsWith( "mcp__"_L1 ) )
         return false;
       for ( const QgsAiManagedMcpTool &tool : policy.mcpTools )
       {
@@ -1479,7 +1479,9 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
   if ( httpStatus == 403 )
   {
     if ( code == "tool_not_allowed"_L1 )
-      return u"%1\n\nYour current Plan tier does not allow one of the requested tools. Run the saved workflow with allowed tools, choose a different operation, or open Plan Account to upgrade."_s.arg( sanitized );
+      return u"%1\n\nYour current Plan tier does not allow one of the requested tools. Run the saved workflow with allowed tools, choose a different operation, or open Plan Account to upgrade."_s.arg(
+        sanitized
+      );
     if ( code == "model_not_allowed"_L1 )
       return u"%1\n\nChoose a model included in your Plan tier, or open Plan Account to upgrade."_s.arg( sanitized );
     if ( code == "agent_mode_forbids_tools"_L1 )
@@ -2796,7 +2798,7 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
       // code and JSON string escaping already neutralizes the wrapper markers.
       serialized = wrapUntrusted( u"tool:%1"_s.arg( call.name ), result.output.toString() );
     }
-    else if ( call.name.startsWith( u"mcp__"_s ) )
+    else if ( call.name.startsWith( "mcp__"_L1 ) )
     {
       serialized = wrapUntrusted( u"tool:%1"_s.arg( call.name ), QString::fromUtf8( QJsonDocument( outputObject ).toJson( QJsonDocument::Compact ) ) );
     }
@@ -3042,8 +3044,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     QgsAiToolResult result;
     const QgsAiTool *calledTool = mToolRegistry->find( call.name );
     const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
-    const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1
-                                       && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+    const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
     const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
     if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
     {

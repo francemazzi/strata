@@ -15,15 +15,16 @@
 
 #include "qgsaigallerycloudclient.h"
 
-#include "qgsnetworkaccessmanager.h"
-
 #include <memory>
+
+#include "qgsnetworkaccessmanager.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QString>
 #include <QUrl>
 
 #include "moc_qgsaigallerycloudclient.cpp"

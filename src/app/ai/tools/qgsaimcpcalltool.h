@@ -19,6 +19,10 @@
 #include "qgis_app.h"
 #include "qgsaiwebsearchtool.h"
 
+#include <QString>
+
+using namespace Qt::StringLiterals;
+
 class APP_EXPORT QgsAiMcpCallTool : public QgsAiWebSearchToolBase
 {
   public:

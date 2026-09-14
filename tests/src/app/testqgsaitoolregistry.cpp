@@ -361,11 +361,7 @@ void TestQgsAiToolRegistry::captureMapCanvasCreatesCappedPng()
 
 void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
 {
-  QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput(
-    u"Processed field named error_code successfully."_s,
-    u"warning: error budget is low"_s,
-    QString()
-  );
+  QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"Processed field named error_code successfully."_s, u"warning: error budget is low"_s, QString() );
   QCOMPARE( diagnosis.value( u"status"_s ).toString(), u"ok"_s );
   QVERIFY( diagnosis.value( u"diagnostics"_s ).toArray().isEmpty() );
 
@@ -373,11 +369,7 @@ void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
   QCOMPARE( diagnosis.value( u"failure_code"_s ).toString(), u"python_exception"_s );
   QCOMPARE( diagnosis.value( u"exception_type"_s ).toString(), u"ValueError"_s );
 
-  diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput(
-    u"<ServiceExceptionReport><ServiceException code=\"LayerNotDefined\">missing</ServiceException></ServiceExceptionReport>"_s,
-    QString(),
-    QString()
-  );
+  diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"<ServiceExceptionReport><ServiceException code=\"LayerNotDefined\">missing</ServiceException></ServiceExceptionReport>"_s, QString(), QString() );
   QCOMPARE( diagnosis.value( u"failure_code"_s ).toString(), u"service_exception"_s );
 
   diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( QString(), u"Provider is not valid for this URI"_s, QString() );
