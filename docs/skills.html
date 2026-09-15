@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="it" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,11 +10,15 @@
   <meta property="og:description" content="Playbook GIS curati, trasparenti e pronti da copiare.">
   <meta property="og:image" content="https://getstrata.org/assets/og-share.jpg?v=20260713">
   <title>Strata — Skill & Rules Gallery</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./css/style.css?v=20260915">
-  <link rel="stylesheet" href="./css/skills.css?v=20260803">
+  <script>(function(){var t='dark';try{var m=document.cookie.match(/(?:^|; )strata-theme=([^;]*)/);if(m)t=decodeURIComponent(m[1]);else t=localStorage.getItem('strata-theme')||'dark';}catch(e){}t=t==='light'?'light':'dark';var r=document.documentElement;r.classList.remove('light','dark');r.classList.add(t);r.style.colorScheme=t;})();</script>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/400.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/500.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/600.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/700.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.2.5/400.css">
+  <link rel="stylesheet" href="./css/style.css?v=20260915c">
+  <link rel="stylesheet" href="./css/skills.css?v=20260915c">
   <link rel="icon" href="./assets/app-icon.png" type="image/png">
 </head>
 <body class="gallery-page">
@@ -29,8 +33,9 @@
           <button type="button" data-lang="it" aria-pressed="true">IT</button>
           <button type="button" data-lang="en" aria-pressed="false">EN</button>
         </div>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Passa al tema chiaro"></button>
         <button type="button" class="nav-login-link" data-open-scrivici data-i18n="nav.scrivici">Scrivici</button>
-        <a href="https://app.getstrata.org/gallery" class="nav-login-link" data-i18n="nav.login">ACCEDI</a>
+        <a href="https://app.getstrata.org/gallery" class="nav-login-link" data-i18n="nav.login">Accedi</a>
       </div>
     </div>
   </nav>
@@ -89,7 +94,8 @@
     </div>
   </footer>
 
-  <script src="./js/i18n.js?v=20260915"></script>
+  <script src="./js/theme.js?v=20260915c"></script>
+  <script src="./js/i18n.js?v=20260915c"></script>
   <script src="./js/skills-gallery.js?v=20260803"></script>
   <script src="./js/scrivici.js?v=20260915"></script>
 </body>

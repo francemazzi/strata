@@ -17,8 +17,10 @@
 
       "nav.download": "Download",
       "nav.gallery": "Skill gallery",
-      "nav.login": "ACCEDI",
+      "nav.login": "Accedi",
       "nav.scrivici": "Scrivici",
+      "nav.theme.light": "Passa al tema chiaro",
+      "nav.theme.dark": "Passa al tema scuro",
 
       "hero.title": "L'agente AI nativo per il GIS.",
       "hero.subtitle":
@@ -65,6 +67,32 @@
       "why.4.title": "Da ore a minuti",
       "why.4.desc":
         "Ispeziona layer, buffer, export GeoJSON: una richiesta al posto di script manuali.",
+
+      "theater.title": "Lavora con più agenti insieme",
+      "theater.subtitle":
+        "Crea un agente, dagli un compito, aggiungine un altro quando il lavoro cresce. Restano nel progetto e continuano 24/7.",
+      "theater.1.title": "L’agente lavora dove lavori tu",
+      "theater.1.body":
+        "Apri il progetto in Strata. L’agente usa layer, strumenti e cloud come faresti tu, anche sulle parti più noiose.",
+      "theater.2.title": "Mostragli come si fa",
+      "theater.2.body":
+        "Fagli seguire un flusso una volta. Lo salva come routine e lo ripete al giro successivo.",
+      "theater.3.title": "Impara dal contesto",
+      "theater.3.body":
+        "Rules, skills e documenti del workspace restano nel perimetro. Il prossimo task parte già informato.",
+      "theater.4.title": "Collega gli agenti",
+      "theater.4.body":
+        "Uno sul rilievo, uno sull’export, uno sulla gallery. Lavorano in parallelo; tu guardi il risultato.",
+      "theater.chip": "layer · comuni",
+      "theater.window": "Buffer 200 m sui vincoli, poi export GeoJSON.",
+      "theater.idle": "Idle",
+      "theater.bubble.1": "Acme ha già il piano vincoli del Q3.",
+      "theater.bubble.2": "Per la prossima: firmano solo annuale.",
+      "theater.pill.1": "Rilievo",
+      "theater.pill.2": "Export",
+      "theater.pill.3": "Gallery",
+      "theater.cursor.analisi": "Analisi",
+      "theater.cursor.export": "Export",
 
       "privacy.label": "Sicurezza e privacy",
       "privacy.title": "I tuoi dati, le tue regole",
@@ -122,8 +150,10 @@
 
       "nav.download": "Download",
       "nav.gallery": "Skill gallery",
-      "nav.login": "SIGN IN",
+      "nav.login": "Sign in",
       "nav.scrivici": "Write to us",
+      "nav.theme.light": "Switch to light mode",
+      "nav.theme.dark": "Switch to dark mode",
 
       "hero.title": "The native AI agent for GIS.",
       "hero.subtitle":
@@ -170,6 +200,32 @@
       "why.4.title": "From hours to minutes",
       "why.4.desc":
         "Inspect layers, buffer, export GeoJSON: one request instead of manual scripts.",
+
+      "theater.title": "Work with many agents at once",
+      "theater.subtitle":
+        "Create an agent, give it a task, add another when the work grows. They stay in the project and keep going 24/7.",
+      "theater.1.title": "The agent works where you work",
+      "theater.1.body":
+        "Open the project in Strata. The agent uses layers, tools and cloud the way you would — including the boring parts.",
+      "theater.2.title": "Show it how it’s done",
+      "theater.2.body":
+        "Walk it through a flow once. It saves the routine and repeats it next time.",
+      "theater.3.title": "Learn from context",
+      "theater.3.body":
+        "Workspace rules, skills and documents stay in the perimeter. The next task already starts informed.",
+      "theater.4.title": "Connect the agents",
+      "theater.4.body":
+        "One on survey, one on export, one on the gallery. They work in parallel; you watch the result.",
+      "theater.chip": "layer · comuni",
+      "theater.window": "200 m buffer on constraints, then GeoJSON export.",
+      "theater.idle": "Idle",
+      "theater.bubble.1": "Acme already has the Q3 constraint plan.",
+      "theater.bubble.2": "Next round they only sign yearly.",
+      "theater.pill.1": "Survey",
+      "theater.pill.2": "Export",
+      "theater.pill.3": "Gallery",
+      "theater.cursor.analisi": "Analysis",
+      "theater.cursor.export": "Export",
 
       "privacy.label": "Security & privacy",
       "privacy.title": "Your data, your rules",
@@ -374,6 +430,7 @@
     }
 
     updateDownloadReleaseUi();
+    if (window.STRATA_THEME) window.STRATA_THEME.syncButtons();
   }
 
   function applyTranslations(lang) {
@@ -420,6 +477,7 @@
     });
 
     updateDownloadReleaseUi();
+    if (window.STRATA_THEME) window.STRATA_THEME.syncButtons();
   }
 
   function setLanguage(lang) {

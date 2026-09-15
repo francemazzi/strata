@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="it" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -17,10 +17,14 @@
   <meta name="twitter:description" content="Strata: il GIS con AI nativa. Scarica gratis per macOS, Windows e Linux.">
   <meta name="twitter:image" content="https://getstrata.org/assets/og-share.jpg?v=20260713">
   <title data-i18n="meta.title">Strata — GIS con AI nativa</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./css/style.css?v=20260915">
+  <script>(function(){var t='dark';try{var m=document.cookie.match(/(?:^|; )strata-theme=([^;]*)/);if(m)t=decodeURIComponent(m[1]);else t=localStorage.getItem('strata-theme')||'dark';}catch(e){}t=t==='light'?'light':'dark';var r=document.documentElement;r.classList.remove('light','dark');r.classList.add(t);r.style.colorScheme=t;})();</script>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/400.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/500.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/600.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/700.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.2.5/400.css">
+  <link rel="stylesheet" href="./css/style.css?v=20260915c">
   <link rel="icon" href="./assets/app-icon.png" type="image/png">
   <link rel="preload" href="./assets/demo-hero-poster.webp?v=20260713b" as="image" type="image/webp">
 </head>
@@ -38,8 +42,9 @@
           <button type="button" data-lang="it" aria-pressed="true">IT</button>
           <button type="button" data-lang="en" aria-pressed="false">EN</button>
         </div>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Passa al tema chiaro"></button>
         <button type="button" class="nav-login-link" data-open-scrivici data-i18n="nav.scrivici">Scrivici</button>
-        <a href="https://app.getstrata.org" class="nav-login-link" data-i18n="nav.login">ACCEDI</a>
+        <a href="https://app.getstrata.org" class="nav-login-link" data-i18n="nav.login">Accedi</a>
       </div>
     </div>
   </nav>
@@ -142,28 +147,71 @@
     </div>
   </section>
 
-  <section class="section" id="why">
+  <section class="theater" id="why" data-agent-theater>
     <div class="container">
-      <span class="section-label" data-i18n="why.label">Perché Strata</span>
-      <h2 class="section-title" data-i18n="why.title">Chiedi, approva, fatto</h2>
-
-      <div class="features-grid features-grid-why">
-        <article class="feature-card">
-          <h3 data-i18n="why.1.title">Fa il lavoro al posto tuo</h3>
-          <p data-i18n="why.1.desc">Buffer, export, analisi: chiedi in naturale, Strata esegue con la tua approvazione.</p>
+      <h2 class="section-title section-title-center" data-i18n="theater.title">Lavora con più agenti insieme</h2>
+      <p class="section-subtitle section-subtitle-center" data-i18n="theater.subtitle">
+        Crea un agente, dagli un compito, aggiungine un altro quando il lavoro cresce. Restano nel progetto e continuano 24/7.
+      </p>
+      <div class="theater-grid">
+        <article class="theater-card">
+          <h3 data-i18n="theater.1.title">L’agente lavora dove lavori tu</h3>
+          <p data-i18n="theater.1.body">Apri il progetto in Strata. L’agente usa layer, strumenti e cloud come faresti tu, anche sulle parti più noiose.</p>
+          <div class="feature-card-stage">
+            <div class="mini-map">
+              <div class="mini-map-fill">
+                <span class="mini-chip" data-i18n="theater.chip">layer · comuni</span>
+                <span class="mini-poly" data-theater-active="0"></span>
+                <span class="mini-spot" data-theater-active="2"></span>
+              </div>
+            </div>
+          </div>
         </article>
-        <article class="feature-card">
-          <h3 data-i18n="why.2.title">Conosce il tuo progetto</h3>
-          <p data-i18n="why.2.desc">Layer, script e documenti del workspace come contesto — non snippet generici.</p>
+        <article class="theater-card">
+          <h3 data-i18n="theater.2.title">Mostragli come si fa</h3>
+          <p data-i18n="theater.2.body">Fagli seguire un flusso una volta. Lo salva come routine e lo ripete al giro successivo.</p>
+          <div class="feature-card-stage">
+            <div class="mini-window">
+              <div class="mini-window-bar">
+                <span class="mini-dot mini-dot-r"></span>
+                <span class="mini-dot mini-dot-y"></span>
+                <span class="mini-dot mini-dot-g"></span>
+                <span class="mini-window-title">Strata · progetto.qgz</span>
+              </div>
+              <p class="mini-window-body" data-i18n="theater.window">Buffer 200 m sui vincoli, poi export GeoJSON.</p>
+              <p class="mini-status" data-theater-active="1" data-i18n="theater.idle">Idle</p>
+            </div>
+          </div>
         </article>
-        <article class="feature-card">
-          <h3 data-i18n="why.3.title">Tre modalità, una sola app</h3>
-          <p data-i18n="why.3.desc">Pianifica, esegui o chiedi. Scegli il livello di autonomia senza uscire da Strata.</p>
+        <article class="theater-card">
+          <h3 data-i18n="theater.3.title">Impara dal contesto</h3>
+          <p data-i18n="theater.3.body">Rules, skills e documenti del workspace restano nel perimetro. Il prossimo task parte già informato.</p>
+          <div class="feature-card-stage">
+            <div class="mini-transcript">
+              <p class="mini-bubble" data-i18n="theater.bubble.1">Acme ha già il piano vincoli del Q3.</p>
+              <p class="mini-bubble" data-theater-active="2 3" data-theater-dim data-i18n="theater.bubble.2">Per la prossima: firmano solo annuale.</p>
+            </div>
+          </div>
         </article>
-        <article class="feature-card">
-          <h3 data-i18n="why.4.title">Da ore a minuti</h3>
-          <p data-i18n="why.4.desc">Ispeziona layer, buffer, export GeoJSON: una richiesta al posto di script manuali.</p>
+        <article class="theater-card">
+          <h3 data-i18n="theater.4.title">Collega gli agenti</h3>
+          <p data-i18n="theater.4.body">Uno sul rilievo, uno sull’export, uno sulla gallery. Lavorano in parallelo; tu guardi il risultato.</p>
+          <div class="feature-card-stage">
+            <div class="mini-team">
+              <span class="mini-pill" data-theater-active="3 0" data-i18n="theater.pill.1">Rilievo</span>
+              <span class="mini-pill" data-theater-active="3 1" data-i18n="theater.pill.2">Export</span>
+              <span class="mini-pill" data-theater-active="3 2" data-i18n="theater.pill.3">Gallery</span>
+            </div>
+          </div>
         </article>
+        <div class="feature-cursor" style="left:18%;top:28%">
+          <svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg>
+          <span class="feature-cursor__tag" data-i18n="theater.cursor.analisi">Analisi</span>
+        </div>
+        <div class="feature-cursor" style="left:72%;top:62%">
+          <svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg>
+          <span class="feature-cursor__tag" data-i18n="theater.cursor.export">Export</span>
+        </div>
       </div>
     </div>
   </section>
@@ -274,7 +322,7 @@
         data-i18n="hero.ctaPrimary"
       >Scarica per macOS</a>
       <p class="closing-links">
-        <a href="https://app.getstrata.org" class="text-link" data-i18n="nav.login">ACCEDI</a>
+        <a href="https://app.getstrata.org" class="text-link" data-i18n="nav.login">Accedi</a>
         <span aria-hidden="true">·</span>
         <a href="https://calendly.com/strataqgisai/30min" class="text-link" target="_blank" rel="noopener noreferrer" data-i18n="closing.demo">Prenota una demo</a>
       </p>
@@ -288,14 +336,16 @@
         <a href="https://github.com/francemazzi/strata" data-i18n="footer.github">GitHub</a>
         <a href="https://github.com/francemazzi/strata/releases" data-release-link data-i18n="nav.download">Download</a>
         <button type="button" data-open-scrivici data-i18n="nav.scrivici">Scrivici</button>
-        <a href="https://app.getstrata.org" data-i18n="nav.login">ACCEDI</a>
+        <a href="https://app.getstrata.org" data-i18n="nav.login">Accedi</a>
       </nav>
       <p class="footer-disclaimer" data-i18n="footer.disclaimer">Strata is an independent commercial service based on QGIS. It is not endorsed by or affiliated with QGIS.ORG or the QGIS project.</p>
     </div>
   </footer>
 
-  <script src="./js/i18n.js?v=20260915"></script>
+  <script src="./js/theme.js?v=20260915c"></script>
+  <script src="./js/i18n.js?v=20260915c"></script>
   <script src="./js/hero-video.js?v=20260713b"></script>
+  <script src="./js/agent-theater.js?v=20260915c"></script>
   <script src="./js/scrivici.js?v=20260915"></script>
 </body>
 </html>

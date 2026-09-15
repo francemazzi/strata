@@ -1,10 +1,10 @@
 :root {
-  --gallery-paper: #d8d3c5;
-  --gallery-ink: #07100e;
-  --gallery-line: rgba(216, 211, 197, 0.13);
-  --gallery-accent: #6ee7b7;
+  --gallery-paper: var(--primary);
+  --gallery-ink: var(--background);
+  --gallery-line: var(--border);
+  --gallery-accent: var(--accent);
   --gallery-warn: #efc68e;
-  --gallery-mono: "IBM Plex Mono", monospace;
+  --gallery-mono: "Geist Mono", ui-monospace, monospace;
 }
 
 .gallery-page {
@@ -12,9 +12,9 @@
   flex-direction: column;
   min-height: 100vh;
   background:
-    linear-gradient(rgba(110, 231, 183, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(110, 231, 183, 0.025) 1px, transparent 1px),
-    #080b0a;
+    linear-gradient(hsl(var(--color-sunset) / 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--color-sunset) / 0.04) 1px, transparent 1px),
+    var(--background);
   background-size: 28px 28px;
 }
 
@@ -41,7 +41,7 @@
 .gallery-detail {
   min-height: calc(100vh - var(--nav-height) - 110px);
   border: 1px solid var(--gallery-line);
-  background: rgba(10, 14, 13, 0.94);
+  background: var(--card);
 }
 
 .gallery-controls {
@@ -83,18 +83,18 @@
   padding: 10px 9px;
   border: 1px solid var(--gallery-line);
   border-radius: 4px;
-  background: #060908;
+  background: var(--background);
   color: var(--text);
   font: 400 0.72rem/1.4 var(--gallery-mono);
 }
 
 .gallery-controls input::placeholder {
-  color: #46504d;
+  color: var(--muted);
 }
 
 .gallery-zero-backend {
   margin-top: 36px;
-  color: #59635f;
+  color: var(--muted);
   font: 400 0.6rem/1.5 var(--gallery-mono);
   text-transform: uppercase;
 }
@@ -140,7 +140,7 @@
 .gallery-card:hover,
 .gallery-card.is-active {
   padding-left: 27px;
-  background: rgba(110, 231, 183, 0.045);
+  background: hsl(var(--color-sunset) / 0.08);
 }
 
 .gallery-card.is-active::before {
@@ -187,7 +187,7 @@
 .gallery-tag {
   padding: 3px 6px;
   border: 1px solid var(--gallery-line);
-  color: #78827e;
+  color: var(--muted);
   font: 400 0.56rem/1.2 var(--gallery-mono);
 }
 
@@ -202,7 +202,7 @@
   place-content: center;
   height: 100%;
   padding: 40px;
-  color: #4e5854;
+  color: var(--muted);
   text-align: center;
 }
 
@@ -281,7 +281,7 @@
 }
 
 .gallery-code-actions button:hover {
-  border-color: rgba(110, 231, 183, 0.35);
+  border-color: hsl(var(--color-sunset) / 0.35);
   color: var(--gallery-accent);
 }
 
@@ -291,8 +291,8 @@
   padding: 18px;
   border: 1px solid var(--gallery-line);
   border-radius: 6px;
-  background: #050706;
-  color: #b9c2bd;
+  background: var(--background);
+  color: var(--foreground);
   font: 400 0.7rem/1.75 var(--gallery-mono);
   white-space: pre-wrap;
 }
@@ -305,7 +305,7 @@
 }
 
 .gallery-footer {
-  background: #080b0a;
+  background: var(--background);
 }
 
 @media (max-width: 1000px) {
