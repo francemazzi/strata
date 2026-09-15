@@ -24,7 +24,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/600.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.2.5/700.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-mono@5.2.5/400.css">
-  <link rel="stylesheet" href="./css/style.css?v=20260915c">
+  <link rel="stylesheet" href="./css/style.css?v=20260915e">
   <link rel="icon" href="./assets/app-icon.png" type="image/png">
   <link rel="preload" href="./assets/demo-hero-poster.webp?v=20260713b" as="image" type="image/webp">
 </head>
@@ -157,20 +157,26 @@
         <article class="theater-card">
           <h3 data-i18n="theater.1.title">L’agente lavora dove lavori tu</h3>
           <p data-i18n="theater.1.body">Apri il progetto in Strata. L’agente usa layer, strumenti e cloud come faresti tu, anche sulle parti più noiose.</p>
-          <div class="feature-card-stage">
+          <div class="feature-card-stage" data-theater-stage="map">
             <div class="mini-map">
               <div class="mini-map-fill">
-                <span class="mini-chip" data-i18n="theater.chip">layer · comuni</span>
-                <span class="mini-poly" data-theater-active="0"></span>
-                <span class="mini-spot" data-theater-active="2"></span>
+                <div class="mini-toolbar">
+                  <span data-hit="layer" class="mini-chip" data-i18n="theater.chip">layer · comuni</span>
+                  <span data-hit="identify" class="mini-tool" data-i18n="theater.identify">Identifica</span>
+                  <span data-hit="buffer" class="mini-tool" data-i18n="theater.buffer">Buffer</span>
+                </div>
+                <span data-hit="parcel" class="mini-poly"></span>
+                <span class="mini-spot" data-on="ring"></span>
+                <span class="mini-popup" data-on="popup" data-i18n="theater.popup">Ferrara · 12,4 ha</span>
               </div>
             </div>
+            <div class="feature-cursor"><svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg><span class="feature-cursor__tag" data-i18n="theater.cursor.analisi">Analisi</span></div>
           </div>
         </article>
         <article class="theater-card">
           <h3 data-i18n="theater.2.title">Mostragli come si fa</h3>
           <p data-i18n="theater.2.body">Fagli seguire un flusso una volta. Lo salva come routine e lo ripete al giro successivo.</p>
-          <div class="feature-card-stage">
+          <div class="feature-card-stage" data-theater-stage="routine">
             <div class="mini-window">
               <div class="mini-window-bar">
                 <span class="mini-dot mini-dot-r"></span>
@@ -178,40 +184,46 @@
                 <span class="mini-dot mini-dot-g"></span>
                 <span class="mini-window-title">Strata · progetto.qgz</span>
               </div>
-              <p class="mini-window-body" data-i18n="theater.window">Buffer 200 m sui vincoli, poi export GeoJSON.</p>
-              <p class="mini-status" data-theater-active="1" data-i18n="theater.idle">Idle</p>
+              <p data-hit="prompt" class="mini-window-body" data-i18n="theater.window">Buffer 200 m sui vincoli, poi export GeoJSON.</p>
+              <div class="mini-window-actions">
+                <span data-hit="run" class="mini-run" data-i18n="theater.run">Esegui</span>
+                <span data-hit="status" class="mini-status" data-status-idle data-i18n="theater.wait">In attesa</span>
+              </div>
+              <span data-hit="file" class="mini-file">vincoli_200m.geojson</span>
             </div>
+            <div class="feature-cursor"><svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg><span class="feature-cursor__tag" data-i18n="theater.cursor.routine">Routine</span></div>
           </div>
         </article>
         <article class="theater-card">
           <h3 data-i18n="theater.3.title">Impara dal contesto</h3>
           <p data-i18n="theater.3.body">Rules, skills e documenti del workspace restano nel perimetro. Il prossimo task parte già informato.</p>
-          <div class="feature-card-stage">
-            <div class="mini-transcript">
-              <p class="mini-bubble" data-i18n="theater.bubble.1">Acme ha già il piano vincoli del Q3.</p>
-              <p class="mini-bubble" data-theater-active="2 3" data-theater-dim data-i18n="theater.bubble.2">Per la prossima: firmano solo annuale.</p>
+          <div class="feature-card-stage" data-theater-stage="context">
+            <div class="mini-context">
+              <div class="mini-pins">
+                <span data-hit="rule" class="mini-pin" data-i18n="theater.pin.rule">rule · vincoli</span>
+                <span data-hit="skill" class="mini-pin" data-i18n="theater.pin.skill">skill · acme</span>
+              </div>
+              <div class="mini-transcript">
+                <p data-hit="ask" class="mini-bubble mini-bubble-user" data-i18n="theater.ask">Quali vincoli per Acme?</p>
+                <p data-hit="reply" class="mini-bubble" data-i18n="theater.bubble.2">Piano Q3 già in knowledge. Firmano solo annuale.</p>
+              </div>
             </div>
+            <div class="feature-cursor"><svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg><span class="feature-cursor__tag" data-i18n="theater.cursor.contesto">Contesto</span></div>
           </div>
         </article>
         <article class="theater-card">
           <h3 data-i18n="theater.4.title">Collega gli agenti</h3>
           <p data-i18n="theater.4.body">Uno sul rilievo, uno sull’export, uno sulla gallery. Lavorano in parallelo; tu guardi il risultato.</p>
-          <div class="feature-card-stage">
+          <div class="feature-card-stage" data-theater-stage="team">
             <div class="mini-team">
-              <span class="mini-pill" data-theater-active="3 0" data-i18n="theater.pill.1">Rilievo</span>
-              <span class="mini-pill" data-theater-active="3 1" data-i18n="theater.pill.2">Export</span>
-              <span class="mini-pill" data-theater-active="3 2" data-i18n="theater.pill.3">Gallery</span>
+              <span data-hit="rilievo" class="mini-agent"><strong data-i18n="theater.pill.1">Rilievo</strong><span data-agent-state>Avvia</span></span>
+              <span data-hit="export" class="mini-agent"><strong data-i18n="theater.pill.2">Export</strong><span data-agent-state>Avvia</span></span>
+              <span data-hit="gallery" class="mini-agent"><strong data-i18n="theater.pill.3">Gallery</strong><span data-agent-state>Avvia</span></span>
             </div>
+            <p data-hit="sync" class="mini-sync" data-i18n="theater.sync">3 agenti in parallelo</p>
+            <div class="feature-cursor"><svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg><span class="feature-cursor__tag" data-i18n="theater.cursor.team">Team</span></div>
           </div>
         </article>
-        <div class="feature-cursor" style="left:18%;top:28%">
-          <svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg>
-          <span class="feature-cursor__tag" data-i18n="theater.cursor.analisi">Analisi</span>
-        </div>
-        <div class="feature-cursor" style="left:72%;top:62%">
-          <svg class="feature-cursor__pointer" viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" stroke="#111" stroke-width="1.2" d="M5 3.5 19 13.2l-6.2 1.2 2.6 6.3-2.7 1.1-2.6-6.2L5 18.8z" /></svg>
-          <span class="feature-cursor__tag" data-i18n="theater.cursor.export">Export</span>
-        </div>
       </div>
     </div>
   </section>
@@ -343,9 +355,9 @@
   </footer>
 
   <script src="./js/theme.js?v=20260915c"></script>
-  <script src="./js/i18n.js?v=20260915c"></script>
+  <script src="./js/i18n.js?v=20260915d"></script>
   <script src="./js/hero-video.js?v=20260713b"></script>
-  <script src="./js/agent-theater.js?v=20260915c"></script>
+  <script src="./js/agent-theater.js?v=20260915e"></script>
   <script src="./js/scrivici.js?v=20260915"></script>
 </body>
 </html>
