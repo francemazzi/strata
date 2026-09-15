@@ -167,6 +167,15 @@ video {
   color: var(--text);
 }
 
+button.nav-login-link,
+.footer-links button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
 .lang-toggle {
   display: flex;
   border: 1px solid var(--border);
@@ -583,13 +592,15 @@ video {
   gap: 8px 24px;
 }
 
-.footer-links a {
+.footer-links a,
+.footer-links button {
   font-size: 0.875rem;
   color: var(--text-muted);
   transition: color var(--transition);
 }
 
-.footer-links a:hover {
+.footer-links a:hover,
+.footer-links button:hover {
   color: var(--text);
 }
 
@@ -634,6 +645,132 @@ video {
   .closing-inner .btn-lg {
     width: 100%;
   }
+}
+
+/* Scrivici dialog — appended to body so the sticky/blurred navbar cannot clip it. */
+#scrivici-root {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  overflow-y: auto;
+}
+
+#scrivici-root[hidden] {
+  display: none;
+}
+
+.scrivici-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.scrivici-frame {
+  position: relative;
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.scrivici-dialog {
+  width: min(32rem, 100%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-elevated, #111);
+  padding: 24px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.scrivici-dialog h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.scrivici-lead,
+.scrivici-success {
+  margin: 8px 0 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.scrivici-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.scrivici-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.scrivici-form input,
+.scrivici-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+  padding: 10px 12px;
+}
+
+.scrivici-form textarea {
+  resize: vertical;
+  min-height: 7rem;
+}
+
+.scrivici-honeypot {
+  position: absolute;
+  left: -9999px;
+  height: 0;
+  overflow: hidden;
+}
+
+.scrivici-error {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #f87171;
+}
+
+.scrivici-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.scrivici-cancel,
+.scrivici-done {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.scrivici-submit {
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0a0a0a;
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.scrivici-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+body.scrivici-locked {
+  overflow: hidden;
 }
 
 @media (prefers-reduced-motion: reduce) {

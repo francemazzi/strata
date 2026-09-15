@@ -18,6 +18,7 @@
       "nav.download": "Download",
       "nav.gallery": "Skill gallery",
       "nav.login": "ACCEDI",
+      "nav.scrivici": "Scrivici",
 
       "hero.title": "L'agente AI nativo per il GIS.",
       "hero.subtitle":
@@ -102,6 +103,17 @@
         "Strata is an independent commercial service based on QGIS. It is not endorsed by or affiliated with QGIS.ORG or the QGIS project.",
       "footer.github": "GitHub",
       "footer.contact": "Contatto",
+      "scrivici.lead": "Segnala un problema o un'idea. Ti ricontattiamo all'email che lasci.",
+      "scrivici.email": "Email",
+      "scrivici.title": "Titolo",
+      "scrivici.message": "Messaggio",
+      "scrivici.cancel": "Annulla",
+      "scrivici.send": "Invia",
+      "scrivici.sending": "Invio…",
+      "scrivici.success": "Messaggio inviato. Grazie.",
+      "scrivici.close": "Chiudi",
+      "scrivici.error": "Impossibile salvare il messaggio. Riprova tra poco.",
+      "scrivici.website": "Sito web",
     },
     en: {
       "meta.title": "Strata — The AI-native GIS",
@@ -111,6 +123,7 @@
       "nav.download": "Download",
       "nav.gallery": "Skill gallery",
       "nav.login": "SIGN IN",
+      "nav.scrivici": "Write to us",
 
       "hero.title": "The native AI agent for GIS.",
       "hero.subtitle":
@@ -195,6 +208,17 @@
         "Strata is an independent commercial service based on QGIS. It is not endorsed by or affiliated with QGIS.ORG or the QGIS project.",
       "footer.github": "GitHub",
       "footer.contact": "Contact",
+      "scrivici.lead": "Report a problem or an idea. We'll get back to you at the email you leave.",
+      "scrivici.email": "Email",
+      "scrivici.title": "Title",
+      "scrivici.message": "Message",
+      "scrivici.cancel": "Cancel",
+      "scrivici.send": "Send",
+      "scrivici.sending": "Sending…",
+      "scrivici.success": "Message sent. Thank you.",
+      "scrivici.close": "Close",
+      "scrivici.error": "Couldn't save the message. Try again in a moment.",
+      "scrivici.website": "Website",
     },
   };
 

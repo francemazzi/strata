@@ -20,7 +20,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./css/style.css?v=20260713b">
+  <link rel="stylesheet" href="./css/style.css?v=20260915">
   <link rel="icon" href="./assets/app-icon.png" type="image/png">
   <link rel="preload" href="./assets/demo-hero-poster.webp?v=20260713b" as="image" type="image/webp">
 </head>
@@ -38,6 +38,7 @@
           <button type="button" data-lang="it" aria-pressed="true">IT</button>
           <button type="button" data-lang="en" aria-pressed="false">EN</button>
         </div>
+        <button type="button" class="nav-login-link" data-open-scrivici data-i18n="nav.scrivici">Scrivici</button>
         <a href="https://app.getstrata.org" class="nav-login-link" data-i18n="nav.login">ACCEDI</a>
       </div>
     </div>
@@ -286,14 +287,15 @@
         <a href="./skills.html" data-i18n="nav.gallery">Skill gallery</a>
         <a href="https://github.com/francemazzi/strata" data-i18n="footer.github">GitHub</a>
         <a href="https://github.com/francemazzi/strata/releases" data-release-link data-i18n="nav.download">Download</a>
-        <a href="mailto:francemazzi@gmail.com" data-i18n="footer.contact">Contatto</a>
+        <button type="button" data-open-scrivici data-i18n="nav.scrivici">Scrivici</button>
         <a href="https://app.getstrata.org" data-i18n="nav.login">ACCEDI</a>
       </nav>
       <p class="footer-disclaimer" data-i18n="footer.disclaimer">Strata is an independent commercial service based on QGIS. It is not endorsed by or affiliated with QGIS.ORG or the QGIS project.</p>
     </div>
   </footer>
 
-  <script src="./js/i18n.js"></script>
+  <script src="./js/i18n.js?v=20260915"></script>
   <script src="./js/hero-video.js?v=20260713b"></script>
+  <script src="./js/scrivici.js?v=20260915"></script>
 </body>
 </html>
