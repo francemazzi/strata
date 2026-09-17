@@ -1,3 +1,9 @@
+function Write-JsonUtf8NoBom {
+  param([object]$Value, [string]$Path, [int]$Depth = 4)
+  $json = $Value | ConvertTo-Json -Depth $Depth
+  [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Resolve-RequiredFile {
   param([string]$FilePath, [string]$Label)
   if ([string]::IsNullOrWhiteSpace($FilePath) -or -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
