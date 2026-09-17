@@ -179,7 +179,8 @@ $metadata = [ordered]@{
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $MetadataPath) | Out-Null
-$metadata | ConvertTo-Json -Depth 4 | Out-File -FilePath $MetadataPath -Encoding utf8
+. "$PSScriptRoot/windows-signing-files.ps1"
+Write-JsonUtf8NoBom -Value $metadata -Path $MetadataPath
 
 Add-CiEnvironment -Name "STRATA_SIGNTOOL_PATH" -Value $signToolPath
 Add-CiEnvironment -Name "STRATA_AZURE_CODESIGN_DLIB_PATH" -Value $dlibPath

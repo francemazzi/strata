@@ -60,5 +60,10 @@ try {
   foreach ($name in $required) { $originalEnv[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $null) }
   try { Assert-Fails { & "$PSScriptRoot/assert-windows-signing.ps1" } 'Missing configuration' }
   finally { foreach ($name in $required) { [Environment]::SetEnvironmentVariable($name, $originalEnv[$name]) } }
-  Write-Host 'Windows signing policy tests passed (11 scenarios).'
+  $metadataPath = Join-Path $root 'metadata.json'
+  Write-JsonUtf8NoBom -Value ([ordered]@{ Endpoint = 'https://neu.codesigning.azure.net' }) -Path $metadataPath
+  $header = [System.IO.File]::ReadAllBytes($metadataPath)[0]
+  if ($header -eq 0xEF) { throw 'Signing metadata must not start with a UTF-8 BOM.' }
+  if ($header -ne 0x7B) { throw 'Signing metadata must be raw JSON.' }
+  Write-Host 'Windows signing policy tests passed (12 scenarios).'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
