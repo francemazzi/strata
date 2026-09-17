@@ -83,10 +83,28 @@ export function assertUpload(release, name, digest) {
   return false;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableUploadFailure(message) {
+  return /502|503|504|bad gateway|timed out|ECONNRESET|ETIMEDOUT/i.test(message || '');
+}
+
 export async function uploadFile(tag, file) {
   const digest = await sha256(file);
-  if (assertUpload(readRelease(tag), basename(file), digest)) {
-    run('gh', ['release', 'upload', tag, file, '--repo', repository]);
+  if (!assertUpload(readRelease(tag), basename(file), digest)) return;
+
+  const args = ['release', 'upload', tag, file, '--repo', repository];
+  let lastFailure = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (!result.error && result.status === 0) return;
+    lastFailure = result.error?.message || result.stderr || 'unknown upload error';
+    if (attempt === 3 || !isRetryableUploadFailure(lastFailure)) {
+      throw new Error(`gh failed: ${lastFailure}`);
+    }
+    await sleep(30_000 * attempt);
   }
 }
 
