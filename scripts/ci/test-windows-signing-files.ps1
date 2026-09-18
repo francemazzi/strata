@@ -65,5 +65,17 @@ try {
   $header = [System.IO.File]::ReadAllBytes($metadataPath)[0]
   if ($header -eq 0xEF) { throw 'Signing metadata must not start with a UTF-8 BOM.' }
   if ($header -ne 0x7B) { throw 'Signing metadata must be raw JSON.' }
-  Write-Host 'Windows signing policy tests passed (12 scenarios).'
+  $githubEnv = Join-Path $root 'github.env'
+  $previousGithubEnv = $env:GITHUB_ENV
+  $env:GITHUB_ENV = $githubEnv
+  try {
+    Add-CiEnvironment -Name 'NSISDIR' -Value 'D:\temp\strata-signed-nsis'
+    $envBytes = [System.IO.File]::ReadAllBytes($githubEnv)
+    if ($envBytes.Length -ge 3 -and $envBytes[0] -eq 0xEF -and $envBytes[1] -eq 0xBB -and $envBytes[2] -eq 0xBF) {
+      throw 'GITHUB_ENV lines must not start with a UTF-8 BOM.'
+    }
+    $envText = [System.IO.File]::ReadAllText($githubEnv, [System.Text.UTF8Encoding]::new($false))
+    if ($envText -notmatch '^NSISDIR=D:\\temp\\strata-signed-nsis') { throw 'GITHUB_ENV line was not written correctly.' }
+  } finally { $env:GITHUB_ENV = $previousGithubEnv }
+  Write-Host 'Windows signing policy tests passed (13 scenarios).'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

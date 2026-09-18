@@ -42,6 +42,7 @@ test('CPack uses the product version while retaining installation and ABI identi
     }
     assert.match(config, /!uninstfinalize/);
     assert.match(config, /sign-windows-artifacts\.ps1/);
+    assert.match(config, /CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "\/DNSISDIR=/);
   } finally { await rm(source, { recursive: true, force: true }); }
 });
 test('release packaging refuses a missing signed NSIS toolchain', async () => {

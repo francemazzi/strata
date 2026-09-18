@@ -4,6 +4,23 @@ function Write-JsonUtf8NoBom {
   [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Add-GithubActionsLine {
+  param([string]$FilePath, [string]$Line)
+  if ([string]::IsNullOrWhiteSpace($FilePath)) { return }
+  [System.IO.File]::AppendAllText($FilePath, "$Line`n", [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-CiEnvironment {
+  param([string]$Name, [string]$Value)
+  Set-Item -Path "Env:$Name" -Value $Value
+  Add-GithubActionsLine -FilePath $env:GITHUB_ENV -Line "$Name=$Value"
+}
+
+function Add-CiOutput {
+  param([string]$Name, [string]$Value)
+  Add-GithubActionsLine -FilePath $env:GITHUB_OUTPUT -Line "$Name=$Value"
+}
+
 function Resolve-RequiredFile {
   param([string]$FilePath, [string]$Label)
   if ([string]::IsNullOrWhiteSpace($FilePath) -or -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {

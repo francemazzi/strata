@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/windows-signing-files.ps1"
 
 if ([string]::IsNullOrWhiteSpace($ToolsRoot)) {
   if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
@@ -26,30 +27,6 @@ function Get-RequiredEnv {
   }
 
   return $value
-}
-
-function Add-CiEnvironment {
-  param(
-    [string]$Name,
-    [string]$Value
-  )
-
-  Set-Item -Path "Env:$Name" -Value $Value
-
-  if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) {
-    "$Name=$Value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-  }
-}
-
-function Add-CiOutput {
-  param(
-    [string]$Name,
-    [string]$Value
-  )
-
-  if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
-    "$Name=$Value" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-  }
 }
 
 function Get-NuGetExe {
@@ -179,7 +156,6 @@ $metadata = [ordered]@{
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $MetadataPath) | Out-Null
-. "$PSScriptRoot/windows-signing-files.ps1"
 Write-JsonUtf8NoBom -Value $metadata -Path $MetadataPath
 
 Add-CiEnvironment -Name "STRATA_SIGNTOOL_PATH" -Value $signToolPath

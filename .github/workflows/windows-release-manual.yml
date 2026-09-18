@@ -243,6 +243,14 @@ jobs:
         shell: bash
         run: cmake --build "${{ github.workspace }}/build" --target bundle --config Release
 
+      - name: Upload NSIS CPack log on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nsis-cpack-log-x64-windows
+          path: ${{ github.workspace }}/build/_CPack_Packages/win64/NSIS/NSISOutput.log
+          if-no-files-found: ignore
+
       - name: 🐍 Verify PyQGIS runtime in Windows package
         shell: powershell
         run: |
