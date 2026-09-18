@@ -42,6 +42,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMetaObject>
@@ -184,6 +185,7 @@ class TestQgsAiChatDockWidget : public QObject
   private slots:
     void hasRuntimeWidgets();
     void planLoginModelPickerListsManagedAndByoModels();
+    void emptyModelMenuOffersClaudeCodeConnect();
     void gisCardShowsSuggestionAndSendsReview();
     void gisMentionAttachesHealthBlock();
     void usesPaletteBasedCursorStyling();
@@ -1246,6 +1248,7 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
   bool onboardingControlsFound = false;
   bool releaseDryRunOk = false;
   bool agentLimitControlFound = false;
+  bool claudeControlsFound = false;
   QTimer::singleShot(
     0,
     &dock,
@@ -1260,6 +1263,7 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
      &onboardingControlsFound,
      &releaseDryRunOk,
      &agentLimitControlFound,
+     &claudeControlsFound,
      e5ProviderListed]() {
       QDialog *settingsDialog = qobject_cast<QDialog *>( QApplication::activeModalWidget() );
       if ( settingsDialog )
@@ -1313,6 +1317,12 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
                                  && maxToolIterations->minimum() == QgsAiAgentBehaviorSettings::MIN_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->maximum() == QgsAiAgentBehaviorSettings::MAX_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->value() == QgsAiAgentBehaviorSettings::DEFAULT_TOOL_CALL_PAUSE_LIMIT;
+        // The Claude block is the one-click "Connect Claude Code" widget (subscription / API key toggle).
+        claudeControlsFound = settingsDialog->findChild<QWidget *>( u"aiClaudeConnectWidget"_s )
+                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeModeSubscriptionButton"_s )
+                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeModeApiKeyButton"_s )
+                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeConnectButton"_s )
+                              && settingsDialog->findChild<QLineEdit *>( u"aiClaudeManualTokenLineEdit"_s );
         settingsDialog->reject();
       }
       inspected = true;
@@ -1379,6 +1389,7 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
   QVERIFY( onboardingControlsFound );
   QVERIFY( releaseDryRunOk );
   QVERIFY( agentLimitControlFound );
+  QVERIFY( claudeControlsFound );
   QCOMPARE( layerIndexingChecked, !e5ProviderListed );
   QCOMPARE( layerIndexingEnabled, !e5ProviderListed );
 }
@@ -1555,6 +1566,41 @@ void TestQgsAiChatDockWidget::dropDoesNotInsertFileUriText()
 
   settings.remove( u"strata/visual_context/image_send_consent"_s );
   settings.remove( u"geoai/visual_context/image_send_consent"_s );
+}
+
+void TestQgsAiChatDockWidget::emptyModelMenuOffersClaudeCodeConnect()
+{
+  const auto guard = isolatePlanModelPickerState();
+  const QByteArray savedOAuthToken = qgetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
+  qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
+  QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
+  const auto restoreEnv = qScopeGuard( [savedOAuthToken]() {
+    if ( !savedOAuthToken.isEmpty() )
+      qputenv( "CLAUDE_CODE_OAUTH_TOKEN", savedOAuthToken );
+  } );
+
+  // Nothing configured at all: the picker guides the user, with the Claude Code
+  // one-click flow offered before the generic settings entry.
+  QgsAiModelRouter router;
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  QApplication::processEvents();
+
+  QToolButton *modelPill = dock.findChild<QToolButton *>( u"aiModelPill"_s );
+  QVERIFY( modelPill );
+  QMenu *menu = modelPill->menu();
+  QVERIFY( menu );
+  const QStringList menuTexts = modelMenuTexts( menu );
+  QVERIFY2( menuTexts.contains( u"No AI providers configured"_s ), qPrintable( menuTexts.join( u" | "_s ) ) );
+  const int connectIndex = menuTexts.indexOf( u"Connect Claude Code…"_s );
+  const int settingsIndex = menuTexts.indexOf( u"Open provider settings…"_s );
+  QVERIFY( connectIndex >= 0 );
+  QVERIFY( settingsIndex > connectIndex );
+  QVERIFY( menu->findChild<QAction *>( u"aiConnectClaudeCodeAction"_s ) );
 }
 
 QGSTEST_MAIN( TestQgsAiChatDockWidget )

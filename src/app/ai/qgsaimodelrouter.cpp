@@ -306,7 +306,7 @@ QgsAiModelRouter::QgsAiModelRouter( QObject *parent )
 
   ProviderSettings claude;
   claude.endpoint = u"https://api.anthropic.com/v1/messages"_s;
-  claude.model = u"claude-sonnet-4-20250514"_s;
+  claude.model = defaultClaudeModel();
   claude.credentialMode = CredentialMode::ApiKey;
   mProviderSettings.insert( Provider::Claude, claude );
 
@@ -399,6 +399,14 @@ QString QgsAiModelRouter::normalizedModelForProvider( Provider provider, const Q
   const QString trimmed = model.trimmed();
   if ( provider == Provider::OpenRouter )
     return trimmed.isEmpty() ? QString::fromUtf8( OPENROUTER_DEFAULT_MODEL ) : trimmed;
+
+  if ( provider == Provider::Claude )
+  {
+    // Retired default persisted by older builds: migrate to the current default.
+    if ( trimmed.isEmpty() || trimmed == "claude-sonnet-4-20250514"_L1 )
+      return defaultClaudeModel();
+    return trimmed;
+  }
 
   if ( provider != Provider::Codex )
     return trimmed;
@@ -1145,6 +1153,115 @@ bool QgsAiModelRouter::hasStoredOAuthRefreshToken( Provider provider ) const
   if ( provider == Provider::Claude )
     return claudeOAuthCredentialPresent();
   return false;
+}
+
+QString QgsAiModelRouter::claudeSubscriptionTokenSettingKey()
+{
+  return u"ai/provider/claude/subscriptionToken"_s;
+}
+
+QString QgsAiModelRouter::claudeSubscriptionSettingPrefix()
+{
+  return u"ai/provider/claude/subscription"_s;
+}
+
+QString QgsAiModelRouter::defaultClaudeModel()
+{
+  return u"claude-sonnet-5"_s;
+}
+
+bool QgsAiModelRouter::isValidClaudeSubscriptionToken( const QString &token )
+{
+  static const QRegularExpression pattern( u"^sk-ant-oat01-[A-Za-z0-9_-]{40,}$"_s );
+  return pattern.match( token ).hasMatch();
+}
+
+QgsAiModelRouter::ClaudeSubscriptionInfo QgsAiModelRouter::claudeSubscriptionInfo() const
+{
+  ClaudeSubscriptionInfo info;
+  QgsSettings settings;
+  const QString prefix = claudeSubscriptionSettingPrefix();
+  info.email = settings.value( prefix + u"/accountEmail"_s ).toString().trimmed();
+  info.orgName = settings.value( prefix + u"/orgName"_s ).toString().trimmed();
+  info.subscriptionType = settings.value( prefix + u"/subscriptionType"_s ).toString().trimmed();
+  info.source = settings.value( prefix + u"/source"_s ).toString().trimmed();
+  info.cliVersion = settings.value( prefix + u"/cliVersion"_s ).toString().trimmed();
+  const QString connectedAt = settings.value( prefix + u"/connectedAt"_s ).toString().trimmed();
+  if ( !connectedAt.isEmpty() )
+    info.connectedAt = QDateTime::fromString( connectedAt, Qt::ISODate ).toUTC();
+
+  const bool stored = QgsAiSecretStore::hasSecret( claudeSubscriptionTokenSettingKey() );
+  info.fromEnvironment = !stored && !qEnvironmentVariable( "CLAUDE_CODE_OAUTH_TOKEN" ).trimmed().isEmpty();
+  if ( info.fromEnvironment )
+    info.source = u"env"_s;
+  info.connected = stored || info.fromEnvironment;
+  return info;
+}
+
+bool QgsAiModelRouter::connectClaudeSubscription( const QString &token, const ClaudeSubscriptionInfo &info, QString *errorMessage )
+{
+  // Strip all whitespace: tokens copied from a terminal often wrap across lines.
+  const QString scrubbed = token.simplified().remove( u' ' );
+  if ( !isValidClaudeSubscriptionToken( scrubbed ) )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "This does not look like a Claude subscription token (expected sk-ant-oat01-…)." );
+    return false;
+  }
+  if ( !QgsAiSecretStore::writeSecret( claudeSubscriptionTokenSettingKey(), scrubbed ) )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Unable to store the Claude subscription token." );
+    return false;
+  }
+
+  ClaudeSubscriptionInfo stored = info;
+  if ( !stored.connectedAt.isValid() )
+    stored.connectedAt = QDateTime::currentDateTimeUtc();
+  if ( stored.source.isEmpty() )
+    stored.source = u"manual"_s;
+  updateClaudeSubscriptionInfo( stored );
+
+  ProviderSettings settings = providerSettings( Provider::Claude );
+  settings.credentialMode = CredentialMode::OAuth;
+  settings.enabled = true;
+  if ( settings.model.trimmed().isEmpty() )
+    settings.model = defaultClaudeModel();
+  setProviderSettings( Provider::Claude, settings );
+
+  // Make the assistant usable right away, without stealing an explicit working choice.
+  if ( !isProviderUsable( mActiveProvider ) )
+    setActiveProvider( Provider::Claude );
+  return true;
+}
+
+void QgsAiModelRouter::updateClaudeSubscriptionInfo( const ClaudeSubscriptionInfo &info )
+{
+  QgsSettings settings;
+  const QString prefix = claudeSubscriptionSettingPrefix();
+  settings.setValue( prefix + u"/accountEmail"_s, info.email.trimmed() );
+  settings.setValue( prefix + u"/orgName"_s, info.orgName.trimmed() );
+  settings.setValue( prefix + u"/subscriptionType"_s, info.subscriptionType.trimmed() );
+  settings.setValue( prefix + u"/source"_s, info.source.trimmed() );
+  settings.setValue( prefix + u"/cliVersion"_s, info.cliVersion.trimmed() );
+  settings.setValue( prefix + u"/connectedAt"_s, info.connectedAt.isValid() ? info.connectedAt.toUTC().toString( Qt::ISODate ) : QString() );
+}
+
+void QgsAiModelRouter::disconnectClaudeSubscription()
+{
+  QgsAiSecretStore::removeSecret( claudeSubscriptionTokenSettingKey() );
+  QString error;
+  QgsAiClaudeOAuthClient::clearRefreshToken( &error );
+
+  QgsSettings settings;
+  const QString prefix = claudeSubscriptionSettingPrefix();
+  for ( const QString &key : { u"/accountEmail"_s, u"/orgName"_s, u"/subscriptionType"_s, u"/source"_s, u"/cliVersion"_s, u"/connectedAt"_s } )
+    settings.remove( prefix + key );
+
+  ProviderSettings claudeSettings = providerSettings( Provider::Claude );
+  claudeSettings.credentialMode = CredentialMode::ApiKey;
+  claudeSettings.enabled = hasStoredApiKey( Provider::Claude );
+  setProviderSettings( Provider::Claude, claudeSettings );
 }
 
 bool QgsAiModelRouter::hasConfiguredCredential( Provider provider ) const

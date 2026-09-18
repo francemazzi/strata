@@ -94,7 +94,7 @@ Credential and data policy:
 
 - Strata Cloud desktop tokens are stored through Strata's local secret store. When the QGIS authentication vault is unlocked or configured, secrets are encrypted there; otherwise Strata warns that credentials are stored unencrypted in local settings.
 - Cloud context sync is opt-in. Strata only uploads explicitly approved safe context, and blocks geometry, coordinates, WKT, and datasource URI payloads before upload.
-- BYOK remains available for OpenAI, OpenRouter, Anthropic, Codex/ChatGPT, and Claude OAuth if you prefer to use your own provider credentials.
+- BYOK remains available for OpenAI, OpenRouter, Anthropic, Codex/ChatGPT, and your Claude Pro/Max subscription (via Claude Code) if you prefer to use your own provider credentials.
 
 ---
 
@@ -104,7 +104,7 @@ Credential and data policy:
 2. Menu **View → Panels → AI Assistant**.
 3. Click the **⚙ settings** icon in the top-right corner of the panel.
 4. In **Account**, log in or create a **Strata Cloud** account for managed models and credits.
-5. If you prefer BYOK, configure a provider under the provider settings instead: OpenAI/OpenRouter/Anthropic API key, **Codex/ChatGPT** login, or **Claude OAuth**.
+5. If you prefer BYOK, configure a provider under the provider settings instead: **Connect Claude Code** (Claude Pro/Max subscription), OpenAI/OpenRouter/Anthropic API key, or **Codex/ChatGPT** login.
 6. Close the dialog and try sending a message in the chat.
 
 Provider credential options:
@@ -112,9 +112,9 @@ Provider credential options:
 - **OpenRouter**: [openrouter.ai/keys](https://openrouter.ai/keys)
 - **Anthropic**: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Codex/ChatGPT**: in the settings dialog, choose “Get Codex device code”, open the page shown, and complete sign-in. The Codex model uses `gpt-5.5`.
-- **Claude OAuth**: in the settings dialog, choose “Login with Claude” and paste the authorization code when prompted.
+- **Claude subscription (Claude Code)**: in the settings dialog, under **Claude** choose *Claude subscription* and click **Connect Claude Code**. Strata runs `claude setup-token` for you, your browser opens, you approve, and the token is stored locally (valid for one year; the card shows the expiry date). Requires the [Claude Code CLI](https://code.claude.com/docs/en/setup); if it is not on your PATH, use *Choose executable…*. The chat's model menu also offers **Connect Claude Code…** when no provider is configured yet.
 
-BYOK keys are stored locally on your machine. OAuth logins save refresh tokens locally through the same secret-store path used by Strata Cloud desktop tokens. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
+BYOK keys are stored locally on your machine. OAuth logins and the Claude Code subscription token are saved locally through the same secret-store path used by Strata Cloud desktop tokens. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
 
 For desktop launches, always use one of the existing mode scripts rather than starting the binary directly:
 

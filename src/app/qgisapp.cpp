@@ -2686,7 +2686,8 @@ void QgisApp::dropEvent( QDropEvent *event )
         addedLayerPtrs.append( layer );
     }
 
-    const QList<QgsMapLayer *> addedLayers = _qgis_listQPointerToRaw( addedLayerPtrs );
+    // Not const: addSortedLayersToLegend() sorts the list in place.
+    QList<QgsMapLayer *> addedLayers = _qgis_listQPointerToRaw( addedLayerPtrs );
 
     // Manually run autoSelectAddedLayer()
     mBlockAutoSelectAddedLayer = false;

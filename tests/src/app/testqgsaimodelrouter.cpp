@@ -236,6 +236,11 @@ class TestQgsAiModelRouter : public QObject
     void setActiveProviderPersistsAndResolves();
     void resolveProviderFallsBackWhenActiveUnavailable();
     void selectingProviderDoesNotDisableOthers();
+    void connectClaudeSubscriptionActivatesProvider();
+    void connectClaudeSubscriptionKeepsUsableActiveProvider();
+    void connectClaudeSubscriptionRejectsInvalidToken();
+    void disconnectClaudeSubscriptionClearsEverything();
+    void legacyClaudeDefaultModelMigrates();
     void clearPlanSessionTokenDisablesPlanWithoutAuthcfg();
     void toolUseDisabledOmitsToolsFromOpenAiPayload();
     void toolUseEnabledIncludesToolsForOpenAi();
@@ -728,6 +733,155 @@ void TestQgsAiModelRouter::selectingProviderDoesNotDisableOthers()
   // Claude was not disabled, so it remains synced and ready for an instant switch back.
   QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
   QVERIFY( router.isProviderAvailable( QgsAiModelRouter::Provider::Claude ) );
+}
+
+namespace
+{
+  const QString TEST_SETUP_TOKEN = u"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyz-_ABCDEF"_s;
+
+  //! Isolates provider state AND the Claude subscription token/env for the test.
+  [[nodiscard]] auto isolateClaudeSubscriptionState()
+  {
+    auto providerGuard = isolateProviderState();
+    const QByteArray savedOAuthToken = qgetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
+    qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
+    QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
+    return qScopeGuard( [guard = std::move( providerGuard ), savedOAuthToken]() {
+      QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
+      if ( !savedOAuthToken.isEmpty() )
+        qputenv( "CLAUDE_CODE_OAUTH_TOKEN", savedOAuthToken );
+    } );
+  }
+} // namespace
+
+void TestQgsAiModelRouter::connectClaudeSubscriptionActivatesProvider()
+{
+  const auto guard = isolateClaudeSubscriptionState();
+
+  QgsAiModelRouter router;
+  QVERIFY( !router.claudeSubscriptionInfo().connected );
+  QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+
+  QgsAiModelRouter::ClaudeSubscriptionInfo info;
+  info.source = u"claude-code-cli"_s;
+  info.cliVersion = u"2.1.197"_s;
+  info.email = u"tester@example.com"_s;
+  info.subscriptionType = u"max"_s;
+  QString error;
+  // Whitespace from a terminal line wrap is scrubbed before validation.
+  const QString wrapped = TEST_SETUP_TOKEN.left( 60 ) + u"\n  "_s + TEST_SETUP_TOKEN.mid( 60 );
+  QVERIFY2( router.connectClaudeSubscription( wrapped, info, &error ), qPrintable( error ) );
+
+  QVERIFY( QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
+  QCOMPARE( QgsAiSecretStore::readSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ), TEST_SETUP_TOKEN );
+
+  const QgsAiModelRouter::ProviderSettings settings = router.providerSettings( QgsAiModelRouter::Provider::Claude );
+  QCOMPARE( settings.credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
+  QVERIFY( settings.enabled );
+  QCOMPARE( settings.model, QgsAiModelRouter::defaultClaudeModel() );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+  QVERIFY( router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
+  // Nothing else was usable: Claude becomes the active provider.
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Claude );
+  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::Claude );
+
+  const QgsAiModelRouter::ClaudeSubscriptionInfo stored = router.claudeSubscriptionInfo();
+  QVERIFY( stored.connected );
+  QVERIFY( !stored.fromEnvironment );
+  QCOMPARE( stored.source, u"claude-code-cli"_s );
+  QCOMPARE( stored.cliVersion, u"2.1.197"_s );
+  QCOMPARE( stored.email, u"tester@example.com"_s );
+  QCOMPARE( stored.subscriptionType, u"max"_s );
+  QVERIFY( stored.connectedAt.isValid() );
+  QVERIFY( stored.connectedAt.secsTo( QDateTime::currentDateTimeUtc() ) < 60 );
+  QCOMPARE( stored.expiresAt(), stored.connectedAt.addYears( 1 ) );
+
+  // The token is what authenticates Claude requests in OAuth mode.
+  QNetworkRequest request( QUrl( u"https://api.anthropic.com/v1/messages"_s ) );
+  QVERIFY2( router.applyAuthentication( QgsAiModelRouter::Provider::Claude, request, &error ), qPrintable( error ) );
+  QCOMPARE( request.rawHeader( "Authorization" ), QByteArray( "Bearer " ) + TEST_SETUP_TOKEN.toUtf8() );
+
+  // A fresh router sees the same state.
+  QgsAiModelRouter reloaded;
+  QVERIFY( reloaded.claudeSubscriptionInfo().connected );
+  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
+  QVERIFY( reloaded.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+}
+
+void TestQgsAiModelRouter::connectClaudeSubscriptionKeepsUsableActiveProvider()
+{
+  const auto guard = isolateClaudeSubscriptionState();
+
+  QgsAiModelRouter router;
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-keep-active"_s ) );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QVERIFY( router.connectClaudeSubscription( TEST_SETUP_TOKEN, QgsAiModelRouter::ClaudeSubscriptionInfo() ) );
+  // An explicit, working choice is never stolen; Claude is simply usable alongside.
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+  // Without an explicit source the token counts as pasted manually.
+  QCOMPARE( router.claudeSubscriptionInfo().source, u"manual"_s );
+}
+
+void TestQgsAiModelRouter::connectClaudeSubscriptionRejectsInvalidToken()
+{
+  const auto guard = isolateClaudeSubscriptionState();
+
+  QgsAiModelRouter router;
+  QString error;
+  QVERIFY( !router.connectClaudeSubscription( u"not-a-token"_s, QgsAiModelRouter::ClaudeSubscriptionInfo(), &error ) );
+  QVERIFY( !error.isEmpty() );
+  QVERIFY( !router.connectClaudeSubscription( u"sk-ant-api03-"_s + TEST_SETUP_TOKEN.mid( 13 ), QgsAiModelRouter::ClaudeSubscriptionInfo(), &error ) );
+  QVERIFY( !QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
+  QVERIFY( !router.claudeSubscriptionInfo().connected );
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
+}
+
+void TestQgsAiModelRouter::disconnectClaudeSubscriptionClearsEverything()
+{
+  const auto guard = isolateClaudeSubscriptionState();
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ClaudeSubscriptionInfo info;
+  info.source = u"claude-code-cli"_s;
+  info.email = u"tester@example.com"_s;
+  QVERIFY( router.connectClaudeSubscription( TEST_SETUP_TOKEN, info ) );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+
+  router.disconnectClaudeSubscription();
+
+  QVERIFY( !QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
+  const QgsAiModelRouter::ClaudeSubscriptionInfo after = router.claudeSubscriptionInfo();
+  QVERIFY( !after.connected );
+  QVERIFY( after.email.isEmpty() );
+  QVERIFY( after.source.isEmpty() );
+  QVERIFY( !after.connectedAt.isValid() );
+  QgsSettings settings;
+  QVERIFY( !settings.contains( QgsAiModelRouter::claudeSubscriptionSettingPrefix() + u"/accountEmail"_s ) );
+
+  const QgsAiModelRouter::ProviderSettings claudeSettings = router.providerSettings( QgsAiModelRouter::Provider::Claude );
+  QCOMPARE( claudeSettings.credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
+  QVERIFY( !claudeSettings.enabled );
+  QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
+  QVERIFY( !router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
+}
+
+void TestQgsAiModelRouter::legacyClaudeDefaultModelMigrates()
+{
+  const auto guard = isolateClaudeSubscriptionState();
+
+  QgsSettings settings;
+  settings.setValue( u"ai/provider/claude/model"_s, u"claude-sonnet-4-20250514"_s );
+
+  QgsAiModelRouter router;
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).model, QgsAiModelRouter::defaultClaudeModel() );
+
+  // Explicit choices are preserved.
+  QgsAiModelRouter::ProviderSettings s = router.providerSettings( QgsAiModelRouter::Provider::Claude );
+  s.model = u"claude-opus-4-8"_s;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Claude, s );
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).model, u"claude-opus-4-8"_s );
 }
 
 void TestQgsAiModelRouter::clearPlanSessionTokenDisablesPlanWithoutAuthcfg()

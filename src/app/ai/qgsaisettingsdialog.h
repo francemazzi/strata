@@ -24,6 +24,7 @@
 #include <QPointer>
 
 class QgsAiAccountWidget;
+class QgsAiClaudeConnectWidget;
 class QgsAiAgentSessionManager;
 class QgsAiLayerIndexCoordinator;
 class QgsAiModelRouter;
@@ -52,10 +53,13 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManager, QgsAiModelRouter *modelRouter, QgsAiLayerIndexCoordinator *layerIndexCoordinator, QWidget *parent = nullptr );
 
     void accept() override;
+    void reject() override;
 
   public slots:
     //! Selects a sidebar section: account, providers, agent, rules, gallery, indexing, workspace, privacy or onboarding.
     void showSection( const QString &key );
+    //! Jumps to the Claude provider block and starts the Claude Code connection flow.
+    void startClaudeConnect();
 
   signals:
     //! The embedding provider configuration changed (provider selection or model download).
@@ -149,11 +153,7 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QLabel *mCodexStatus = nullptr;
     QgsAiCodexOAuthClient::DeviceCode mCodexDeviceCode;
     QLineEdit *mClaudeEndpoint = nullptr;
-    QLineEdit *mClaudeModel = nullptr;
-    QLineEdit *mClaudeKey = nullptr;
-    QLineEdit *mClaudeSubscriptionToken = nullptr;
-    QCheckBox *mClaudeUseOAuth = nullptr;
-    QLabel *mClaudeOAuthStatus = nullptr;
+    QgsAiClaudeConnectWidget *mClaudeConnectWidget = nullptr;
 
     QCheckBox *mAllowCustomActions = nullptr;
     QSpinBox *mMaxToolIterationsPerTurn = nullptr;

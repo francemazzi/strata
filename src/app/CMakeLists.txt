@@ -326,8 +326,11 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaichatdockwidget.cpp
     ai/qgsaichatpromptedit.cpp
     ai/qgsaichathistorystore.cpp
+    ai/qgsaiclaudecodecli.cpp
+    ai/qgsaiclaudeconnectwidget.cpp
     ai/qgsaiclaudeoauthclient.cpp
     ai/qgsaicodexoauthclient.cpp
+    ai/qgsaiptysession.cpp
     ai/qgsaifilecontextprovider.cpp
     ai/qgsaigissuggestionengine.cpp
     ai/qgsaimodelrouter.cpp

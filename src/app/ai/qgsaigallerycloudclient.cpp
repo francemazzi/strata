@@ -114,7 +114,8 @@ namespace
     QgsNetworkAccessManager *networkManager = QgsNetworkAccessManager::instance();
     if ( !networkManager )
       return nullptr;
-    QNetworkRequest request( QUrl( url ) );
+    // Brace-init: `QNetworkRequest request( QUrl( url ) )` parses as a function declaration.
+    QNetworkRequest request{ QUrl( url ) };
     setJsonHeaders( request, sessionToken );
     return networkManager->get( request );
   }

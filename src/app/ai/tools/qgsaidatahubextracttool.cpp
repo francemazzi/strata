@@ -38,7 +38,7 @@
 
 using namespace Qt::StringLiterals;
 
-namespace
+namespace datahub_tool
 {
   constexpr int REQUEST_TIMEOUT_MS = 20000;
 
@@ -160,7 +160,7 @@ namespace
     output.insert( u"nextStep"_s, u"Call download_file with artifact.downloadUrl and expected_sha256, then add_layer_from_file if the user wants the layer loaded."_s );
     return QgsAiToolResult::ok( output );
   }
-} // namespace
+} // namespace datahub_tool
 
 QgsAiDataHubExtractTool::QgsAiDataHubExtractTool( QgsAiModelRouter *router, int pollIntervalMs, int maxPollAttempts )
   : mRouter( router )
@@ -250,7 +250,7 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
     request.setHeader( QNetworkRequest::ContentTypeHeader, u"application/json"_s );
     request.setRawHeader( "Accept", "application/json" );
     request.setRawHeader( "Authorization", authorization );
-    request.setTransferTimeout( REQUEST_TIMEOUT_MS );
+    request.setTransferTimeout( datahub_tool::REQUEST_TIMEOUT_MS );
     return request;
   };
 
@@ -264,7 +264,7 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
   mRouter->appendManagedToolContext( submitBody );
 
   const QNetworkRequest submitRequest = requestForPath( u"/v1/datahub/extract"_s );
-  const JsonResponse submit = sendJsonRequest( networkManager, submitRequest, &submitBody );
+  const datahub_tool::JsonResponse submit = datahub_tool::sendJsonRequest( networkManager, submitRequest, &submitBody );
   if ( !submit.success )
     return QgsAiToolResult::error( submit.error );
   if ( submit.httpStatus != 202 )
@@ -289,13 +289,13 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
     }
 
     const QNetworkRequest pollRequest = requestForPath( u"/v1/datahub/jobs/"_s + encodedJobId );
-    const JsonResponse poll = sendJsonRequest( networkManager, pollRequest, nullptr );
+    const datahub_tool::JsonResponse poll = datahub_tool::sendJsonRequest( networkManager, pollRequest, nullptr );
     if ( !poll.success )
       return QgsAiToolResult::error( poll.error );
 
     const QString status = poll.body.value( u"status"_s ).toString().trimmed().toLower();
     if ( status == "completed"_L1 || status == "succeeded"_L1 )
-      return verifiedArtifactResult( jobId, poll.body );
+      return datahub_tool::verifiedArtifactResult( jobId, poll.body );
     if ( status == "failed"_L1 || status == "cancelled"_L1 || status == "expired"_L1 )
       return QgsAiToolResult::error( u"DataHub extraction job '%1' ended with status '%2'."_s.arg( jobId, status ) );
     if ( status != "queued"_L1 && status != "pending"_L1 && status != "running"_L1 && status != "processing"_L1 )
