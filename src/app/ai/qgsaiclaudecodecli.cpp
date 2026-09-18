@@ -15,6 +15,8 @@
 
 #include "qgsaiclaudecodecli.h"
 
+#include <algorithm>
+
 #include "qgsaiptysession.h"
 #include "qgsmessagelog.h"
 #include "qgssettings.h"
@@ -27,10 +29,9 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QString>
 #include <QTimer>
 #include <QUuid>
-
-#include <algorithm>
 
 #if defined( Q_OS_WIN )
 #include <qt_windows.h>
@@ -127,17 +128,9 @@ QStringList QgsAiClaudeCodeCli::extraSearchDirectories()
   const QString home = QDir::homePath();
   QStringList directories;
 #if defined( Q_OS_WIN )
-  directories << home + u"/.local/bin"_s
-              << qEnvironmentVariable( "APPDATA" ) + u"/npm"_s
-              << qEnvironmentVariable( "LOCALAPPDATA" ) + u"/Programs/claude"_s;
+  directories << home + u"/.local/bin"_s << qEnvironmentVariable( "APPDATA" ) + u"/npm"_s << qEnvironmentVariable( "LOCALAPPDATA" ) + u"/Programs/claude"_s;
 #else
-  directories << home + u"/.local/bin"_s
-              << home + u"/.claude/local"_s
-              << u"/opt/homebrew/bin"_s
-              << u"/usr/local/bin"_s
-              << home + u"/.npm-global/bin"_s
-              << home + u"/.volta/bin"_s
-              << home + u"/.bun/bin"_s;
+  directories << home + u"/.local/bin"_s << home + u"/.claude/local"_s << u"/opt/homebrew/bin"_s << u"/usr/local/bin"_s << home + u"/.npm-global/bin"_s << home + u"/.volta/bin"_s << home + u"/.bun/bin"_s;
   directories << nvmNodeBinDirectories();
 #endif
   directories.removeAll( QString() );
@@ -678,7 +671,7 @@ void QgsAiClaudeCodeCli::stopFallback( bool deleteLog )
     }
     QFile::remove( mFallbackLogPath );
     QString scriptPath = mFallbackLogPath;
-    scriptPath.replace( u".log"_s, u".ps1"_s );
+    scriptPath.replace( ".log"_L1, ".ps1"_L1 );
     QFile::remove( scriptPath );
     mFallbackLogPath.clear();
   }

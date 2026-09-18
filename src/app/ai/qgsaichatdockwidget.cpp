@@ -3459,8 +3459,14 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
     return;
 
   QPushButton *settingsButton = new QPushButton( tr( "Open AI onboarding" ) );
-  QgsMessageBarItem *item
-    = new QgsMessageBarItem( tr( "AI Assistant" ), tr( "Sign in to Strata Cloud, connect Claude Code or add a provider API key, then review privacy, model, indexing and demo setup before using the agent." ), settingsButton, Qgis::MessageLevel::Info, 0, messageBar );
+  QgsMessageBarItem *item = new QgsMessageBarItem(
+    tr( "AI Assistant" ),
+    tr( "Sign in to Strata Cloud, connect Claude Code or add a provider API key, then review privacy, model, indexing and demo setup before using the agent." ),
+    settingsButton,
+    Qgis::MessageLevel::Info,
+    0,
+    messageBar
+  );
 
   connect( settingsButton, &QPushButton::clicked, this, [this, messageBar, item]() {
     openProviderSettings();

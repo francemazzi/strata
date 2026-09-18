@@ -25,6 +25,7 @@
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStackedWidget>
+#include <QString>
 #include <QTemporaryDir>
 
 using namespace Qt::StringLiterals;
@@ -140,8 +141,7 @@ void TestQgsAiClaudeConnectWidget::initTestCase()
 }
 
 void TestQgsAiClaudeConnectWidget::cleanupTestCase()
-{
-}
+{}
 
 void TestQgsAiClaudeConnectWidget::defaultsToSubscriptionModeAndDetectsCli()
 {

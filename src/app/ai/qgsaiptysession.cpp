@@ -15,12 +15,12 @@
 
 #include "qgsaiptysession.h"
 
+#include <algorithm>
+#include <vector>
+
 #include <QFile>
 #include <QSocketNotifier>
 #include <QTimer>
-
-#include <algorithm>
-#include <vector>
 
 #if defined( Q_OS_UNIX )
 // Plain POSIX pty API (posix_openpt & co.) instead of forkpty(): it needs no
@@ -51,8 +51,7 @@ namespace
 
 QgsAiPtySession::QgsAiPtySession( QObject *parent )
   : QObject( parent )
-{
-}
+{}
 
 QgsAiPtySession::~QgsAiPtySession()
 {

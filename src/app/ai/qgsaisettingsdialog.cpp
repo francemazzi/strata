@@ -77,7 +77,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QScrollArea>
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QNetworkReply>
@@ -85,6 +84,7 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QScreen>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardItemModel>
@@ -617,9 +617,8 @@ void QgsAiSettingsDialog::reject()
 {
   if ( mClaudeConnectWidget && mClaudeConnectWidget->isBusy() )
   {
-    const QMessageBox::StandardButton answer = QMessageBox::question(
-      this, tr( "Cancel the Claude Code connection?" ), tr( "The Claude Code login is still running. Closing the settings cancels it." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No
-    );
+    const QMessageBox::StandardButton answer = QMessageBox::
+      question( this, tr( "Cancel the Claude Code connection?" ), tr( "The Claude Code login is still running. Closing the settings cancels it." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
     if ( answer != QMessageBox::Yes )
       return;
     mClaudeConnectWidget->cancelConnect();
@@ -2687,7 +2686,8 @@ QWidget *QgsAiSettingsDialog::buildPrivacyPage()
   QLabel *storageNote = new QLabel(
     tr(
       "OpenAI, OpenRouter and Claude API keys, the Codex OAuth refresh token and the Claude Code subscription token are stored through Strata's local secret store (encrypted in the QGIS "
-      "authentication vault when it is unlocked, otherwise in local settings). Leave API key fields empty to keep the current saved value. Agent rules and skills are stored locally in application settings."
+      "authentication vault when it is unlocked, otherwise in local settings). Leave API key fields empty to keep the current saved value. Agent rules and skills are stored locally in application "
+      "settings."
     ),
     page
   );

@@ -103,8 +103,7 @@ void TestQgsAiClaudeCodeCli::initTestCase()
 }
 
 void TestQgsAiClaudeCodeCli::cleanupTestCase()
-{
-}
+{}
 
 void TestQgsAiClaudeCodeCli::cleanup()
 {
@@ -282,13 +281,10 @@ void TestQgsAiClaudeCodeCli::probeFakeCli()
 #endif
   QTemporaryDir dir;
   QVERIFY( dir.isValid() );
-  const QString cli = writeFakeCli(
-    dir,
-    uR"sh(if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
+  const QString cli = writeFakeCli( dir, uR"sh(if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","email":"tester@example.com","orgName":"Test Org","subscriptionType":"max"}'; exit 0; fi
 exit 2
-)sh"_s
-  );
+)sh"_s );
   QVERIFY( !cli.isEmpty() );
 
   QgsAiClaudeCodeCli client;

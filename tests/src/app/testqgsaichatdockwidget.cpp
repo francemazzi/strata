@@ -1595,7 +1595,7 @@ void TestQgsAiChatDockWidget::emptyModelMenuOffersClaudeCodeConnect()
   QMenu *menu = modelPill->menu();
   QVERIFY( menu );
   const QStringList menuTexts = modelMenuTexts( menu );
-  QVERIFY2( menuTexts.contains( u"No AI providers configured"_s ), qPrintable( menuTexts.join( u" | "_s ) ) );
+  QVERIFY2( menuTexts.contains( u"No AI providers configured"_s ), qPrintable( menuTexts.join( " | "_L1 ) ) );
   const int connectIndex = menuTexts.indexOf( u"Connect Claude Code…"_s );
   const int settingsIndex = menuTexts.indexOf( u"Open provider settings…"_s );
   QVERIFY( connectIndex >= 0 );

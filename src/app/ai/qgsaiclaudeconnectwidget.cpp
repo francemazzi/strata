@@ -35,6 +35,7 @@
 #include <QLocale>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QString>
 #include <QStyle>
 #include <QVBoxLayout>
 

@@ -16,6 +16,8 @@
 #ifndef QGSAICLAUDECODECLI_H
 #define QGSAICLAUDECODECLI_H
 
+#include <functional>
+
 #include "qgis_app.h"
 
 #include <QByteArray>
@@ -25,8 +27,6 @@
 #include <QString>
 #include <QStringList>
 #include <QUrl>
-
-#include <functional>
 
 class QgsAiPtySession;
 class QProcess;
