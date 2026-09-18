@@ -41,7 +41,9 @@ test('CPack uses the product version while retaining installation and ABI identi
       assert.ok(config.includes(`set(${key} "${value}")`), `${key} does not match`);
     }
     assert.match(config, /!uninstfinalize/);
-    assert.match(config, /sign-windows-artifacts\.ps1/);
+    assert.match(config, /sign-nsis-uninstaller\.cmd/);
+    assert.match(config, /%1/);
+    assert.doesNotMatch(config, /'"powershell/);
     assert.match(config, /CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "\/DNSISDIR=/);
   } finally { await rm(source, { recursive: true, force: true }); }
 });

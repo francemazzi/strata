@@ -92,8 +92,10 @@ if(WIN32 AND STRATA_WINDOWS_CODE_SIGN)
     get_filename_component(_STRATA_NSIS_ROOT "$ENV{STRATA_NSIS_EXECUTABLE}" DIRECTORY)
     file(TO_CMAKE_PATH "${_STRATA_NSIS_ROOT}" _STRATA_NSIS_ROOT)
     set(CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "/DNSISDIR=${_STRATA_NSIS_ROOT}")
-    set(CPACK_NSIS_DEFINES
-      "!uninstfinalize '\"powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"${CMAKE_SOURCE_DIR}/scripts/ci/sign-windows-artifacts.ps1\" -Mode staging -Path \"%1\"' = 0")
+    # Nested quotes around powershell.exe were written into CPackConfig.cmake as
+    # raw ", so NSIS never saw %1 ("Usage: !uninstfinalize command_with_%1").
+    file(TO_CMAKE_PATH "${CMAKE_CURRENT_LIST_DIR}/../scripts/ci/sign-nsis-uninstaller.cmd" _STRATA_NSIS_UNINST_SIGN)
+    set(CPACK_NSIS_DEFINES "!uninstfinalize '${_STRATA_NSIS_UNINST_SIGN} \"%1\"' = 0")
   endif()
   configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/StrataWindowsCodeSignPreBuild.cmake.in"
