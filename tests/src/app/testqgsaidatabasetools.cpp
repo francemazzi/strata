@@ -283,7 +283,7 @@ void TestQgsAiDatabaseTools::queryExecuteAndExportAgainstPostgres()
   }
   catch ( const QgsProviderConnectionException &ex )
   {
-    QSKIP( ex.what() );
+    QSKIP( qPrintable( ex.what() ) );
   }
   QVERIFY( conn );
   md->saveConnection( conn.get(), u"ai_pg_test"_s );

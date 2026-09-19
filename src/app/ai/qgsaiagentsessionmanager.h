@@ -24,8 +24,8 @@
 #include "qgsaimodels.h"
 #include "qgsaitool.h"
 
-#include <QList>
 #include <QHash>
+#include <QList>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -398,6 +398,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QString mAgentRunId;
     bool mAwaitingAgentRunApproval = false;
     QTimer *mAgentHeartbeatTimer = nullptr;
+
+    friend class TestQgsAiDatabaseTools;
 };
 
 #endif // QGSAIAGENTSESSIONMANAGER_H

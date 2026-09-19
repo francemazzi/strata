@@ -38,13 +38,10 @@ verified source; the pipeline will not silently replace that signature.
 
 ## Build and seal
 
-The hotfix starts at released commit `e0bc105616a3b11277297fb5898d646431417fa3`.
-Only release/signing changes belong in the candidate; keep ongoing feature work in
-its existing checkout. The local `strata-v1.4.3` tag was divergent when investigated.
 Merge the release-workflow corrections into `master` before tagging, so the sole
-sealing workflow runs from the corrected default branch. Use an immutable new
-`strata-v1.4.4` tag on the completed hotfix commit, without merging feature changes
-from `master` into the release candidate.
+sealing workflow runs from the corrected default branch. The current candidate is
+the immutable `strata-v1.4.12` tag. Never move or replace a release tag: if a
+candidate needs a code or workflow correction, use the next patch version.
 
 Tag-triggered builds prepare a draft and upload platform receipts bound to the
 source commit and SHA-256 hashes. Windows additionally uploads
@@ -102,7 +99,7 @@ Organization-managed policy exceptions remain an IT decision.
 From the reviewed checkout, with `gh` and `cosign` installed:
 
 ```sh
-node scripts/ci/publish-release.mjs strata-v1.4.4 windows-acceptance.json docs/releases/strata-1.4.4.md
+node scripts/ci/publish-release.mjs strata-v1.4.12 windows-acceptance.json docs/releases/strata-1.4.12.md
 ```
 
 This verifies the sealed manifest and all binary Sigstore bundles, the automatic
@@ -141,3 +138,28 @@ The live draft lookup was additionally checked against GitHub release 386172503.
 Pending draft tags are resolved through GitHub CLI's GraphQL lookup before reading
 the REST release by ID; `releases/tags` alone cannot find such drafts. The Node
 suite now contains 11 tests, including this lookup and authentication failures.
+
+## Installer finalizer regression (2026-09-19)
+
+Microsoft identity validation is complete and the Public Trust profile is active.
+[Windows run 35410308070](https://github.com/francemazzi/strata/actions/runs/35410308070)
+passed the Azure signing probe, with valid Authenticode signatures in its uploaded
+probe and NSIS plugin reports. Packaging of `strata-v1.4.11` then failed before
+creating the installer: `project.nsi` contained a malformed `!uninstfinalize`
+command after CPack reread unescaped quotes in `BundleConfig.cmake`.
+
+Escape the finalizer's quotes for that second CMake parsing layer, including the
+wrapper path and `%1` argument. Other NSIS settings already contain escaping, so
+this fix does not enable global `CPACK_VERBATIM_VARIABLES`. See the
+[CPack serialization documentation](https://cmake.org/cmake/help/latest/module/CPack.html#variable:CPACK_VERBATIM_VARIABLES).
+The regression suite rereads the generated configuration and, on Windows, runs a
+real NSIS package with a test finalizer from a directory containing spaces.
+That test uses no Azure credentials and does not prove production package signing.
+NSIS supplies a temporary `.tmp` uninstaller to the callback. The dedicated helper
+signs an EXE working copy and restores the bytes only after signature verification;
+the general staging inventory still rejects unrecognized PE extensions. Windows
+integration tests cover valid and altered signatures on these temporary files.
+
+The 1.4.4 through 1.4.11 drafts are failed candidates and must remain unpublished.
+Full 1.4.12 package inventories, Windows 11 SAC acceptance and colleague
+confirmation remain release gates.
