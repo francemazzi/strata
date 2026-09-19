@@ -38,13 +38,10 @@ verified source; the pipeline will not silently replace that signature.
 
 ## Build and seal
 
-The hotfix starts at released commit `e0bc105616a3b11277297fb5898d646431417fa3`.
-Only release/signing changes belong in the candidate; keep ongoing feature work in
-its existing checkout. The local `strata-v1.4.3` tag was divergent when investigated.
 Merge the release-workflow corrections into `master` before tagging, so the sole
-sealing workflow runs from the corrected default branch. Use an immutable new
-`strata-v1.4.4` tag on the completed hotfix commit, without merging feature changes
-from `master` into the release candidate.
+sealing workflow runs from the corrected default branch. The current candidate is
+the immutable `strata-v1.4.12` tag. Never move or replace a release tag: if a
+candidate needs a code or workflow correction, use the next patch version.
 
 Tag-triggered builds prepare a draft and upload platform receipts bound to the
 source commit and SHA-256 hashes. Windows additionally uploads
@@ -102,7 +99,7 @@ Organization-managed policy exceptions remain an IT decision.
 From the reviewed checkout, with `gh` and `cosign` installed:
 
 ```sh
-node scripts/ci/publish-release.mjs strata-v1.4.4 windows-acceptance.json docs/releases/strata-1.4.4.md
+node scripts/ci/publish-release.mjs strata-v1.4.12 windows-acceptance.json docs/releases/strata-1.4.12.md
 ```
 
 This verifies the sealed manifest and all binary Sigstore bundles, the automatic
@@ -163,5 +160,6 @@ signs an EXE working copy and restores the bytes only after signature verificati
 the general staging inventory still rejects unrecognized PE extensions. Windows
 integration tests cover valid and altered signatures on these temporary files.
 
-The 1.4.4 and 1.4.11 drafts still have no Windows packages. Full package inventories,
-Windows 11 SAC acceptance and colleague confirmation remain release gates.
+The 1.4.4 through 1.4.11 drafts are failed candidates and must remain unpublished.
+Full 1.4.12 package inventories, Windows 11 SAC acceptance and colleague
+confirmation remain release gates.
