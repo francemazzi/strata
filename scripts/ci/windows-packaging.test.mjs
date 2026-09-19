@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, copyFile, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, writeFile, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '../..');
 async function fixture(nsis) {
-  const source = await mkdtemp(join(tmpdir(), 'strata cpack-'));
+  const source = await realpath(await mkdtemp(join(tmpdir(), 'strata cpack-')));
   await mkdir(join(source, 'cmake'));
   for (const name of ['StrataWindowsCodeSignPreBuild.cmake.in', 'StrataWindowsCodeSignPostBuild.cmake.in']) await copyFile(join(root, 'cmake', name), join(source, 'cmake', name));
   await writeFile(join(source, 'COPYING'), 'Test fixture license');
@@ -71,7 +71,8 @@ set(CPACK_PRE_BUILD_SCRIPTS "")
 set(CPACK_POST_BUILD_SCRIPTS "")
 `);
     const packaged = spawnSync('cpack', ['--config', config, '-G', 'NSIS'], { cwd: join(source, 'build'), encoding: 'utf8', timeout: 120000 });
-    assert.equal(packaged.status, 0, packaged.stdout + packaged.stderr);
+    const log = packaged.status === 0 ? '' : await readFile(join(source, 'build/_CPack_Packages/win32/NSIS/NSISOutput.log'), 'utf8').catch(error => error.message);
+    assert.equal(packaged.status, 0, packaged.stdout + packaged.stderr + log);
     const invokedPath = (await readFile(join(source, 'scripts/ci/finalizer-ran.txt'), 'utf8')).trim();
     assert.match(invokedPath, /\.exe$/i);
     assert.doesNotMatch(invokedPath, /%1|[";]/);
