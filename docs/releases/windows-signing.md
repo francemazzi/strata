@@ -158,6 +158,10 @@ this fix does not enable global `CPACK_VERBATIM_VARIABLES`. See the
 The regression suite rereads the generated configuration and, on Windows, runs a
 real NSIS package with a test finalizer from a directory containing spaces.
 That test uses no Azure credentials and does not prove production package signing.
+NSIS supplies a temporary `.tmp` uninstaller to the callback. The dedicated helper
+signs an EXE working copy and restores the bytes only after signature verification;
+the general staging inventory still rejects unrecognized PE extensions. Windows
+integration tests cover valid and altered signatures on these temporary files.
 
 The 1.4.4 and 1.4.11 drafts still have no Windows packages. Full package inventories,
 Windows 11 SAC acceptance and colleague confirmation remain release gates.

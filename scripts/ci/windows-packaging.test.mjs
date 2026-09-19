@@ -73,7 +73,7 @@ set(CPACK_POST_BUILD_SCRIPTS "")
     const log = packaged.status === 0 ? '' : await readFile(join(source, 'build/_CPack_Packages/win32/NSIS/NSISOutput.log'), 'utf8').catch(error => error.message);
     assert.equal(packaged.status, 0, packaged.stdout + packaged.stderr + log);
     const invokedPath = (await readFile(join(source, 'scripts/ci/finalizer-ran.txt'), 'utf8')).trim();
-    assert.match(invokedPath, /\.exe$/i);
+    assert.match(invokedPath, /^[a-z]:[\\/]/i);
     assert.doesNotMatch(invokedPath, /%1|[";]/);
   } finally { await rm(source, { recursive: true, force: true }); }
 });

@@ -37,6 +37,14 @@ try {
   $original = (Get-FileHash $library).Hash
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Path $library -DlibPath $library -MetadataPath "$root/report.json"
   if ((Get-FileHash $library).Hash -ne $original) { throw 'Valid third-party signature was replaced.' }
+  # NSIS's temporary extension must not bypass signature validation or cause a
+  # failed signature operation to replace the original uninstaller bytes.
+  $env:STRATA_AZURE_CODESIGN_DLIB_PATH = $library
+  $env:STRATA_AZURE_CODESIGN_METADATA_PATH = "$root/report.json"
+  $temporaryUninstaller = "$root/uninstall.tmp"
+  Copy-Item $library $temporaryUninstaller
+  & "$PSScriptRoot/sign-nsis-uninstaller.ps1" -Path $temporaryUninstaller
+  if ((Get-FileHash $temporaryUninstaller).Hash -ne $original) { throw 'Valid temporary uninstaller signature changed.' }
   Compress-Archive "$root/payload/*" "$root/test.zip"
   & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode package -PackageFiles "$root/test.zip" -VerifyOnly
   $bytes = [System.IO.File]::ReadAllBytes($library)
@@ -44,6 +52,10 @@ try {
   [System.IO.File]::WriteAllBytes($library, $bytes)
   Assert-Fails { & "$PSScriptRoot/sign-windows-artifacts.ps1" -Mode verify -Path $library } 'Unsigned or invalid'
   Assert-Fails { & "$PSScriptRoot/sign-windows-artifacts.ps1" -Path $library -DlibPath $library -MetadataPath "$root/report.json" } 'Existing signature is invalid'
+  Copy-Item $library $temporaryUninstaller -Force
+  $invalidHash = (Get-FileHash $temporaryUninstaller).Hash
+  Assert-Fails { & "$PSScriptRoot/sign-nsis-uninstaller.ps1" -Path $temporaryUninstaller } 'Existing signature is invalid'
+  if ((Get-FileHash $temporaryUninstaller).Hash -ne $invalidHash) { throw 'Failed finalizer replaced the uninstaller.' }
   Write-Host 'Real Windows Authenticode integration tests passed.'
 } finally {
   if ($certificate) {
