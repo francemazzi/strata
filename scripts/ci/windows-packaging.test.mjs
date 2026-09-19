@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '../..');
 async function fixture(nsis) {
-  const source = await mkdtemp(join(tmpdir(), 'strata-cpack-'));
+  const source = await mkdtemp(join(tmpdir(), 'strata cpack-'));
   await mkdir(join(source, 'cmake'));
   for (const name of ['StrataWindowsCodeSignPreBuild.cmake.in', 'StrataWindowsCodeSignPostBuild.cmake.in']) await copyFile(join(root, 'cmake', name), join(source, 'cmake', name));
   await writeFile(join(source, 'COPYING'), 'Test fixture license');
@@ -27,6 +27,7 @@ set(STRATA_VERSION 1.4.4)
 set(CREATE_NSIS TRUE CACHE BOOL "" FORCE)
 set(CREATE_ZIP TRUE CACHE BOOL "" FORCE)
 set(STRATA_WINDOWS_CODE_SIGN TRUE CACHE BOOL "" FORCE)
+install(FILES README.md DESTINATION .)
 include("${root.replaceAll('\\', '/')}/cmake/Bundle.cmake")
 `);
   return source;
@@ -45,6 +46,35 @@ test('CPack uses the product version while retaining installation and ABI identi
     assert.match(config, /%1/);
     assert.doesNotMatch(config, /'"powershell/);
     assert.match(config, /CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "\/DNSISDIR=/);
+    const script = join(source, 'read-config.cmake');
+    const restored = join(source, 'restored-command.txt');
+    await writeFile(script, `include("${source.replaceAll('\\', '/')}/build/BundleConfig.cmake")
+file(WRITE "${restored.replaceAll('\\', '/')}" "\${CPACK_NSIS_DEFINES}")
+`);
+    const reloaded = spawnSync('cmake', ['-P', script], { encoding: 'utf8' });
+    assert.equal(reloaded.status, 0, reloaded.stdout + reloaded.stderr);
+    assert.equal(await readFile(restored, 'utf8'), `!uninstfinalize '"${source.replaceAll('\\', '/')}/scripts/ci/sign-nsis-uninstaller.cmd" "%1"' = 0`);
+  } finally { await rm(source, { recursive: true, force: true }); }
+});
+test('NSIS executes the finalizer with a complete uninstaller path', { skip: process.platform !== 'win32' }, async () => {
+  assert.ok(process.env.STRATA_TEST_NSIS, 'Windows packaging tests require a real NSIS compiler');
+  const source = await fixture(true);
+  try {
+    await mkdir(join(source, 'scripts/ci'), { recursive: true });
+    await writeFile(join(source, 'scripts/ci/sign-nsis-uninstaller.cmd'), `@echo off\r\nif not exist "%~1" exit /b 42\r\n> "%~dp0finalizer-ran.txt" echo %~1\r\nexit /b 0\r\n`);
+    const configure = spawnSync('cmake', ['-S', source, '-B', join(source, 'build')], { encoding: 'utf8', env: { ...process.env, STRATA_NSIS_EXECUTABLE: process.env.STRATA_TEST_NSIS } });
+    assert.equal(configure.status, 0, configure.stdout + configure.stderr);
+    const config = join(source, 'test-package.cmake');
+    await writeFile(config, `include("${source.replaceAll('\\', '/')}/build/BundleConfig.cmake")
+# Exercise the generated NSIS finalizer without Azure or production signatures.
+set(CPACK_PRE_BUILD_SCRIPTS "")
+set(CPACK_POST_BUILD_SCRIPTS "")
+`);
+    const packaged = spawnSync('cpack', ['--config', config, '-G', 'NSIS'], { cwd: join(source, 'build'), encoding: 'utf8', timeout: 120000 });
+    assert.equal(packaged.status, 0, packaged.stdout + packaged.stderr);
+    const invokedPath = (await readFile(join(source, 'scripts/ci/finalizer-ran.txt'), 'utf8')).trim();
+    assert.match(invokedPath, /\.exe$/i);
+    assert.doesNotMatch(invokedPath, /%1|[";]/);
   } finally { await rm(source, { recursive: true, force: true }); }
 });
 test('release packaging refuses a missing signed NSIS toolchain', async () => {
