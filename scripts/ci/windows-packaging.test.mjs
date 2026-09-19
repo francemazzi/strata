@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, copyFile, writeFile, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '../..');
 async function fixture(nsis) {
@@ -45,7 +45,6 @@ test('CPack uses the product version while retaining installation and ABI identi
     assert.match(config, /sign-nsis-uninstaller\.cmd/);
     assert.match(config, /%1/);
     assert.doesNotMatch(config, /'"powershell/);
-    assert.match(config, /CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "\/DNSISDIR=/);
     const script = join(source, 'read-config.cmake');
     const restored = join(source, 'restored-command.txt');
     await writeFile(script, `include("${source.replaceAll('\\', '/')}/build/BundleConfig.cmake")
@@ -70,7 +69,7 @@ test('NSIS executes the finalizer with a complete uninstaller path', { skip: pro
 set(CPACK_PRE_BUILD_SCRIPTS "")
 set(CPACK_POST_BUILD_SCRIPTS "")
 `);
-    const packaged = spawnSync('cpack', ['--config', config, '-G', 'NSIS'], { cwd: join(source, 'build'), encoding: 'utf8', timeout: 120000 });
+    const packaged = spawnSync('cpack', ['--config', config, '-G', 'NSIS'], { cwd: join(source, 'build'), encoding: 'utf8', timeout: 120000, env: { ...process.env, NSISDIR: dirname(process.env.STRATA_TEST_NSIS) } });
     const log = packaged.status === 0 ? '' : await readFile(join(source, 'build/_CPack_Packages/win32/NSIS/NSISOutput.log'), 'utf8').catch(error => error.message);
     assert.equal(packaged.status, 0, packaged.stdout + packaged.stderr + log);
     const invokedPath = (await readFile(join(source, 'scripts/ci/finalizer-ran.txt'), 'utf8')).trim();

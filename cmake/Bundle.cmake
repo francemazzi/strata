@@ -89,9 +89,8 @@ if(WIN32 AND STRATA_WINDOWS_CODE_SIGN)
       message(FATAL_ERROR "Signed NSIS plugin toolchain is required for release packaging")
     endif()
     file(TO_CMAKE_PATH "$ENV{STRATA_NSIS_EXECUTABLE}" CPACK_NSIS_EXECUTABLE)
-    get_filename_component(_STRATA_NSIS_ROOT "$ENV{STRATA_NSIS_EXECUTABLE}" DIRECTORY)
-    file(TO_CMAKE_PATH "${_STRATA_NSIS_ROOT}" _STRATA_NSIS_ROOT)
-    set(CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "/DNSISDIR=\\\"${_STRATA_NSIS_ROOT}\\\"")
+    # prepare-nsis-signing.ps1 exports NSISDIR for the signed toolchain. Passing
+    # it again through /D breaks makensis argument parsing when the path has spaces.
     file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/scripts/ci/sign-nsis-uninstaller.cmd" _STRATA_NSIS_UNINST_SIGN)
     set(_STRATA_NSIS_UNINST_DEFINE "!uninstfinalize '\"${_STRATA_NSIS_UNINST_SIGN}\" \"%1\"' = 0")
     # CPack serializes values into another quoted CMake argument. Escape that
