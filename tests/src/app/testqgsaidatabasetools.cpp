@@ -271,8 +271,11 @@ void TestQgsAiDatabaseTools::queryExecuteAndExportAgainstPostgres()
   QgsProviderMetadata *md = QgsProviderRegistry::instance()->providerMetadata( u"postgres"_s );
   QVERIFY( md );
 
-  const char *connstring = getenv( "QGIS_PGTEST_DB" );
-  QString dbConn = connstring ? QString::fromLocal8Bit( connstring ) : QString();
+  const QByteArray connstring = qgetenv( "QGIS_PGTEST_DB" );
+  if ( connstring.isEmpty() && qEnvironmentVariableIsEmpty( "PGHOST" ) )
+    QSKIP( "PostgreSQL integration test requires the POSTGRES test batch or QGIS_PGTEST_DB." );
+
+  QString dbConn = QString::fromLocal8Bit( connstring );
   if ( dbConn.isEmpty() )
     dbConn = u"service=\"qgis_test\""_s;
 
