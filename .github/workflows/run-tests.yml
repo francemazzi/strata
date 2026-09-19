@@ -203,6 +203,8 @@ jobs:
         run: |
           docker run --rm -v "$(pwd):/root/QGIS" \
             --env-file .docker/docker-variables.env --env QT_QPA_PLATFORM=offscreen \
+            --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/root/QGIS \
             qgis3-build-deps ctest --test-dir /root/QGIS/build \
             -R '^test_app_aidiscoveryworkflow$' --no-tests=error --output-on-failure
 
