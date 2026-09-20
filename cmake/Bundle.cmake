@@ -88,19 +88,14 @@ if(WIN32 AND STRATA_WINDOWS_CODE_SIGN)
     if(NOT EXISTS "$ENV{STRATA_NSIS_EXECUTABLE}")
       message(FATAL_ERROR "Signed NSIS plugin toolchain is required for release packaging")
     endif()
-    set(CPACK_NSIS_EXECUTABLE "$ENV{STRATA_NSIS_EXECUTABLE}")
-    get_filename_component(_STRATA_NSIS_ROOT "$ENV{STRATA_NSIS_EXECUTABLE}" DIRECTORY)
-    file(TO_CMAKE_PATH "${_STRATA_NSIS_ROOT}" _STRATA_NSIS_ROOT)
-    set(CPACK_NSIS_EXECUTABLE_PRE_ARGUMENTS "/DNSISDIR=${_STRATA_NSIS_ROOT}")
-    # Nested quotes around powershell.exe were written into CPackConfig.cmake as
-    # raw ", so NSIS never saw %1 ("Usage: !uninstfinalize command_with_%1").
+    file(TO_CMAKE_PATH "$ENV{STRATA_NSIS_EXECUTABLE}" CPACK_NSIS_EXECUTABLE)
+    # prepare-nsis-signing.ps1 exports NSISDIR for the signed toolchain. Passing
+    # it again through /D breaks makensis argument parsing when the path has spaces.
     file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/scripts/ci/sign-nsis-uninstaller.cmd" _STRATA_NSIS_UNINST_SIGN)
-    # Do not embed "%1" inside one CMake double-quoted string; CPack writes it literally
-    # and a broken line aborts makensis (see NSISOutput.log on CI).
-    set(_STRATA_NSIS_UNINST_DEFINE "!uninstfinalize '${_STRATA_NSIS_UNINST_SIGN} \"")
-    string(APPEND _STRATA_NSIS_UNINST_DEFINE "%1")
-    string(APPEND _STRATA_NSIS_UNINST_DEFINE "\"' = 0")
-    set(CPACK_NSIS_DEFINES "${_STRATA_NSIS_UNINST_DEFINE}")
+    set(_STRATA_NSIS_UNINST_DEFINE "!uninstfinalize '\"${_STRATA_NSIS_UNINST_SIGN}\" \"%1\"' = 0")
+    # CPack serializes values into another quoted CMake argument. Escape that
+    # extra parsing layer here; other NSIS settings above are already escaped.
+    string(REPLACE "\"" "\\\"" CPACK_NSIS_DEFINES "${_STRATA_NSIS_UNINST_DEFINE}")
   endif()
   configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/StrataWindowsCodeSignPreBuild.cmake.in"

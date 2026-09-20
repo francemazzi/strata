@@ -1,10 +1,13 @@
 function Invoke-WindowsProcess {
   param([string]$Executable, [string]$Arguments, [int]$TimeoutMilliseconds = 180000)
-  $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru -NoNewWindow
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo.FileName = $Executable
+  $process.StartInfo.Arguments = $Arguments
+  $process.StartInfo.UseShellExecute = $false
   try {
-    # Cache the handle before waiting: Windows PowerShell 5.1 can otherwise lose
-    # the exit code of a short-lived process returned by Start-Process.
-    $null = $process.Handle
+    # Own the process handle from launch. Start-Process can lose the exit code
+    # before returning a very short-lived process on Windows PowerShell 5.1.
+    if (-not $process.Start()) { throw "Process did not start: $Executable" }
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
       $process.Kill()
       throw "Process timed out: $Executable"

@@ -16,6 +16,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
+      - name: Locate NSIS for the installer finalizer regression
+        shell: pwsh
+        run: |
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path -LiteralPath $nsis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          "STRATA_TEST_NSIS=$nsis" >> $env:GITHUB_ENV
       - name: Test release integrity and publication gates
         run: node --test scripts/ci/release-integrity.test.mjs scripts/ci/windows-packaging.test.mjs
       - name: Test unsigned and invalid file handling

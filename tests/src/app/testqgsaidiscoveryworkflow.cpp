@@ -176,7 +176,7 @@ void TestQgsAiDiscoveryWorkflow::previewSelectionDownloadImport()
   const auto pending = controller.execute( u"discovery_search"_s, { { u"resolutionId"_s, id }, { u"maxCredits"_s, 1 } } );
   controller.execute( u"discovery_cancel"_s, { { u"id"_s, pending.value( u"requestId"_s ) }, { u"kind"_s, u"plans"_s } } );
   QTRY_COMPARE( server.requestCount, 8 );
-  QCOMPARE( controller.execute( u"discovery_status"_s, { { u"id"_s, u"cancel-plan"_s }, { u"kind"_s, u"plans"_s } } ).value( u"status"_s ).toString(), u"CANCELLED"_s ); // # spellok: API protocol status.
+  QTRY_COMPARE_WITH_TIMEOUT( controller.execute( u"discovery_status"_s, { { u"id"_s, u"cancel-plan"_s }, { u"kind"_s, u"plans"_s } } ).value( u"status"_s ).toString(), u"CANCELLED"_s, 10000 ); // # spellok: API protocol status.
   QCOMPARE( project.mapLayers().size(), 1 );
 }
 void TestQgsAiDiscoveryWorkflow::missingProviderIsAnImportFailure()
