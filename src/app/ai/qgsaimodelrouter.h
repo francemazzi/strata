@@ -71,49 +71,10 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         bool autoRouting = true;
     };
 
-    /**
-     * Metadata about the Claude subscription connection (the long-lived token
-     * minted by `claude setup-token`). The token itself lives in the secret store.
-     */
-    struct ClaudeSubscriptionInfo
-    {
-        //! Account reported by the Claude Code CLI (informational: the CLI's own login).
-        QString email;
-        QString orgName;
-        QString subscriptionType;
-        //! "claude-code-cli" (in-app flow), "manual" (pasted token) or "env" (CLAUDE_CODE_OAUTH_TOKEN).
-        QString source;
-        QString cliVersion;
-        QDateTime connectedAt;
-        bool fromEnvironment = false;
-        bool connected = false;
-        //! Setup tokens are valid for one year from creation.
-        QDateTime expiresAt() const { return connectedAt.isValid() ? connectedAt.addYears( 1 ) : QDateTime(); }
-    };
-
     explicit QgsAiModelRouter( QObject *parent = nullptr );
-
-    //! Secret-store key of the Claude subscription token (from `claude setup-token`).
-    static QString claudeSubscriptionTokenSettingKey();
-    //! QgsSettings prefix of the Claude subscription metadata keys.
-    static QString claudeSubscriptionSettingPrefix();
-    //! Default Claude model id.
     static QString defaultClaudeModel();
-    //! True when \a token looks like a `claude setup-token` token (sk-ant-oat01-…).
-    static bool isValidClaudeSubscriptionToken( const QString &token );
-
-    ClaudeSubscriptionInfo claudeSubscriptionInfo() const;
-
-    /**
-     * Stores \a token, records \a info, switches Claude to OAuth mode, enables it
-     * and makes it the active provider when nothing usable is selected.
-     * Whitespace is scrubbed from \a token first (terminal line wraps).
-     */
-    bool connectClaudeSubscription( const QString &token, const ClaudeSubscriptionInfo &info, QString *errorMessage = nullptr );
-    //! Updates only the metadata (e.g. account details learned after the token was stored).
-    void updateClaudeSubscriptionInfo( const ClaudeSubscriptionInfo &info );
-    //! Removes the token and metadata and returns Claude to API-key mode.
-    void disconnectClaudeSubscription();
+    bool requiresProviderSelection() const;
+    QString credentialStatus( Provider provider ) const;
 
     ProviderSettings providerSettings( Provider provider ) const;
     void setProviderSettings( Provider provider, const ProviderSettings &settings );
@@ -162,7 +123,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     /**
      * The provider the user explicitly selected as active. Persisted across
      * sessions in QgsSettings (\c ai/activeProvider). resolveProvider() returns
-     * it when usable, otherwise it falls back to the priority chain.
+     * the selected provider; an unavailable selection never authorizes a switch.
      */
     Provider activeProvider() const;
     void setActiveProvider( Provider provider );
@@ -330,6 +291,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     RequestContext *contextFromReply( QNetworkReply *reply );
 
     QMap<Provider, ProviderSettings> mProviderSettings;
+    QSet<Provider> mVerifiedProviders;
     Provider mActiveProvider = Provider::OpenAi;
     QMap<QString, RequestContext> mRequests;
     QgsAiToolRegistry *mToolRegistry = nullptr;

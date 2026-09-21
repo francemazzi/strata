@@ -38,6 +38,8 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  QString pendingCodexCredential;
+
   constexpr const char *CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
   constexpr const char *CODEX_AUTH_ISSUER = "https://auth.openai.com";
   constexpr const char *CODEX_DEVICE_API_BASE = "https://auth.openai.com/api/accounts";
@@ -175,10 +177,12 @@ namespace
     return object;
   }
 
-  bool storeCodexRefreshToken( const QString &refreshToken, QString * )
+  bool storeCodexRefreshToken( const QString &refreshToken, QString *errorMessage )
   {
-    // Encrypted vault when usable, cleartext QgsSettings fallback otherwise.
-    return QgsAiSecretStore::writeSecret( QgsAiCodexOAuthClient::refreshTokenSettingKey(), refreshToken.trimmed() );
+    const bool saved = QgsAiSecretStore::writeSecret( QgsAiCodexOAuthClient::refreshTokenSettingKey(), refreshToken.trimmed() );
+    if ( !saved && errorMessage )
+      *errorMessage = QObject::tr( "Codex credentials could not be saved securely. Open provider settings and choose Complete credential protection." );
+    return saved;
   }
 
   QString storedCodexRefreshToken()
@@ -221,7 +225,7 @@ bool QgsAiCodexOAuthClient::requestDeviceCode( DeviceCode &deviceCode, QString *
   return true;
 }
 
-bool QgsAiCodexOAuthClient::completeDeviceCodeLogin( const DeviceCode &deviceCode, QString *errorMessage )
+bool QgsAiCodexOAuthClient::completeDeviceCodeLogin( const DeviceCode &deviceCode, QString *errorMessage, QString *refreshTokenForStorage )
 {
   QJsonObject pollPayload;
   pollPayload.insert( u"device_auth_id"_s, deviceCode.deviceAuthId );
@@ -283,11 +287,28 @@ bool QgsAiCodexOAuthClient::completeDeviceCodeLogin( const DeviceCode &deviceCod
     return false;
   }
 
+  if ( refreshTokenForStorage )
+  {
+    *refreshTokenForStorage = refreshToken;
+    return true;
+  }
   return storeCodexRefreshToken( refreshToken, errorMessage );
 }
 
 bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *errorMessage )
 {
+  if ( !pendingCodexCredential.isEmpty() )
+  {
+    // A rotated credential is kept in memory but is not used until the user
+    // completes secure storage or explicitly chooses session-only operation.
+    if ( storedCodexRefreshToken() != pendingCodexCredential )
+    {
+      if ( errorMessage )
+        *errorMessage = QObject::tr( "Codex credentials need protection. Open provider settings and choose Complete credential protection." );
+      return false;
+    }
+    pendingCodexCredential.clear();
+  }
   const QString refreshToken = storedCodexRefreshToken();
   if ( refreshToken.isEmpty() )
   {
@@ -319,7 +340,15 @@ bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *error
   }
 
   if ( !tokens.refreshToken.isEmpty() && tokens.refreshToken != refreshToken )
-    return storeCodexRefreshToken( tokens.refreshToken, errorMessage );
+  {
+    if ( QgsAiSecretStore::storageState( refreshTokenSettingKey() ) == QgsAiSecretStore::StorageState::SessionOnly )
+      QgsAiSecretStore::useForSession( refreshTokenSettingKey(), tokens.refreshToken );
+    else if ( !storeCodexRefreshToken( tokens.refreshToken, errorMessage ) )
+    {
+      pendingCodexCredential = tokens.refreshToken;
+      return false;
+    }
+  }
 
   return true;
 }
@@ -331,6 +360,7 @@ bool QgsAiCodexOAuthClient::hasRefreshToken()
 
 bool QgsAiCodexOAuthClient::clearRefreshToken( QString * )
 {
+  pendingCodexCredential.clear();
   QgsAiSecretStore::removeSecret( refreshTokenSettingKey() );
   return true;
 }
@@ -353,4 +383,9 @@ QString QgsAiCodexOAuthClient::extractChatGptAccountId( const QString &idToken )
 QString QgsAiCodexOAuthClient::refreshTokenSettingKey()
 {
   return u"ai/provider/codex/oauth/refreshToken"_s;
+}
+
+QString QgsAiCodexOAuthClient::credentialAwaitingProtection()
+{
+  return pendingCodexCredential;
 }

@@ -16,6 +16,7 @@
 #include "ai/qgsaiworkspacetrust.h"
 #include "ai/tools/qgsaiechotool.h"
 #include "ai/tools/qgsaitoolregistry.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
@@ -246,6 +247,7 @@ class TestQgsAiAgentSessionManager : public QObject
     Q_OBJECT
 
   private slots:
+    void init() { installTestSecretBackend(); }
     void createsPatchProposalFromCommand();
     void blocksContextOutsideWorkspace();
     void findsWorkspaceFilesForMentions();
@@ -287,7 +289,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void formatRetrievedContextTruncatesOverBudget();
     void retrievalSkippedWithoutWorkspaceIndex();
     void asyncRetrievalPopulatesCacheAndDispatches();
-    void retrievalCacheReusedAcrossProviderRounds();
+    void retrievalFailureDoesNotSwitchProviders();
     void cancelDuringSlowRetrievalLeavesManagerIdle();
     void taskManagerCancelDoesNotDispatchRequest();
     void retrievalFailureStillDispatches();
@@ -389,7 +391,7 @@ void TestQgsAiAgentSessionManager::allowsExplicitExternalAttachmentContext()
   QCOMPARE( stateSpy.count(), 1 );
   QCOMPARE( stateSpy.first().at( 0 ).toString(), u"failed"_s );
   QVERIFY( messageSpy.count() >= 2 );
-  QVERIFY( manager.history().last().content.contains( u"No AI provider"_s, Qt::CaseInsensitive ) );
+  QVERIFY( manager.history().last().content.contains( u"selected AI provider is unavailable"_s, Qt::CaseInsensitive ) );
 }
 
 void TestQgsAiAgentSessionManager::attachmentPathsAreNotPersisted()
@@ -632,6 +634,7 @@ void TestQgsAiAgentSessionManager::toolCallLimitPausesAndContinues()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -727,6 +730,7 @@ void TestQgsAiAgentSessionManager::cumulativeToolBudgetStopsAutomaticContinuatio
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -786,6 +790,7 @@ void TestQgsAiAgentSessionManager::repeatedEquivalentToolCallsStopTurn()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -835,6 +840,7 @@ void TestQgsAiAgentSessionManager::nonRetryableToolFailureStopsTurn()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -887,6 +893,7 @@ void TestQgsAiAgentSessionManager::runPythonSoftFailureMarksToolResultError()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -954,6 +961,7 @@ void TestQgsAiAgentSessionManager::unverifiedSuccessClaimTriggersCompletionGate(
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -1010,6 +1018,7 @@ void TestQgsAiAgentSessionManager::emptyAssistantAfterToolErrorTriggersRecovery(
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -2070,7 +2079,7 @@ void TestQgsAiAgentSessionManager::asyncRetrievalPopulatesCacheAndDispatches()
   clearProviderSettings();
 }
 
-void TestQgsAiAgentSessionManager::retrievalCacheReusedAcrossProviderRounds()
+void TestQgsAiAgentSessionManager::retrievalFailureDoesNotSwitchProviders()
 {
   clearProviderSettings();
 
@@ -2091,8 +2100,8 @@ void TestQgsAiAgentSessionManager::retrievalCacheReusedAcrossProviderRounds()
 
   QSignalSpy stateSpy( &manager, &QgsAiAgentSessionManager::requestStateChanged );
 
-  // the pre-dispatch failure chain drains the whole provider fallback list: every
-  // round calls buildOutgoingMessages, but the query must be embedded exactly once
+  // A failed request must not dispatch to another billed provider.
+  // Retrieval still happens once for each user turn.
   manager.sendUserMessage( u"alpha question"_s );
   QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 15000 );
 
@@ -2102,7 +2111,7 @@ void TestQgsAiAgentSessionManager::retrievalCacheReusedAcrossProviderRounds()
     if ( args.at( 0 ).toString() == "retrying"_L1 )
       sawRetrying = true;
   }
-  QVERIFY( sawRetrying );
+  QVERIFY( !sawRetrying );
   QCOMPARE( provider.mEmbedCalls.loadAcquire(), 1 );
 
   // a new turn re-embeds exactly once more
@@ -2145,15 +2154,15 @@ void TestQgsAiAgentSessionManager::cancelDuringSlowRetrievalLeavesManagerIdle()
 
   // let the stale worker land: its result must be ignored, no dispatch may happen
   QTest::qWait( 900 );
-  bool sawCancelled = false;
+  bool sawCanceled = false;
   for ( const QList<QVariant> &args : stateSpy )
   {
     const QString state = args.at( 0 ).toString();
     QVERIFY( state != "sending"_L1 );
-    if ( state == "cancelled"_L1 )
-      sawCancelled = true;
+    if ( state == "cancelled"_L1 ) //#spellok
+      sawCanceled = true;
   }
-  QVERIFY( sawCancelled );
+  QVERIFY( sawCanceled );
 
   // a message sent after the cancel starts a fresh turn and completes
   const int embedsBefore = provider.mEmbedCalls.loadAcquire();
@@ -2188,25 +2197,25 @@ void TestQgsAiAgentSessionManager::taskManagerCancelDoesNotDispatchRequest()
   QSignalSpy runningSpy( &manager, &QgsAiAgentSessionManager::requestRunningChanged );
   QSignalSpy stateSpy( &manager, &QgsAiAgentSessionManager::requestStateChanged );
 
-  manager.sendUserMessage( u"cancelled through the task manager"_s );
+  manager.sendUserMessage( u"canceled through the task manager"_s );
   QVERIFY( manager.hasActiveRequest() );
 
-  // the retrieval task is cancelled from outside the manager, as QGIS shutdown and
+  // the retrieval task is canceled from outside the manager, as QGIS shutdown and
   // the task manager's "cancel all" button do: no provider request may be dispatched
   QgsApplication::taskManager()->cancelAll();
 
   QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 15000 );
   QTest::qWait( 300 );
 
-  bool sawCancelled = false;
+  bool sawCanceled = false;
   for ( const QList<QVariant> &args : stateSpy )
   {
     const QString state = args.at( 0 ).toString();
     QVERIFY( state != "sending"_L1 );
-    if ( state == "cancelled"_L1 )
-      sawCancelled = true;
+    if ( state == "cancelled"_L1 ) //#spellok
+      sawCanceled = true;
   }
-  QVERIFY( sawCancelled );
+  QVERIFY( sawCanceled );
   QCOMPARE( runningSpy.last().at( 0 ).toBool(), false );
 
   clearProviderSettings();
@@ -2443,7 +2452,7 @@ void TestQgsAiAgentSessionManager::sendWithoutConfiguredProvidersFailsActionably
   // Immediate actionable failure: no blind provider chain, no running state.
   QVERIFY( !manager.hasActiveRequest() );
   QCOMPARE( runningSpy.count(), 0 );
-  QVERIFY( manager.history().last().content.contains( u"provider settings"_s, Qt::CaseInsensitive ) );
+  QVERIFY( manager.history().last().content.contains( u"Open settings"_s, Qt::CaseInsensitive ) );
   bool sawFailed = false;
   for ( const QList<QVariant> &args : stateSpy )
   {
@@ -2479,6 +2488,7 @@ void TestQgsAiAgentSessionManager::sessionUsageSignalAccumulatesAndResets()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -2620,6 +2630,7 @@ void TestQgsAiAgentSessionManager::systemPromptContainsSecuritySection()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -2661,6 +2672,7 @@ void TestQgsAiAgentSessionManager::systemPromptContainsUnavailableToolReasons()
   providerSettings.model = u"test/model"_s;
   providerSettings.enabled = true;
   router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
 
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );

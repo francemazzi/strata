@@ -40,8 +40,10 @@ class APP_EXPORT QgsAiCodexOAuthClient
     };
 
     static bool requestDeviceCode( DeviceCode &deviceCode, QString *errorMessage = nullptr );
-    static bool completeDeviceCodeLogin( const DeviceCode &deviceCode, QString *errorMessage = nullptr );
+    static bool completeDeviceCodeLogin( const DeviceCode &deviceCode, QString *errorMessage = nullptr, QString *refreshTokenForStorage = nullptr );
     static bool refreshAccessToken( TokenSet &tokens, QString *errorMessage = nullptr );
+    //! A rotated credential awaiting an explicit storage decision; never logged or dispatched.
+    static QString credentialAwaitingProtection();
     static bool hasRefreshToken();
     static bool clearRefreshToken( QString *errorMessage = nullptr );
     static QString extractChatGptAccountId( const QString &idToken );

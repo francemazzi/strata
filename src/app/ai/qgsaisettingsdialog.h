@@ -16,8 +16,11 @@
 #ifndef QGSAISETTINGSDIALOG_H
 #define QGSAISETTINGSDIALOG_H
 
+#include <optional>
+
 #include "qgis_app.h"
 #include "qgsaicodexoauthclient.h"
+#include "qgsaimodelrouter.h"
 #include "qgsairulesskillsstore.h"
 
 #include <QDialog>
@@ -58,8 +61,6 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
   public slots:
     //! Selects a sidebar section: account, providers, agent, rules, gallery, indexing, workspace, privacy or onboarding.
     void showSection( const QString &key );
-    //! Jumps to the Claude provider block and starts the Claude Code connection flow.
-    void startClaudeConnect();
 
   signals:
     //! The embedding provider configuration changed (provider selection or model download).
@@ -73,6 +74,8 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     bool eventFilter( QObject *watched, QEvent *event ) override;
 
   private:
+    std::optional<QgsAiModelRouter::Provider> mRequestedProvider;
+    bool mSavingSecrets = false;
     QWidget *createPage( const QString &title, const QString &subtitle, QVBoxLayout *&contentLayout );
     void addSection( const QString &key, const QString &label, QWidget *page );
     QWidget *buildAccountPage();
@@ -85,7 +88,7 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QWidget *buildPrivacyPage();
     QWidget *buildOnboardingPage();
 
-    void applySettings();
+    bool applySettings();
     void refreshSidebarAccountHeader();
     void refreshTrustWorkspace();
 

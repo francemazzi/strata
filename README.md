@@ -86,15 +86,15 @@ Current account policy:
 
 - Registration and login use email/password. Passwords must be at least 8 characters.
 - If an email is already registered, use **Log in** instead of creating a second account.
-- After a successful desktop login, Strata exchanges the web access token for a desktop session token and selects the managed **Strata Cloud / Plan Account** provider.
+- After a successful desktop login, Strata exchanges the web access token for a desktop session token and offers **Use in this chat** to explicitly select **Strata Cloud / Plan Account**.
 - The web account area shows credit balance, usage history, and credit purchase options.
 - Signing out from Strata Desktop removes the local desktop session token.
 
 Credential and data policy:
 
-- Strata Cloud desktop tokens are stored through Strata's local secret store. When the QGIS authentication vault is unlocked or configured, secrets are encrypted there; otherwise Strata warns that credentials are stored unencrypted in local settings.
+- Strata Cloud desktop tokens use the system keychain. When it is unavailable, the user can retry or explicitly keep the token in memory for the current session. New credentials are never saved unencrypted in local settings.
 - Cloud context sync is opt-in. Strata only uploads explicitly approved safe context, and blocks geometry, coordinates, WKT, and datasource URI payloads before upload.
-- BYOK remains available for OpenAI, OpenRouter, Anthropic, Codex/ChatGPT, and your Claude Pro/Max subscription (via Claude Code) if you prefer to use your own provider credentials.
+- BYOK remains available for OpenAI, OpenRouter, Anthropic and Codex/ChatGPT if you prefer to use your own provider credentials.
 
 ---
 
@@ -104,7 +104,7 @@ Credential and data policy:
 2. Menu **View → Panels → AI Assistant**.
 3. Click the **⚙ settings** icon in the top-right corner of the panel.
 4. In **Account**, log in or create a **Strata Cloud** account for managed models and credits.
-5. If you prefer BYOK, configure a provider under the provider settings instead: **Connect Claude Code** (Claude Pro/Max subscription), OpenAI/OpenRouter/Anthropic API key, or **Codex/ChatGPT** login.
+5. If you prefer BYOK, configure a provider under the provider settings instead: OpenAI/OpenRouter/Anthropic API key, or **Codex/ChatGPT** login.
 6. Close the dialog and try sending a message in the chat.
 
 Provider credential options:
@@ -112,9 +112,12 @@ Provider credential options:
 - **OpenRouter**: [openrouter.ai/keys](https://openrouter.ai/keys)
 - **Anthropic**: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Codex/ChatGPT**: in the settings dialog, choose “Get Codex device code”, open the page shown, and complete sign-in. The Codex model uses `gpt-5.5`.
-- **Claude subscription (Claude Code)**: in the settings dialog, under **Claude** choose *Claude subscription* and click **Connect Claude Code**. Strata runs `claude setup-token` for you, your browser opens, you approve, and the token is stored locally (valid for one year; the card shows the expiry date). Requires the [Claude Code CLI](https://code.claude.com/docs/en/setup); if it is not on your PATH, use *Choose executable…*. The chat's model menu also offers **Connect Claude Code…** when no provider is configured yet.
+- **Claude subscription**: temporarily suspended as of Strata 1.4.13. Existing subscription tokens are no longer used. Choose **Sign in to Strata Cloud** or configure an Anthropic API key under advanced provider settings; API usage is billed separately from a Claude subscription. Strata does not modify your Claude Code installation or sign it out.
 
-BYOK keys are stored locally on your machine. OAuth logins and the Claude Code subscription token are saved locally through the same secret-store path used by Strata Cloud desktop tokens. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
+New provider credentials are stored in the operating system keychain. If secure storage is unavailable, choose **Retry** or **Use only for this session**; session credentials are forgotten when Strata closes. Existing credentials are migrated only after the keychain copy has been written and read back successfully. A locked legacy vault is preserved and shown as **Protection incomplete** until migration succeeds. Chat and index encryption keys remain in the existing QGIS vault.
+
+Provider selection remains explicit. **Configured** means credentials are available; **Connection verified** requires a successful response. Upgrading from an active Claude subscription pauses sending until you choose another provider. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
+
 
 For desktop launches, always use one of the existing mode scripts rather than starting the binary directly:
 

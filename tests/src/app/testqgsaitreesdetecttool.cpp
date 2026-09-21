@@ -6,6 +6,7 @@
 
 #include "qgsaimodelrouter.h"
 #include "qgsaisecretstore.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgsaitreesdetecttool.h"
 #include "qgssettings.h"
@@ -74,6 +75,7 @@ class TestQgsAiTreesDetectTool : public QObject
 
 void TestQgsAiTreesDetectTool::init()
 {
+  installTestSecretBackend();
   clearPlanSettings();
 }
 

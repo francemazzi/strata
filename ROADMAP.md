@@ -108,6 +108,7 @@ Cosa evitare:
 
 > Rendere Strata provabile senza attrito, stabile per early adopter e misurabile.
 
+- [ ] **1.4.13 credential hotfix:** retire Claude subscription-token bridge, migrate credentials to the OS keychain, preserve explicit provider selection. Implementation and validation evidence: `docs/releases/strata-1.4.13.md`.
 - [x] Pipeline release multi-piattaforma su tag `strata-v`* (`release-strata.yml`) + fix macOS PyQGIS (ignore user site-packages)
 - [ ] Installer firmati
   - [x] macOS sign + notarize in CI (`build-macos-qt6.yml`)

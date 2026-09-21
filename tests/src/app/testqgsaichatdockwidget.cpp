@@ -17,9 +17,11 @@
 #include "ai/qgsaiplanclient.h"
 #include "ai/qgsaireviewpatchengine.h"
 #include "ai/qgsaisecretstore.h"
+#include "ai/qgsaisettingsdialog.h"
 #include "ai/qgsaiworkspacetrust.h"
 #include "ai/tools/qgsaiechotool.h"
 #include "ai/tools/qgsaitoolregistry.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
@@ -45,6 +47,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QMimeData>
 #include <QPair>
@@ -53,6 +56,7 @@
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSettings>
+#include <QSignalSpy>
 #include <QSpinBox>
 #include <QString>
 #include <QTemporaryDir>
@@ -183,9 +187,11 @@ class TestQgsAiChatDockWidget : public QObject
     Q_OBJECT
 
   private slots:
+    void init() { installTestSecretBackend(); }
     void hasRuntimeWidgets();
     void planLoginModelPickerListsManagedAndByoModels();
-    void emptyModelMenuOffersClaudeCodeConnect();
+    void emptyModelMenuOffersCloudSignIn();
+    void unavailableSelectedProviderIsNotReplacedInModelPill();
     void gisCardShowsSuggestionAndSendsReview();
     void gisMentionAttachesHealthBlock();
     void usesPaletteBasedCursorStyling();
@@ -205,12 +211,85 @@ class TestQgsAiChatDockWidget : public QObject
     void toolLimitMessageShowsContinueButton();
     void layerIndexingConsentPolicy();
     void settingsDialogContainsManualIndexingControls();
+    void settingsSaveFailureStaysOpen();
+    void settingsSessionOnlyRequiresChoice();
     void historyMenuPromptsForSavedProjectWhenUnsaved();
     void historyMenuDoesNotShowWorkspaceHistoryForUnsavedProject();
     void historyMenuShowsOnlyCurrentProjectSessions();
     void dropLocalFileCreatesAttachmentChip();
     void dropDoesNotInsertFileUriText();
 };
+
+void TestQgsAiChatDockWidget::settingsSaveFailureStaysOpen()
+{
+  const auto guard = isolatePlanModelPickerState();
+  QCoreApplication::processEvents();
+  using Store = QgsAiSecretStore;
+  Store::BackendCallback pendingWrite;
+  Store::setBackendForTesting( [&pendingWrite]( Store::Operation operation, const QString &, const QString &, Store::BackendCallback done ) {
+    if ( operation == Store::Operation::Write )
+      pendingWrite = done;
+    else
+      done( { false, true, {} } );
+  } );
+  QgsAiModelRouter router;
+  router.setActiveProvider( QgsAiModelRouter::Provider::Claude );
+  QgsAiSettingsDialog dialog( nullptr, &router, nullptr );
+  QSignalSpy accepted( &dialog, &QDialog::accepted );
+  dialog.show();
+  auto *key = dialog.findChild<QLineEdit *>( u"aiOpenAiKeyLineEdit"_s );
+  QVERIFY( key );
+  key->setText( u"test-api-key"_s );
+  dialog.accept();
+  QTRY_VERIFY( pendingWrite );
+  dialog.reject();
+  dialog.close();
+  dialog.accept();
+  QVERIFY( dialog.isVisible() );
+  QCOMPARE( accepted.size(), 0 );
+  QVERIFY( !router.providerSettings( QgsAiModelRouter::Provider::OpenAi ).enabled );
+  pendingWrite( {} );
+  QTRY_VERIFY( dialog.findChild<QMessageBox *>() );
+  auto *error = dialog.findChild<QMessageBox *>();
+  error->button( QMessageBox::Cancel )->click();
+  QCoreApplication::processEvents();
+  QVERIFY( dialog.isVisible() );
+  QCOMPARE( accepted.size(), 0 );
+  QVERIFY( !router.providerSettings( QgsAiModelRouter::Provider::OpenAi ).enabled );
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Claude );
+  QVERIFY( !QgsSettings().contains( u"ai/provider/openai/apiKey"_s ) );
+  dialog.reject();
+  QVERIFY( !dialog.isVisible() );
+}
+
+void TestQgsAiChatDockWidget::settingsSessionOnlyRequiresChoice()
+{
+  const auto guard = isolatePlanModelPickerState();
+  QCoreApplication::processEvents();
+  using Store = QgsAiSecretStore;
+  Store::setBackendForTesting( []( Store::Operation, const QString &, const QString &, Store::BackendCallback done ) { done( {} ); } );
+  QgsAiModelRouter router;
+  router.setActiveProvider( QgsAiModelRouter::Provider::Claude );
+  QgsAiSettingsDialog dialog( nullptr, &router, nullptr );
+  QSignalSpy accepted( &dialog, &QDialog::accepted );
+  dialog.show();
+  dialog.findChild<QLineEdit *>( u"aiOpenAiKeyLineEdit"_s )->setText( u"test-session-key"_s );
+  dialog.accept();
+  QTRY_VERIFY( dialog.findChild<QMessageBox *>() );
+  auto *error = dialog.findChild<QMessageBox *>();
+  QAbstractButton *session = nullptr;
+  for ( auto *button : error->buttons() )
+    if ( button->text().contains( u"this session"_s ) )
+      session = button;
+  QVERIFY( session );
+  session->click();
+  QTRY_COMPARE( accepted.size(), 1 );
+  QCOMPARE( Store::storageState( u"ai/provider/openai/apiKey"_s ), Store::StorageState::SessionOnly );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::OpenAi ) );
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Claude );
+  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::Claude );
+  QVERIFY( !QgsSettings().contains( u"ai/provider/openai/apiKey"_s ) );
+}
 
 void TestQgsAiChatDockWidget::hasRuntimeWidgets()
 {
@@ -335,6 +414,43 @@ void TestQgsAiChatDockWidget::planLoginModelPickerListsManagedAndByoModels()
   // Rebuilding the menu must never hijack the user's explicit provider choice.
   QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
   QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::OpenRouter );
+}
+
+void TestQgsAiChatDockWidget::unavailableSelectedProviderIsNotReplacedInModelPill()
+{
+  const auto guard = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.setValue( u"ai/activeProvider"_s, u"Claude"_s );
+  settings.setValue( u"ai/provider/claude/credentialMode"_s, u"oauth"_s );
+  const auto clearSelection = qScopeGuard( []() { QgsSettings().remove( u"ai/security/providerSelectionRequired"_s ); } );
+  QgsAiModelRouter router;
+  QVERIFY( router.requiresProviderSelection() );
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-picker-test"_s ) );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  QApplication::processEvents();
+
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiModelPill"_s );
+  QVERIFY( pill );
+  QVERIFY( pill->text().startsWith( router.providerDisplayName( QgsAiModelRouter::Provider::Claude ) ) );
+  QVERIFY( pill->text().contains( u"Choose a provider"_s ) );
+  QVERIFY( !pill->text().contains( u"OpenRouter"_s ) );
+  QAction *choice = nullptr;
+  for ( QAction *action : pill->menu()->actions() )
+  {
+    QVERIFY( !action->isChecked() );
+    if ( action->isCheckable() )
+      choice = action;
+  }
+  QVERIFY( choice );
+  choice->trigger();
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
+  QVERIFY( !router.requiresProviderSelection() );
+  QVERIFY( pill->text().startsWith( "OpenRouter"_L1 ) );
 }
 
 void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
@@ -1317,12 +1433,12 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
                                  && maxToolIterations->minimum() == QgsAiAgentBehaviorSettings::MIN_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->maximum() == QgsAiAgentBehaviorSettings::MAX_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->value() == QgsAiAgentBehaviorSettings::DEFAULT_TOOL_CALL_PAUSE_LIMIT;
-        // The Claude block is the one-click "Connect Claude Code" widget (subscription / API key toggle).
-        claudeControlsFound = settingsDialog->findChild<QWidget *>( u"aiClaudeConnectWidget"_s )
-                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeModeSubscriptionButton"_s )
-                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeModeApiKeyButton"_s )
-                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeConnectButton"_s )
-                              && settingsDialog->findChild<QLineEdit *>( u"aiClaudeManualTokenLineEdit"_s );
+        // Subscription credentials are no longer collected; only the advanced API path remains.
+        claudeControlsFound = settingsDialog->findChild<QLabel *>( u"aiClaudeSuspensionNotice"_s )
+                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeCloudButton"_s )
+                              && settingsDialog->findChild<QLineEdit *>( u"aiClaudeApiKeyLineEdit"_s )
+                              && !settingsDialog->findChild<QPushButton *>( u"aiClaudeConnectButton"_s )
+                              && !settingsDialog->findChild<QLineEdit *>( u"aiClaudeManualTokenLineEdit"_s );
         settingsDialog->reject();
       }
       inspected = true;
@@ -1568,19 +1684,18 @@ void TestQgsAiChatDockWidget::dropDoesNotInsertFileUriText()
   settings.remove( u"geoai/visual_context/image_send_consent"_s );
 }
 
-void TestQgsAiChatDockWidget::emptyModelMenuOffersClaudeCodeConnect()
+void TestQgsAiChatDockWidget::emptyModelMenuOffersCloudSignIn()
 {
   const auto guard = isolatePlanModelPickerState();
   const QByteArray savedOAuthToken = qgetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
   qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
-  QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
+  QgsAiSecretStore::removeSecret( u"ai/provider/claude/subscriptionToken"_s );
   const auto restoreEnv = qScopeGuard( [savedOAuthToken]() {
     if ( !savedOAuthToken.isEmpty() )
       qputenv( "CLAUDE_CODE_OAUTH_TOKEN", savedOAuthToken );
   } );
 
-  // Nothing configured at all: the picker guides the user, with the Claude Code
-  // one-click flow offered before the generic settings entry.
+  // The primary setup path is Cloud sign-in, without a terminal.
   QgsAiModelRouter router;
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
@@ -1596,11 +1711,11 @@ void TestQgsAiChatDockWidget::emptyModelMenuOffersClaudeCodeConnect()
   QVERIFY( menu );
   const QStringList menuTexts = modelMenuTexts( menu );
   QVERIFY2( menuTexts.contains( u"No AI providers configured"_s ), qPrintable( menuTexts.join( " | "_L1 ) ) );
-  const int connectIndex = menuTexts.indexOf( u"Connect Claude Code…"_s );
+  const int connectIndex = menuTexts.indexOf( u"Sign in to Strata Cloud…"_s );
   const int settingsIndex = menuTexts.indexOf( u"Open provider settings…"_s );
   QVERIFY( connectIndex >= 0 );
   QVERIFY( settingsIndex > connectIndex );
-  QVERIFY( menu->findChild<QAction *>( u"aiConnectClaudeCodeAction"_s ) );
+  QVERIFY( !menu->findChild<QAction *>( u"aiConnectClaudeCodeAction"_s ) );
 }
 
 QGSTEST_MAIN( TestQgsAiChatDockWidget )

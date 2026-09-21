@@ -1,7 +1,7 @@
 /***************************************************************************
-    qgsaiclaudeconnectwidget.h
+    qgsaiclaudemigration.h
     ---------------------
-    begin                : September 2026
+    begin                : June 2026
     copyright            : (C) 2026 by Francesco Mazzi
     email                : francemazzi at gmail dot com
  ***************************************************************************
@@ -13,28 +13,10 @@
  *                                                                         *
  ***************************************************************************/
 
-#ifndef QGSAICLAUDECONNECTWIDGET_H
-#define QGSAICLAUDECONNECTWIDGET_H
-#include "qgis_app.h"
-
-#include <QWidget>
-
-class QgsAiModelRouter;
-class QLineEdit;
-class QComboBox;
-class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
+#ifndef QGSAICLAUDEMIGRATION_H
+#define QGSAICLAUDEMIGRATION_H
+namespace QgsAiClaudeMigration
 {
-    Q_OBJECT
-  public:
-    explicit QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QWidget *parent = nullptr );
-    QString modelText() const;
-    QString pendingApiKey() const;
-  signals:
-    void cloudRequested();
-    void useRequested();
-
-  private:
-    QLineEdit *mApiKeyEdit = nullptr;
-    QComboBox *mModelCombo = nullptr;
-};
+  void run();
+}
 #endif

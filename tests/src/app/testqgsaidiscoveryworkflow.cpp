@@ -8,6 +8,7 @@
 #include "ai/tools/qgsaidiscoverytool.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaimodelrouter.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgsaiworkspacetrust.h"
 #include "qgsapplication.h"
@@ -31,6 +32,7 @@ class TestQgsAiDiscoveryWorkflow : public QObject
 {
     Q_OBJECT
   private slots:
+    void init() { installTestSecretBackend(); }
     void initTestCase()
     {
       QCoreApplication::setOrganizationName( u"StrataDiscoverySynthetic"_s );

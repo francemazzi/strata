@@ -1090,24 +1090,12 @@ void QgsAiAgentSessionManager::setWorkspaceRoot( const QString &workspaceRoot )
 
 QList<QgsAiModelRouter::Provider> QgsAiAgentSessionManager::providerFallbackOrder() const
 {
-  // Only providers that are actually ready (enabled + credentials) enter the
-  // chain: attempting unconfigured ones just produced a noisy sequence of
-  // "retrying" transitions before the inevitable failure. The list can be
-  // empty — sendUserMessage() then reports the actionable "no provider" error.
-  QList<QgsAiModelRouter::Provider> order;
-  if ( !mRouter )
-    return order;
-
-  const QgsAiModelRouter::Provider preferred = mRouter->resolveProvider();
-  if ( mRouter->isProviderUsable( preferred ) )
-    order << preferred;
-  for ( QgsAiModelRouter::Provider provider :
-        { QgsAiModelRouter::Provider::Plan, QgsAiModelRouter::Provider::OpenRouter, QgsAiModelRouter::Provider::Codex, QgsAiModelRouter::Provider::OpenAi, QgsAiModelRouter::Provider::Claude } )
-  {
-    if ( !order.contains( provider ) && mRouter->isProviderUsable( provider ) )
-      order << provider;
-  }
-  return order;
+  // The active provider is the user's billing choice. Credentials for another
+  // service do not authorize sending it requests when the selected one fails.
+  if ( !mRouter || mRouter->requiresProviderSelection() )
+    return {};
+  const auto selected = mRouter->resolveProvider();
+  return mRouter->isProviderUsable( selected ) ? QList<QgsAiModelRouter::Provider> { selected } : QList<QgsAiModelRouter::Provider>();
 }
 
 QString QgsAiAgentSessionManager::planApiBase() const
@@ -1461,7 +1449,7 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
     if ( providerName == "Codex"_L1 && ( lower.contains( "missing codex refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
       return u"Codex sign-in is missing or expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 && ( lower.contains( "missing claude refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
-      return u"Claude authentication failed. Sign in with Claude again or configure an API key in Provider Settings."_s;
+      return u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
     if ( providerName == "Plan Account"_L1 && lower.contains( "session token"_L1 ) )
       return u"Plan Account sign-in is missing or expired. Log out below, then sign in again and retry."_s;
   }
@@ -1473,7 +1461,7 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
     if ( providerName == "Codex"_L1 )
       return u"Codex sign-in has expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 )
-      return u"Claude authentication failed. Sign in with Claude again or configure an API key in Provider Settings."_s;
+      return u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
     return u"%1 authentication failed. Check the API key or OAuth login in Provider Settings."_s.arg( providerName );
   }
   if ( httpStatus == 403 )
@@ -1612,7 +1600,9 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
   mPendingProviders = providerFallbackOrder();
   if ( mPendingProviders.isEmpty() || !mRouter )
   {
-    const QString noProviderMessage = u"No AI provider is configured. Open the provider settings (gear icon) and add an API key or sign in."_s;
+    const QString noProviderMessage = mRouter && mRouter->requiresProviderSelection()
+                                        ? tr( "Claude subscription connections are temporarily suspended. Open settings to sign in to Strata Cloud or configure an API key, then choose Use in this chat." )
+                                        : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
     const QgsAiChatMessage assistant = buildAssistantMessage( noProviderMessage );
     recordHistoryMessage( assistant );
     emit requestStateChanged( u"failed"_s, noProviderMessage );
