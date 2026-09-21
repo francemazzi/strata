@@ -192698,4 +192698,11 @@ L&apos;algoritmo rende inoltre possibile riordinare le bande del nuovo raster.</
         <translation>Il servizio AI selezionato non è disponibile. Apri le impostazioni per configurarlo oppure scegli un altro servizio per questa chat.</translation>
     </message>
 </context>
+<context>
+    <name>QgsAiChatDockWidget</name>
+    <message>
+        <source>Choose a provider</source>
+        <translation>Scegli un servizio</translation>
+    </message>
+</context>
 </TS>

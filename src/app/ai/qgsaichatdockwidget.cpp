@@ -1277,9 +1277,11 @@ void QgsAiChatDockWidget::rebuildModelMenu()
     QAction *cloud = menu->addAction( tr( "Sign in to Strata Cloud…" ) );
     connect( cloud, &QAction::triggered, this, [this]() { openProviderSettingsSection( u"account"_s ); } );
     QAction *openSettings = menu->addAction( tr( "Open provider settings…" ) );
-    connect( openSettings, &QAction::triggered, this, &QgsAiChatDockWidget::openProviderSettings );
+    connect( openSettings, &QAction::triggered, this, [this]() { openProviderSettingsSection( u"providers"_s ); } );
     mModelPill->setMenu( menu );
-    mModelPill->setText( tr( "No model ▾" ) );
+    mModelPill->setText( mModelRouter ? modelPillLabel( mModelRouter->activeProvider(), tr( "Choose a provider" ) ) : tr( "No model ▾" ) );
+    if ( mModelRouter )
+      mModelPill->setToolTip( mModelRouter->credentialStatus( mModelRouter->activeProvider() ) );
     return;
   }
 
@@ -1314,7 +1316,7 @@ void QgsAiChatDockWidget::rebuildModelMenu()
 
   QgsAiModelRouter::Provider currentSection = QgsAiModelRouter::Provider::OpenAi;
   bool first = true;
-  const ModelEntry *pillEntry = &models.first();
+  const ModelEntry *pillEntry = nullptr;
   for ( const ModelEntry &entry : models )
   {
     if ( first || entry.provider != currentSection )
@@ -1356,8 +1358,8 @@ void QgsAiChatDockWidget::rebuildModelMenu()
   }
 
   mModelPill->setMenu( menu );
-  mModelPill->setText( modelPillLabel( pillEntry->provider, pillEntry->displayName ) );
-  mModelPill->setToolTip( mModelRouter->credentialStatus( pillEntry->provider ) );
+  mModelPill->setText( modelPillLabel( currentProvider, pillEntry ? pillEntry->displayName : tr( "Choose a provider" ) ) );
+  mModelPill->setToolTip( mModelRouter->credentialStatus( currentProvider ) );
 
   connect( group, &QActionGroup::triggered, this, &QgsAiChatDockWidget::onModelSelected );
 }

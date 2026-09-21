@@ -191,6 +191,7 @@ class TestQgsAiChatDockWidget : public QObject
     void hasRuntimeWidgets();
     void planLoginModelPickerListsManagedAndByoModels();
     void emptyModelMenuOffersCloudSignIn();
+    void unavailableSelectedProviderIsNotReplacedInModelPill();
     void gisCardShowsSuggestionAndSendsReview();
     void gisMentionAttachesHealthBlock();
     void usesPaletteBasedCursorStyling();
@@ -413,6 +414,43 @@ void TestQgsAiChatDockWidget::planLoginModelPickerListsManagedAndByoModels()
   // Rebuilding the menu must never hijack the user's explicit provider choice.
   QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
   QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::OpenRouter );
+}
+
+void TestQgsAiChatDockWidget::unavailableSelectedProviderIsNotReplacedInModelPill()
+{
+  const auto guard = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.setValue( u"ai/activeProvider"_s, u"Claude"_s );
+  settings.setValue( u"ai/provider/claude/credentialMode"_s, u"oauth"_s );
+  const auto clearSelection = qScopeGuard( []() { QgsSettings().remove( u"ai/security/providerSelectionRequired"_s ); } );
+  QgsAiModelRouter router;
+  QVERIFY( router.requiresProviderSelection() );
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-picker-test"_s ) );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  QApplication::processEvents();
+
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiModelPill"_s );
+  QVERIFY( pill );
+  QVERIFY( pill->text().startsWith( router.providerDisplayName( QgsAiModelRouter::Provider::Claude ) ) );
+  QVERIFY( pill->text().contains( u"Choose a provider"_s ) );
+  QVERIFY( !pill->text().contains( u"OpenRouter"_s ) );
+  QAction *choice = nullptr;
+  for ( QAction *action : pill->menu()->actions() )
+  {
+    QVERIFY( !action->isChecked() );
+    if ( action->isCheckable() )
+      choice = action;
+  }
+  QVERIFY( choice );
+  choice->trigger();
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
+  QVERIFY( !router.requiresProviderSelection() );
+  QVERIFY( pill->text().startsWith( "OpenRouter"_L1 ) );
 }
 
 void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
