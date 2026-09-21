@@ -124,6 +124,22 @@ class TestQgsAiSecretStore : public QObject
       QCOMPARE( Store::readSecret( key ), u"legacy"_s );
       QVERIFY( Store::migrationPending() );
     }
+    void lockedKeychainCanBeRetriedWithoutReenteringCredential()
+    {
+      QgsSettings().setValue( key + u"_inKeychain"_s, true );
+      bool locked = true;
+      Store::setBackendForTesting( [&locked]( Store::Operation, const QString &, const QString &, Store::BackendCallback done ) {
+        done( locked ? Store::BackendResult() : Store::BackendResult { true, false, u"previously-saved"_s } );
+      } );
+      load();
+      QVERIFY( Store::unavailableCredentials() );
+      QVERIFY( Store::hasSecret( key ) );
+      QVERIFY( Store::readSecret( key ).isEmpty() );
+      locked = false;
+      load();
+      QVERIFY( !Store::unavailableCredentials() );
+      QCOMPARE( Store::readSecret( key ), u"previously-saved"_s );
+    }
     void disconnectDoesNotResurrectAfterFailedDeletion()
     {
       QVERIFY( Store::writeSecret( key, u"saved"_s ) );
@@ -229,7 +245,7 @@ class TestQgsAiSecretStore : public QObject
     void destroyedContextDoesNotStartSave()
     {
       auto *context = new QObject();
-      Store::writeSecretAsync( key, u"cancelled"_s, context, []( const Store::SecretResult & ) { QFAIL( "Destroyed owner received a callback" ); } );
+      Store::writeSecretAsync( key, u"canceled"_s, context, []( const Store::SecretResult & ) { QFAIL( "Destroyed owner received a callback" ); } );
       delete context;
       QCoreApplication::processEvents();
       QVERIFY( values->isEmpty() );

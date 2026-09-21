@@ -95,6 +95,7 @@ class APP_EXPORT QgsAiSecretStore
     static void loadSecretsAsync( QObject *context, std::function<void()> callback, bool retry = false );
     static bool secretsLoaded();
     static bool migrationPending();
+    static bool unavailableCredentials();
     //! Injected asynchronous backend: tests never access the user's actual keychain.
     static void setBackendForTesting( Backend backend );
     static void resetCredentialCacheForTesting();

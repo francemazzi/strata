@@ -725,11 +725,17 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   auto *migration = new QLabel( page );
   migration->setWordWrap( true );
   auto *retry = new QPushButton( tr( "Retry credential protection" ), page );
-  const auto updateProtection = [migration, retry]() {
+  const auto updateProtection = [this, active, migration, retry]() {
     const bool pending = QgsAiSecretStore::migrationPending();
-    migration->setText( pending ? tr( "Protection incomplete: some existing credentials could not yet be moved to the system keychain. They have been preserved." ) : QString() );
-    migration->setVisible( pending );
-    retry->setVisible( pending );
+    const bool unavailable = QgsAiSecretStore::unavailableCredentials();
+    migration->setText(
+      pending       ? tr( "Protection incomplete: some existing credentials could not yet be moved to the system keychain. They have been preserved." )
+      : unavailable ? tr( "Unlock the system keychain, then retry. Your saved credentials have not been changed." )
+                    : QString()
+    );
+    migration->setVisible( pending || unavailable );
+    retry->setVisible( pending || unavailable );
+    active->setText( tr( "Active provider: %1 · %2" ).arg( mModelRouter->providerDisplayName( mModelRouter->activeProvider() ), mModelRouter->credentialStatus( mModelRouter->activeProvider() ) ) );
   };
   updateProtection();
   contentLayout->addWidget( migration );

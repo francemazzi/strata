@@ -457,6 +457,15 @@ bool QgsAiSecretStore::migrationPending()
       return true;
   return false;
 }
+bool QgsAiSecretStore::unavailableCredentials()
+{
+  using namespace QgsAiCredentialStoreInternal;
+  QMutexLocker lock( &cacheMutex );
+  for ( const Entry &entry : std::as_const( cache ) )
+    if ( entry.state == State::Failed && entry.value.isEmpty() )
+      return true;
+  return false;
+}
 bool QgsAiSecretStore::secretsLoaded()
 {
   using namespace QgsAiCredentialStoreInternal;

@@ -1129,6 +1129,10 @@ QString QgsAiModelRouter::credentialStatus( Provider provider ) const
 {
   const QString key = provider == Provider::Plan ? planSessionTokenSettingKey() : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey() : apiKeySettingKey( provider );
   const auto state = QgsAiSecretStore::storageState( key );
+  if ( state == QgsAiSecretStore::StorageState::Failed )
+    return tr( "Keychain unavailable" );
+  if ( provider == Provider::Codex && !QgsAiCodexOAuthClient::credentialAwaitingProtection().isEmpty() )
+    return tr( "Protection incomplete" );
   if ( state == QgsAiSecretStore::StorageState::SessionOnly )
     return tr( "Available only for this session" );
   if ( state == QgsAiSecretStore::StorageState::MigrationPending )
@@ -1287,16 +1291,20 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
   mRequests.insert( context.requestId, context );
 
   const QString requestId = context.requestId;
-  QgsAiSecretStore::loadSecretsAsync( this, [this, requestId]() {
-    if ( !mRequests.contains( requestId ) )
-      return;
-    RequestContext &storedContext = mRequests[requestId];
-    if ( !dispatchRequest( storedContext ) )
-    {
-      const QString error = storedContext.preDispatchError.isEmpty() ? tr( "Unable to start network request." ) : storedContext.preDispatchError;
-      queueFailedRequestFinish( requestId, error );
-    }
-  } );
+  QgsAiSecretStore::loadSecretsAsync(
+    this,
+    [this, requestId]() {
+      if ( !mRequests.contains( requestId ) )
+        return;
+      RequestContext &storedContext = mRequests[requestId];
+      if ( !dispatchRequest( storedContext ) )
+      {
+        const QString error = storedContext.preDispatchError.isEmpty() ? tr( "Unable to start network request." ) : storedContext.preDispatchError;
+        queueFailedRequestFinish( requestId, error );
+      }
+    },
+    QgsAiSecretStore::unavailableCredentials()
+  );
 
   return context.requestId;
 }
@@ -1473,6 +1481,16 @@ QString QgsAiModelRouter::planPromptCacheSessionId() const
 
 bool QgsAiModelRouter::applyAuthentication( Provider provider, QNetworkRequest &request, QString *errorMessage ) const
 {
+  const QString credentialKey = provider == Provider::Plan    ? planSessionTokenSettingKey()
+                                : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey()
+                                                              : apiKeySettingKey( provider );
+  if ( QgsAiSecretStore::storageState( credentialKey ) == QgsAiSecretStore::StorageState::Failed && QgsAiSecretStore::readSecret( credentialKey ).isEmpty() )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Unlock the system keychain, then retry. Your saved credentials have not been changed." );
+    return false;
+  }
+
   const ProviderSettings settings = mProviderSettings.value( provider );
   if ( provider == Provider::Plan )
   {
@@ -1602,11 +1620,18 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   }
 
   QString authenticationError;
-  if ( !applyAuthentication( context.provider, request, &authenticationError ) )
+  const QString requestId = context.requestId;
+  const QPointer<QgsAiModelRouter> guard( this );
+  const bool authenticated = applyAuthentication( context.provider, request, &authenticationError );
+  // Existing OAuth exchanges process events while waiting. Cancellation or
+  // window destruction during that wait invalidates the original context.
+  if ( !guard || !mRequests.contains( requestId ) )
+    return true;
+  if ( !authenticated )
   {
     if ( !authenticationError.isEmpty() )
     {
-      QgsMessageLog::logMessage( u"Authentication failed for %1: %2"_s.arg( providerDisplayName( context.provider ), authenticationError ), u"AI"_s, Qgis::MessageLevel::Warning, false );
+      QgsMessageLog::logMessage( u"Authentication failed for %1: %2"_s.arg( providerDisplayName( context.provider ), sanitizeErrorText( authenticationError ) ), u"AI"_s, Qgis::MessageLevel::Warning, false );
       context.preDispatchError = authenticationError;
     }
     return false;

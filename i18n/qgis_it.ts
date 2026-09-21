@@ -62324,6 +62324,14 @@ If ellipsoidal calculations are enabled, the algorithm bypasses the spatial inde
         <source>A save is already in progress. Please retry.</source>
         <translation>È già in corso un salvataggio. Riprova tra poco.</translation>
     </message>
+    <message>
+        <source>Codex credentials could not be saved securely. Open provider settings and choose Complete credential protection.</source>
+        <translation>Non è stato possibile salvare le credenziali Codex in modo sicuro. Apri le impostazioni dei servizi e scegli Completa la protezione delle credenziali.</translation>
+    </message>
+    <message>
+        <source>Codex credentials need protection. Open provider settings and choose Complete credential protection.</source>
+        <translation>Le credenziali Codex richiedono protezione. Apri le impostazioni dei servizi e scegli Completa la protezione delle credenziali.</translation>
+    </message>
 </context>
 <context>
     <name>QRasterAttributeTableDialogBase</name>
@@ -192620,6 +192628,14 @@ L&apos;algoritmo rende inoltre possibile riordinare le bande del nuovo raster.</
         <source>Use an Anthropic API key. Claude subscription tokens are not supported.</source>
         <translation>Inserisci una chiave API Anthropic. I token dell’abbonamento Claude non sono supportati.</translation>
     </message>
+    <message>
+        <source>Unlock the system keychain, then retry. Your saved credentials have not been changed.</source>
+        <translation>Sblocca il portachiavi di sistema, poi riprova. Le credenziali salvate non sono state modificate.</translation>
+    </message>
+    <message>
+        <source>Keychain unavailable</source>
+        <translation>Portachiavi non disponibile</translation>
+    </message>
 </context>
 <context>
     <name>QgsAiSettingsDialog</name>
@@ -192650,6 +192666,14 @@ L&apos;algoritmo rende inoltre possibile riordinare le bande del nuovo raster.</
     <message>
         <source>Enter an API key before using this provider.</source>
         <translation>Inserisci una chiave API prima di usare questo servizio.</translation>
+    </message>
+    <message>
+        <source>Unlock the system keychain, then retry. Your saved credentials have not been changed.</source>
+        <translation>Sblocca il portachiavi di sistema, poi riprova. Le credenziali salvate non sono state modificate.</translation>
+    </message>
+    <message>
+        <source>Complete credential protection</source>
+        <translation>Completa la protezione delle credenziali</translation>
     </message>
 </context>
 <context>

@@ -158,7 +158,7 @@ bool QgsAiEmbeddingClient::embedWithRole( const QStringList &texts, const QStrin
     if ( feedback && feedback->isCanceled() )
     {
       if ( errorMessage )
-        *errorMessage = u"Embeddings request cancelled."_s;
+        *errorMessage = u"Embeddings request canceled."_s;
       return false;
     }
     const QStringList batch = texts.mid( i, batchSize );
@@ -183,7 +183,7 @@ bool QgsAiEmbeddingClient::performRequest(
   if ( feedback && feedback->isCanceled() )
   {
     if ( errorMessage )
-      *errorMessage = u"Embeddings request cancelled."_s;
+      *errorMessage = u"Embeddings request canceled."_s;
     return false;
   }
 
@@ -215,7 +215,7 @@ bool QgsAiEmbeddingClient::performRequest(
   }
 
   // Block until finished. setTransferTimeout above guards against hangs, and a
-  // cancelled feedback aborts the reply so callers (e.g. a cancelled retrieval task)
+  // canceled feedback aborts the reply so callers (e.g. a canceled retrieval task)
   // stop waiting immediately instead of holding locks for the whole timeout.
   QEventLoop loop;
   connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
@@ -311,7 +311,7 @@ bool QgsAiEmbeddingClient::embedBatch( const QStringList &batch, const QString &
     if ( feedback && feedback->isCanceled() )
     {
       if ( errorMessage )
-        *errorMessage = u"Embeddings request cancelled."_s;
+        *errorMessage = u"Embeddings request canceled."_s;
       return false;
     }
     if ( !performRequest( payloadBytes, key, httpStatus, body, networkError, retryAfterSeconds, errorMessage, feedback ) )

@@ -2154,15 +2154,15 @@ void TestQgsAiAgentSessionManager::cancelDuringSlowRetrievalLeavesManagerIdle()
 
   // let the stale worker land: its result must be ignored, no dispatch may happen
   QTest::qWait( 900 );
-  bool sawCancelled = false;
+  bool sawCanceled = false;
   for ( const QList<QVariant> &args : stateSpy )
   {
     const QString state = args.at( 0 ).toString();
     QVERIFY( state != "sending"_L1 );
-    if ( state == "cancelled"_L1 )
-      sawCancelled = true;
+    if ( state == "cancelled"_L1 ) //#spellok
+      sawCanceled = true;
   }
-  QVERIFY( sawCancelled );
+  QVERIFY( sawCanceled );
 
   // a message sent after the cancel starts a fresh turn and completes
   const int embedsBefore = provider.mEmbedCalls.loadAcquire();
@@ -2197,25 +2197,25 @@ void TestQgsAiAgentSessionManager::taskManagerCancelDoesNotDispatchRequest()
   QSignalSpy runningSpy( &manager, &QgsAiAgentSessionManager::requestRunningChanged );
   QSignalSpy stateSpy( &manager, &QgsAiAgentSessionManager::requestStateChanged );
 
-  manager.sendUserMessage( u"cancelled through the task manager"_s );
+  manager.sendUserMessage( u"canceled through the task manager"_s );
   QVERIFY( manager.hasActiveRequest() );
 
-  // the retrieval task is cancelled from outside the manager, as QGIS shutdown and
+  // the retrieval task is canceled from outside the manager, as QGIS shutdown and
   // the task manager's "cancel all" button do: no provider request may be dispatched
   QgsApplication::taskManager()->cancelAll();
 
   QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 15000 );
   QTest::qWait( 300 );
 
-  bool sawCancelled = false;
+  bool sawCanceled = false;
   for ( const QList<QVariant> &args : stateSpy )
   {
     const QString state = args.at( 0 ).toString();
     QVERIFY( state != "sending"_L1 );
-    if ( state == "cancelled"_L1 )
-      sawCancelled = true;
+    if ( state == "cancelled"_L1 ) //#spellok
+      sawCanceled = true;
   }
-  QVERIFY( sawCancelled );
+  QVERIFY( sawCanceled );
   QCOMPARE( runningSpy.last().at( 0 ).toBool(), false );
 
   clearProviderSettings();
