@@ -326,11 +326,9 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaichatdockwidget.cpp
     ai/qgsaichatpromptedit.cpp
     ai/qgsaichathistorystore.cpp
-    ai/qgsaiclaudecodecli.cpp
+    ai/qgsaiclaudemigration.cpp
     ai/qgsaiclaudeconnectwidget.cpp
-    ai/qgsaiclaudeoauthclient.cpp
     ai/qgsaicodexoauthclient.cpp
-    ai/qgsaiptysession.cpp
     ai/qgsaifilecontextprovider.cpp
     ai/qgsaigissuggestionengine.cpp
     ai/qgsaimodelrouter.cpp
@@ -346,6 +344,8 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsairulesskillscloudclient.cpp
     ai/qgsairulesskillsstore.cpp
     ai/qgsaisecretstore.cpp
+    ai/qgsaicredentialstore.cpp
+    ai/qgsaicredentialdialog.cpp
     ai/qgsaisettingsdialog.cpp
     ai/qgsaivisualcontextutils.cpp
     ai/qgsaiworkspacetrust.cpp

@@ -31,7 +31,6 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
-  constexpr const char *MIGRATION_FLAG_KEY = "ai/security/secretsMigrated_v1";
   constexpr const char *DATA_KEY_VAULT_KEY = "ai/storage/dataKey";
   constexpr const char *DATA_KEY_FLAG_KEY = "ai/storage/hasDataKey";
   constexpr const char *ENCRYPTED_VALUE_PREFIX = "enc1:";
@@ -44,17 +43,6 @@ namespace
   bool sPlaintextStorageWarned = false;
   bool sDecryptFailureWarned = false;
 
-  const QStringList &legacySecretKeys()
-  {
-    static const QStringList keys = {
-      u"ai/provider/openai/apiKey"_s,
-      u"ai/provider/claude/apiKey"_s,
-      u"ai/provider/openrouter/apiKey"_s,
-      u"ai/provider/codex/oauth/refreshToken"_s,
-    };
-    return keys;
-  }
-
   QString randomHex( int bytes )
   {
     QByteArray raw( bytes, Qt::Uninitialized );
@@ -62,9 +50,6 @@ namespace
     return QString::fromLatin1( raw.toHex() );
   }
 } //namespace
-
-bool QgsAiSecretStore::sCleartextWarned = false;
-bool QgsAiSecretStore::sMigrationRetryRegistered = false;
 
 bool QgsAiSecretStore::vaultUsable()
 {
@@ -85,186 +70,6 @@ bool QgsAiSecretStore::vaultUsable()
 QString QgsAiSecretStore::flagKey( const QString &secretKey )
 {
   return secretKey + u"_inVault"_s;
-}
-
-void QgsAiSecretStore::warnCleartextOnce()
-{
-  if ( sCleartextWarned )
-    return;
-  sCleartextWarned = true;
-  QgsMessageLog::
-    logMessage( u"AI credentials are stored unencrypted. Unlock or set a QGIS master password (Settings ▸ Options ▸ Authentication) to store them encrypted in the authentication vault."_s, u"AI/Security"_s, Qgis::MessageLevel::Warning, false );
-}
-
-QString QgsAiSecretStore::readSecret( const QString &key, const QStringList &envFallbacks )
-{
-  QgsSettings settings;
-
-  // Vault first, when the secret is flagged as stored there.
-  if ( settings.value( flagKey( key ), false ).toBool() && vaultUsable() )
-  {
-    QgsAuthManager *authManager = QgsApplication::authManager();
-    const QString value = authManager->authSetting( key, QVariant(), true ).toString().trimmed();
-    if ( !value.isEmpty() )
-      return value;
-  }
-  else if ( vaultUsable() )
-  {
-    // Legacy vault entries written by older builds without the presence flag
-    // (e.g. Plan session token, Claude OAuth refresh token). Only read when
-    // the vault is ALREADY unlocked; existsAuthSetting() never decrypts, so
-    // this branch can never trigger the master password prompt.
-    QgsAuthManager *authManager = QgsApplication::authManager();
-    if ( authManager->existsAuthSetting( key ) )
-    {
-      const QString value = authManager->authSetting( key, QVariant(), true ).toString().trimmed();
-      if ( !value.isEmpty() )
-      {
-        settings.setValue( flagKey( key ), true );
-        return value;
-      }
-    }
-  }
-
-  // Legacy cleartext value (also the storage fallback when the vault is unavailable).
-  const QString legacy = settings.value( key ).toString().trimmed();
-  if ( !legacy.isEmpty() )
-  {
-    // Opportunistic migration: only when the vault is already unlocked, so a
-    // read can never trigger an interactive prompt.
-    QgsAuthManager *authManager = QgsApplication::authManager();
-    if ( authManager && !authManager->isDisabled() && authManager->masterPasswordIsSet() && authManager->storeAuthSetting( key, legacy, true ) )
-    {
-      settings.setValue( flagKey( key ), true );
-      settings.remove( key );
-      QgsMessageLog::logMessage( u"Migrated AI credential '%1' into the encrypted authentication vault."_s.arg( key ), u"AI/Security"_s, Qgis::MessageLevel::Info, false );
-    }
-    return legacy;
-  }
-
-  for ( const QString &envName : envFallbacks )
-  {
-    const QString envValue = qEnvironmentVariable( envName.toUtf8().constData() ).trimmed();
-    if ( !envValue.isEmpty() )
-      return envValue;
-  }
-
-  return QString();
-}
-
-bool QgsAiSecretStore::writeSecret( const QString &key, const QString &value )
-{
-  QgsSettings settings;
-
-  if ( vaultUsable() )
-  {
-    QgsAuthManager *authManager = QgsApplication::authManager();
-    if ( authManager->storeAuthSetting( key, value, true ) )
-    {
-      settings.setValue( flagKey( key ), true );
-      // Kill any cleartext copy left behind by older versions.
-      settings.remove( key );
-      return true;
-    }
-  }
-
-  // Fallback: cleartext settings — never break the configuration flow.
-  warnCleartextOnce();
-  settings.setValue( key, value );
-  settings.remove( flagKey( key ) );
-  return true;
-}
-
-void QgsAiSecretStore::removeSecret( const QString &key )
-{
-  QgsSettings settings;
-  QgsAuthManager *authManager = QgsApplication::authManager();
-  if ( authManager && !authManager->isDisabled() && settings.value( flagKey( key ), false ).toBool() )
-    authManager->removeAuthSetting( key );
-  settings.remove( flagKey( key ) );
-  settings.remove( key );
-}
-
-bool QgsAiSecretStore::hasSecret( const QString &key )
-{
-  QgsSettings settings;
-  if ( settings.value( flagKey( key ), false ).toBool() )
-    return true;
-  return !settings.value( key ).toString().trimmed().isEmpty();
-}
-
-void QgsAiSecretStore::migrateLegacySecrets()
-{
-  QgsSettings settings;
-  if ( settings.value( QString::fromUtf8( MIGRATION_FLAG_KEY ), false ).toBool() )
-    return;
-
-  bool anyPending = false;
-  for ( const QString &key : legacySecretKeys() )
-  {
-    if ( !settings.value( key ).toString().trimmed().isEmpty() )
-    {
-      anyPending = true;
-      break;
-    }
-  }
-  if ( !anyPending )
-  {
-    settings.setValue( QString::fromUtf8( MIGRATION_FLAG_KEY ), true );
-    return;
-  }
-
-  QgsAuthManager *authManager = QgsApplication::authManager();
-  if ( !authManager || authManager->isDisabled() )
-  {
-    QgsMessageLog::logMessage( u"AI credentials are stored unencrypted and the authentication vault is unavailable: migration skipped."_s, u"AI/Security"_s, Qgis::MessageLevel::Warning, false );
-    return;
-  }
-
-  // Strictly non-interactive at startup: defer until the vault gets unlocked
-  // (keychain auto-password or first interactive use), retry then or next start.
-  if ( !authManager->masterPasswordIsSet() )
-  {
-    if ( !sMigrationRetryRegistered )
-    {
-      sMigrationRetryRegistered = true;
-      QObject::connect(
-        authManager,
-        &QgsAuthManager::masterPasswordVerified,
-        authManager,
-        []( bool verified ) {
-          if ( verified )
-            QgsAiSecretStore::migrateLegacySecrets();
-        },
-        Qt::SingleShotConnection
-      );
-    }
-    QgsMessageLog::logMessage( u"AI credential migration into the authentication vault deferred until the vault is unlocked."_s, u"AI/Security"_s, Qgis::MessageLevel::Info, false );
-    return;
-  }
-
-  bool allMigrated = true;
-  for ( const QString &key : legacySecretKeys() )
-  {
-    const QString value = settings.value( key ).toString().trimmed();
-    if ( value.isEmpty() )
-      continue;
-
-    if ( authManager->storeAuthSetting( key, value, true ) )
-    {
-      settings.setValue( flagKey( key ), true );
-      settings.remove( key );
-      QgsMessageLog::logMessage( u"Migrated AI credential '%1' into the encrypted authentication vault."_s.arg( key ), u"AI/Security"_s, Qgis::MessageLevel::Info, false );
-    }
-    else
-    {
-      allMigrated = false;
-      QgsMessageLog::logMessage( u"Failed to migrate AI credential '%1' into the authentication vault; will retry next start."_s.arg( key ), u"AI/Security"_s, Qgis::MessageLevel::Warning, false );
-    }
-  }
-
-  if ( allMigrated )
-    settings.setValue( QString::fromUtf8( MIGRATION_FLAG_KEY ), true );
 }
 
 QString QgsAiSecretStore::dataEncryptionKey()

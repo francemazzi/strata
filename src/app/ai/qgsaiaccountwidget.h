@@ -59,7 +59,7 @@ class APP_EXPORT QgsAiAccountWidget : public QWidget
     QString accountTier() const;
     bool isSignedIn() const;
     //! True while a login/register/refresh request is in flight; the host dialog blocks accept meanwhile.
-    bool isBusy() const { return mBusy; }
+    bool isBusy() const { return mBusy || mSavingToken; }
 
   signals:
     //! Login/logout or managed catalog changes the chat dock should react to immediately.
@@ -75,6 +75,7 @@ class APP_EXPORT QgsAiAccountWidget : public QWidget
     void logout();
     void refreshManagedModels();
     void onDesktopTokenReady( const QString &token );
+    void finishDesktopTokenReady( const QString &token );
     void onRequestFailed( const QString &message );
     void onBalanceReady( const QgsAiPlanClient::BalanceInfo &balance );
     void onModelPreferencesReady( const QList<QgsAiPlanClient::ModelPreferenceInfo> &preferences, bool fromCache );
@@ -136,6 +137,7 @@ class APP_EXPORT QgsAiAccountWidget : public QWidget
 
     Mode mMode = Mode::Login;
     bool mBusy = false;
+    bool mSavingToken = false;
     //! False until the user triggers a request; failures of the silent open-time refresh stay non-alarming.
     bool mInteractiveRequest = false;
     QString mAccountEmail;

@@ -28,7 +28,7 @@
 #include "qgsaiagentsessionmanager.h"
 #include "qgsaichatdockwidget.h"
 #include "qgsaiclaudeconnectwidget.h"
-#include "qgsaiclaudeoauthclient.h"
+#include "qgsaicredentialdialog.h"
 #include "qgsaigallerycloudclient.h"
 #include "qgsaigissuggestionengine.h"
 #include "qgsaimessagelogbuffer.h"
@@ -597,6 +597,8 @@ QLabel[aiRole="rowDescription"] { color: palette(dark); }
 
 void QgsAiSettingsDialog::accept()
 {
+  if ( mSavingSecrets )
+    return;
   // Login is a two-step async flow; closing mid-flight would orphan the
   // freshly minted desktop token and leave the user apparently signed out.
   if ( mAccountWidget && mAccountWidget->isBusy() )
@@ -604,43 +606,40 @@ void QgsAiSettingsDialog::accept()
     QMessageBox::information( this, tr( "Account request in progress" ), tr( "Wait for the running login or account request to finish before closing the settings." ) );
     return;
   }
-  if ( mClaudeConnectWidget && mClaudeConnectWidget->isBusy() )
-  {
-    QMessageBox::information( this, tr( "Claude Code connection in progress" ), tr( "Wait for the Claude Code login to finish, or cancel it, before closing the settings." ) );
-    return;
-  }
-  applySettings();
-  QDialog::accept();
+  QMap<QString, QString> credentials;
+  for ( const auto &pair :
+        { qMakePair( u"ai/provider/openai/apiKey"_s, mOpenAiKey->text().trimmed() ),
+          qMakePair( u"ai/provider/openrouter/apiKey"_s, mOpenRouterKey->text().trimmed() ),
+          qMakePair( u"ai/provider/claude/apiKey"_s, mClaudeConnectWidget->pendingApiKey() ),
+          qMakePair( u"ai/provider/plan/token"_s, mAccountWidget->manualSessionToken() ) } )
+    if ( !pair.second.isEmpty() )
+      credentials.insert( pair.first, pair.second );
+  mSavingSecrets = true;
+  mStack->setEnabled( false );
+  QgsAiCredentialDialog::save( this, credentials, [this]( bool saved ) {
+    mSavingSecrets = false;
+    mStack->setEnabled( true );
+    if ( !saved || !applySettings() )
+      return;
+    if ( mRequestedProvider )
+    {
+      if ( !mModelRouter->isProviderUsable( *mRequestedProvider ) )
+      {
+        QMessageBox::information( this, tr( "Configure a provider" ), tr( "Enter an API key before using this provider." ) );
+        return;
+      }
+      mModelRouter->setActiveProvider( *mRequestedProvider );
+      emit planAuthStateChanged();
+    }
+    QDialog::accept();
+  } );
 }
 
 void QgsAiSettingsDialog::reject()
 {
-  if ( mClaudeConnectWidget && mClaudeConnectWidget->isBusy() )
-  {
-    const QMessageBox::StandardButton answer = QMessageBox::
-      question( this, tr( "Cancel the Claude Code connection?" ), tr( "The Claude Code login is still running. Closing the settings cancels it." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
-    if ( answer != QMessageBox::Yes )
-      return;
-    mClaudeConnectWidget->cancelConnect();
-  }
-  QDialog::reject();
-}
-
-void QgsAiSettingsDialog::startClaudeConnect()
-{
-  if ( !mClaudeConnectWidget )
+  if ( mSavingSecrets || ( mAccountWidget && mAccountWidget->isBusy() ) )
     return;
-  showSection( u"providers"_s );
-  // The provider page lives inside a scroll area: bring the Claude block into view.
-  for ( QWidget *ancestor = mClaudeConnectWidget->parentWidget(); ancestor; ancestor = ancestor->parentWidget() )
-  {
-    if ( QScrollArea *scrollArea = qobject_cast<QScrollArea *>( ancestor ) )
-    {
-      scrollArea->ensureWidgetVisible( mClaudeConnectWidget, 0, 24 );
-      break;
-    }
-  }
-  mClaudeConnectWidget->startConnect();
+  QDialog::reject();
 }
 
 void QgsAiSettingsDialog::showSection( const QString &key )
@@ -719,28 +718,68 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   QVBoxLayout *contentLayout = nullptr;
   QWidget *page = createPage( tr( "Models & Providers" ), tr( "Bring-your-own-key providers used when the Plan account is not active." ), contentLayout );
 
+  auto *active
+    = new QLabel( tr( "Active provider: %1 · %2" ).arg( mModelRouter->providerDisplayName( mModelRouter->activeProvider() ), mModelRouter->credentialStatus( mModelRouter->activeProvider() ) ), page );
+  active->setWordWrap( true );
+  contentLayout->addWidget( active );
+  auto *migration = new QLabel( page );
+  migration->setWordWrap( true );
+  auto *retry = new QPushButton( tr( "Retry credential protection" ), page );
+  const auto updateProtection = [migration, retry]() {
+    const bool pending = QgsAiSecretStore::migrationPending();
+    migration->setText( pending ? tr( "Protection incomplete: some existing credentials could not yet be moved to the system keychain. They have been preserved." ) : QString() );
+    migration->setVisible( pending );
+    retry->setVisible( pending );
+  };
+  updateProtection();
+  contentLayout->addWidget( migration );
+  contentLayout->addWidget( retry );
+  connect( retry, &QPushButton::clicked, this, [this, retry, updateProtection]() {
+    retry->setEnabled( false );
+    QgsAiSecretStore::loadSecretsAsync(
+      this,
+      [retry, updateProtection]() {
+        retry->setEnabled( true );
+        updateProtection();
+      },
+      true
+    );
+  } );
+  QgsAiSecretStore::loadSecretsAsync( this, updateProtection );
+
   // ---- Claude ----
-  // First block: the subscription path is the one most users take. Connect and
-  // disconnect apply immediately; mode, model, API key and manual token on OK.
+  // API-only Claude access; subscription migration is explained in the widget.
   contentLayout->addWidget( sectionHeader( tr( "Claude" ), page ) );
   mClaudeEndpoint = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::Claude ).endpoint, page );
   mClaudeConnectWidget = new QgsAiClaudeConnectWidget( mModelRouter, page );
   contentLayout->addWidget( mClaudeConnectWidget );
-  connect( mClaudeConnectWidget, &QgsAiClaudeConnectWidget::connectionStateChanged, this, [this]() {
-    refreshOnboardingStatus();
-    // The dock rebuilds its model menu on this signal, so the pill reflects the new state live.
-    emit planAuthStateChanged();
+  connect( mClaudeConnectWidget, &QgsAiClaudeConnectWidget::cloudRequested, this, [this]() { showSection( u"account"_s ); } );
+  connect( mClaudeConnectWidget, &QgsAiClaudeConnectWidget::useRequested, this, [this]() {
+    mRequestedProvider = QgsAiModelRouter::Provider::Claude;
+    accept();
   } );
 
   // ---- OpenAI ----
   contentLayout->addWidget( sectionHeader( tr( "OpenAI" ), page ) );
   mOpenAiEndpoint = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi ).endpoint, page );
   mOpenAiModel = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi ).model, page );
+  const auto addUseButton = [this, page, contentLayout]( QgsAiModelRouter::Provider provider, const QString &name ) {
+    auto *use = new QPushButton( tr( "Use in this chat" ), page );
+    use->setObjectName( name );
+    contentLayout->addWidget( use );
+    connect( use, &QPushButton::clicked, this, [this, provider]() {
+      mRequestedProvider = provider;
+      accept();
+    } );
+  };
   mOpenAiKey = new QLineEdit( page );
+  mOpenAiKey->setObjectName( u"aiOpenAiKeyLineEdit"_s );
   mOpenAiKey->setEchoMode( QLineEdit::Password );
   mOpenAiKey->setPlaceholderText( mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi ) ? tr( "Saved locally — enter a new key only to replace it" ) : tr( "sk-..." ) );
   contentLayout->addWidget( settingRow( tr( "Model" ), QString(), mOpenAiModel, page ) );
   contentLayout->addWidget( settingRow( tr( "API key" ), tr( "Stored locally. Leave empty to keep the saved key." ), mOpenAiKey, page ) );
+
+  addUseButton( QgsAiModelRouter::Provider::OpenAi, u"aiOpenAiUseButton"_s );
 
   // ---- OpenRouter ----
   contentLayout->addWidget( sectionHeader( tr( "OpenRouter" ), page ) );
@@ -816,6 +855,8 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   contentLayout->addWidget( settingRow( tr( "Connection" ), QString(), openRouterTestButton, page ) );
   contentLayout->addWidget( openRouterTestResult );
 
+  addUseButton( QgsAiModelRouter::Provider::OpenRouter, u"aiOpenRouterUseButton"_s );
+
   QPushButton *clearAiCacheButton = new QPushButton( tr( "Clear AI cache" ), page );
   clearAiCacheButton->setObjectName( u"aiClearOpenRouterCacheButton"_s );
   connect( clearAiCacheButton, &QPushButton::clicked, this, [this]() {
@@ -883,12 +924,19 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
     }
 
     QString error;
-    if ( !QgsAiCodexOAuthClient::completeDeviceCodeLogin( mCodexDeviceCode, &error ) )
+    QString refreshToken;
+    mSavingSecrets = true;
+    if ( !QgsAiCodexOAuthClient::completeDeviceCodeLogin( mCodexDeviceCode, &error, &refreshToken ) )
     {
+      mSavingSecrets = false;
       QMessageBox::warning( this, tr( "Codex login failed" ), error );
       return;
     }
-    mCodexStatus->setText( tr( "Signed in" ) );
+    QgsAiCredentialDialog::save( this, { { QgsAiCodexOAuthClient::refreshTokenSettingKey(), refreshToken } }, [this]( bool saved ) {
+      mSavingSecrets = false;
+      if ( saved )
+        mCodexStatus->setText( tr( "Configured" ) );
+    } );
   } );
 
   connect( codexLogoutButton, &QPushButton::clicked, this, [this]() {
@@ -900,6 +948,24 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
     }
     mCodexStatus->setText( tr( "Not signed in" ) );
   } );
+
+  auto *protectCodex = new QPushButton( tr( "Complete credential protection" ), page );
+  protectCodex->setVisible( !QgsAiCodexOAuthClient::credentialAwaitingProtection().isEmpty() );
+  contentLayout->addWidget( protectCodex );
+  connect( protectCodex, &QPushButton::clicked, this, [this, protectCodex]() {
+    mSavingSecrets = true;
+    mStack->setEnabled( false );
+    QgsAiCredentialDialog::save( this, { { QgsAiCodexOAuthClient::refreshTokenSettingKey(), QgsAiCodexOAuthClient::credentialAwaitingProtection() } }, [this, protectCodex]( bool saved ) {
+      mSavingSecrets = false;
+      mStack->setEnabled( true );
+      if ( saved )
+      {
+        protectCodex->hide();
+        mCodexStatus->setText( mModelRouter->credentialStatus( QgsAiModelRouter::Provider::Codex ) );
+      }
+    } );
+  } );
+  addUseButton( QgsAiModelRouter::Provider::Codex, u"aiCodexUseButton"_s );
 
   // ---- Advanced endpoints ----
   QgsCollapsibleGroupBox *advancedEndpoints = new QgsCollapsibleGroupBox( tr( "Advanced endpoints" ), page );
@@ -2655,13 +2721,11 @@ QWidget *QgsAiSettingsDialog::buildPrivacyPage()
   QVBoxLayout *contentLayout = nullptr;
   QWidget *page = createPage( tr( "Privacy & Telemetry" ), tr( "All sharing is opt-in and metadata-only, never payloads." ), contentLayout );
 
-  // Credential/data encryption status (best-effort vault policy: never prompts).
   QLabel *encryptionStatus = new QLabel( page );
   encryptionStatus->setObjectName( u"aiCredentialEncryptionStatusLabel"_s );
   encryptionStatus->setWordWrap( true );
   encryptionStatus->setText(
-    QgsAiSecretStore::vaultUsable() ? tr( "AI credentials and data are encrypted in the QGIS authentication vault." )
-                                    : tr( "AI credentials and data are stored unencrypted — unlock or set a QGIS master password (Options ▸ Authentication) to enable encryption." )
+    tr( "New credentials use the system keychain. Session-only credentials are forgotten when Strata closes. Existing credentials are removed from legacy storage only after a verified migration." )
   );
   contentLayout->addWidget( encryptionStatus );
 
@@ -2685,8 +2749,8 @@ QWidget *QgsAiSettingsDialog::buildPrivacyPage()
 
   QLabel *storageNote = new QLabel(
     tr(
-      "OpenAI, OpenRouter and Claude API keys, the Codex OAuth refresh token and the Claude Code subscription token are stored through Strata's local secret store (encrypted in the QGIS "
-      "authentication vault when it is unlocked, otherwise in local settings). Leave API key fields empty to keep the current saved value. Agent rules and skills are stored locally in application "
+      "AI credentials are saved in the system keychain or, when explicitly chosen, kept only for the current session. Legacy credentials are migrated after verification. Leave API key fields empty "
+      "to keep the current saved value. Agent rules and skills are stored locally in application "
       "settings."
     ),
     page
@@ -2990,20 +3054,33 @@ bool QgsAiSettingsDialog::confirmRebuild( const QString &what )
   return QMessageBox::question( this, tr( "Rebuild index" ), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No ) == QMessageBox::Yes;
 }
 
-void QgsAiSettingsDialog::applySettings()
+bool QgsAiSettingsDialog::applySettings()
 {
   if ( !mModelRouter )
-    return;
+    return false;
 
   const QString pendingOpenAiKey = mOpenAiKey->text().trimmed();
   const QString pendingOpenRouterKey = mOpenRouterKey->text().trimmed();
   const QString pendingClaudeKey = mClaudeConnectWidget->pendingApiKey();
-  // Manual escape hatch: a token pasted under Advanced (already whitespace-scrubbed).
-  const QString pendingClaudeSubscriptionToken = mClaudeConnectWidget->pendingManualToken();
   const QString pendingPlanToken = mAccountWidget->manualSessionToken();
 
   QString errorMessages;
   QString error;
+
+  if ( !pendingOpenAiKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::OpenAi, pendingOpenAiKey, &error ) )
+    errorMessages += error + '\n';
+  if ( !pendingOpenRouterKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::OpenRouter, pendingOpenRouterKey, &error ) )
+    errorMessages += error + '\n';
+  if ( !pendingClaudeKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::Claude, pendingClaudeKey, &error ) )
+    errorMessages += error + '\n';
+  if ( !pendingPlanToken.isEmpty() && !mModelRouter->setPlanSessionToken( pendingPlanToken, &error ) )
+    errorMessages += error + '\n';
+
+  if ( !errorMessages.isEmpty() )
+  {
+    QMessageBox::warning( this, tr( "Credentials not saved" ), errorMessages.trimmed() );
+    return false;
+  }
 
   QgsAiModelRouter::ProviderSettings openAiSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi );
   openAiSettings.endpoint = mOpenAiEndpoint->text().trimmed();
@@ -3033,21 +3110,6 @@ void QgsAiSettingsDialog::applySettings()
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Plan, planSettings );
   mModelRouter->setPlanAuthConfigId( mAccountWidget->planAuthConfigId() );
 
-  if ( !pendingOpenAiKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::OpenAi, pendingOpenAiKey, &error ) )
-    errorMessages += error + '\n';
-  if ( !pendingOpenRouterKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::OpenRouter, pendingOpenRouterKey, &error ) )
-    errorMessages += error + '\n';
-  if ( !pendingClaudeKey.isEmpty() && !mModelRouter->storeApiKey( QgsAiModelRouter::Provider::Claude, pendingClaudeKey, &error ) )
-    errorMessages += error + '\n';
-  if ( !pendingClaudeSubscriptionToken.isEmpty() )
-  {
-    QgsAiModelRouter::ClaudeSubscriptionInfo manualInfo;
-    manualInfo.source = u"manual"_s;
-    if ( !mModelRouter->connectClaudeSubscription( pendingClaudeSubscriptionToken, manualInfo, &error ) )
-      errorMessages += ( error.isEmpty() ? tr( "Unable to store Claude subscription token." ) : error ) + '\n';
-  }
-  if ( !pendingPlanToken.isEmpty() && !mModelRouter->setPlanSessionToken( pendingPlanToken, &error ) )
-    errorMessages += error + '\n';
 
   {
     QgsSettings settings;
@@ -3097,25 +3159,8 @@ void QgsAiSettingsDialog::applySettings()
   QgsAiModelRouter::ProviderSettings claudeSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Claude );
   claudeSettings.endpoint = mClaudeEndpoint->text().trimmed();
   claudeSettings.model = mClaudeConnectWidget->modelText();
-  const bool claudeSubscriptionRequested = mClaudeConnectWidget->selectedCredentialMode() == QgsAiModelRouter::CredentialMode::OAuth;
-  const bool claudeSubscriptionAvailable = mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude );
-  const bool claudeApiKeyAvailable = !pendingClaudeKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude );
-  if ( claudeSubscriptionRequested && claudeSubscriptionAvailable )
-  {
-    claudeSettings.credentialMode = QgsAiModelRouter::CredentialMode::OAuth;
-    claudeSettings.enabled = true;
-  }
-  else
-  {
-    if ( claudeSubscriptionRequested && !claudeSubscriptionAvailable )
-    {
-      errorMessages += ( claudeApiKeyAvailable ? tr( "Claude Code is not connected; Claude will keep using API key mode." )
-                                               : tr( "Claude Code is not connected; Claude is disabled until you connect it or configure an API key." ) )
-                       + '\n';
-    }
-    claudeSettings.credentialMode = QgsAiModelRouter::CredentialMode::ApiKey;
-    claudeSettings.enabled = claudeApiKeyAvailable;
-  }
+  claudeSettings.credentialMode = QgsAiModelRouter::CredentialMode::ApiKey;
+  claudeSettings.enabled = !pendingClaudeKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude );
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Claude, claudeSettings );
 
   QgsSettings gisSaveSettings;
@@ -3181,4 +3226,5 @@ void QgsAiSettingsDialog::applySettings()
 
   if ( !errorMessages.isEmpty() )
     QMessageBox::warning( this, tr( "Provider configuration warnings" ), errorMessages.trimmed() );
+  return errorMessages.isEmpty();
 }

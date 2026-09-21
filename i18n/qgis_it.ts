@@ -62296,6 +62296,34 @@ If ellipsoidal calculations are enabled, the algorithm bypasses the spatial inde
         <source>Concatenated string value with format of &apos;min_elevation,max_elevation,red,green,blue;&apos; for each color range</source>
         <translation type="unfinished"/>
     </message>
+    <message>
+        <source>Save credentials securely</source>
+        <translation>Salva le credenziali in modo sicuro</translation>
+    </message>
+    <message>
+        <source>Retry</source>
+        <translation>Riprova</translation>
+    </message>
+    <message>
+        <source>Use only for this session</source>
+        <translation>Usa solo questa sessione</translation>
+    </message>
+    <message>
+        <source>The system keychain is unavailable. Retry or use this credential for this session only.</source>
+        <translation>Il portachiavi di sistema non è disponibile. Riprova oppure usa questa credenziale solo per questa sessione.</translation>
+    </message>
+    <message>
+        <source>The keychain could not confirm or undo this save. Retry to complete secure storage.</source>
+        <translation>Il portachiavi non ha potuto confermare né annullare il salvataggio. Riprova per completare la protezione.</translation>
+    </message>
+    <message>
+        <source>This credential cannot be saved.</source>
+        <translation>Questa credenziale non può essere salvata.</translation>
+    </message>
+    <message>
+        <source>A save is already in progress. Please retry.</source>
+        <translation>È già in corso un salvataggio. Riprova tra poco.</translation>
+    </message>
 </context>
 <context>
     <name>QRasterAttributeTableDialogBase</name>
@@ -192533,6 +192561,117 @@ L&apos;algoritmo rende inoltre possibile riordinare le bande del nuovo raster.</
     <message>
         <source>Third Quartile (Q3)</source>
         <translation>Terzo Quartile (Q3)</translation>
+    </message>
+</context>
+<context>
+    <name>QgsAiClaudeConnectWidget</name>
+    <message>
+        <source>Claude subscription connections are temporarily suspended. You can use Strata Cloud or an Anthropic API key.</source>
+        <translation>Il collegamento all’abbonamento Claude è temporaneamente sospeso. Puoi usare Strata Cloud oppure una chiave API Anthropic.</translation>
+    </message>
+    <message>
+        <source>Sign in to Strata Cloud</source>
+        <translation>Accedi a Strata Cloud</translation>
+    </message>
+    <message>
+        <source>Configure an API key (advanced)</source>
+        <translation>Configura una chiave API (opzioni avanzate)</translation>
+    </message>
+    <message>
+        <source>Anthropic API usage is billed separately from a Claude subscription.</source>
+        <translation>L’uso delle API Anthropic viene addebitato separatamente dall’abbonamento Claude.</translation>
+    </message>
+    <message>
+        <source>API key — leave empty to keep the saved key</source>
+        <translation>Chiave API — lascia vuoto per mantenere quella salvata</translation>
+    </message>
+    <message>
+        <source>Use in this chat</source>
+        <translation>Usa in questa chat</translation>
+    </message>
+</context>
+<context>
+    <name>QgsAiModelRouter</name>
+    <message>
+        <source>Available only for this session</source>
+        <translation>Disponibile solo per questa sessione</translation>
+    </message>
+    <message>
+        <source>Protection incomplete</source>
+        <translation>Protezione da completare</translation>
+    </message>
+    <message>
+        <source>Connection verified</source>
+        <translation>Connessione verificata</translation>
+    </message>
+    <message>
+        <source>Configured</source>
+        <translation>Configurato</translation>
+    </message>
+    <message>
+        <source>Not configured</source>
+        <translation>Non configurato</translation>
+    </message>
+    <message>
+        <source>Claude subscription connections are temporarily suspended. Choose a provider before sending another message.</source>
+        <translation>Il collegamento all’abbonamento Claude è temporaneamente sospeso. Scegli un servizio prima di inviare un altro messaggio.</translation>
+    </message>
+    <message>
+        <source>Use an Anthropic API key. Claude subscription tokens are not supported.</source>
+        <translation>Inserisci una chiave API Anthropic. I token dell’abbonamento Claude non sono supportati.</translation>
+    </message>
+</context>
+<context>
+    <name>QgsAiSettingsDialog</name>
+    <message>
+        <source>Use in this chat</source>
+        <translation>Usa in questa chat</translation>
+    </message>
+    <message>
+        <source>Active provider: %1 · %2</source>
+        <translation>Servizio attivo: %1 · %2</translation>
+    </message>
+    <message>
+        <source>Retry credential protection</source>
+        <translation>Riprova a proteggere le credenziali</translation>
+    </message>
+    <message>
+        <source>Protection incomplete: some existing credentials could not yet be moved to the system keychain. They have been preserved.</source>
+        <translation>Protezione da completare: alcune credenziali non sono ancora state trasferite nel portachiavi di sistema. Le copie precedenti sono state conservate.</translation>
+    </message>
+    <message>
+        <source>Credentials not saved</source>
+        <translation>Credenziali non salvate</translation>
+    </message>
+    <message>
+        <source>Configure a provider</source>
+        <translation>Configura un servizio</translation>
+    </message>
+    <message>
+        <source>Enter an API key before using this provider.</source>
+        <translation>Inserisci una chiave API prima di usare questo servizio.</translation>
+    </message>
+</context>
+<context>
+    <name>QgsAiAccountWidget</name>
+    <message>
+        <source>Use in this chat</source>
+        <translation>Usa in questa chat</translation>
+    </message>
+    <message>
+        <source>Sign-in was not saved. You can retry.</source>
+        <translation>L’accesso non è stato salvato. Puoi riprovare.</translation>
+    </message>
+</context>
+<context>
+    <name>QgsAiAgentSessionManager</name>
+    <message>
+        <source>Claude subscription connections are temporarily suspended. Open settings to sign in to Strata Cloud or configure an API key, then choose Use in this chat.</source>
+        <translation>Il collegamento all’abbonamento Claude è temporaneamente sospeso. Apri le impostazioni per accedere a Strata Cloud o configurare una chiave API, poi scegli Usa in questa chat.</translation>
+    </message>
+    <message>
+        <source>The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat.</source>
+        <translation>Il servizio AI selezionato non è disponibile. Apri le impostazioni per configurarlo oppure scegli un altro servizio per questa chat.</translation>
     </message>
 </context>
 </TS>

@@ -128,9 +128,8 @@ QString QgsAiEmbeddingClient::apiKey() const
     const QString envToken = QString::fromUtf8( qgetenv( "STRATA_PLAN_TOKEN" ) ).trimmed();
     if ( !envToken.isEmpty() )
       return envToken;
-    // Never-prompt read: vault only when already unlocked, cleartext fallback
-    // otherwise — embedding batches run on worker threads and must never pop
-    // the master password dialog.
+    // Never-prompt read from the hydrated secret cache (or readable legacy
+    // storage during migration). Embedding workers never open a keychain dialog.
     return QgsAiSecretStore::readSecret( QString::fromLatin1( PLAN_TOKEN_SETTING ) );
   }
   const bool useOpenRouter = provider() == Provider::OpenRouter;

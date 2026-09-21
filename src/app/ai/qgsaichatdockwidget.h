@@ -117,8 +117,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void scrollTranscriptToBottom();
     void showRequestError( const QgsAiChatMessage &message );
     void hideRequestError();
-    //! Opens the settings dialog on \a section; with \a startClaudeConnect the Claude Code connection flow starts right away.
-    void openProviderSettingsSection( const QString &section, bool startClaudeConnect = false );
+    //! Opens the settings dialog on \a section.
+    void openProviderSettingsSection( const QString &section );
     void setModeLabel( const QString &label );
     void markMessageStatus( const QString &messageId, const QVariantMap &metadata, const QString &key, const QString &value );
     void acceptPlan( const QString &messageId, const QString &planMarkdown, const QVariantMap &metadata );

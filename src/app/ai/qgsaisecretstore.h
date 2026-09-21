@@ -16,30 +16,20 @@
 #ifndef QGSAISECRETSTORE_H
 #define QGSAISECRETSTORE_H
 
+#include <functional>
+
 #include "qgis_app.h"
 
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
 
+class QObject;
+
 /**
- * Central store for AI provider secrets (API keys, OAuth refresh tokens).
- *
- * Best-effort, never-prompt policy: this store NEVER initiates a vault unlock —
- * no master password dialog, no keychain access. The encrypted QGIS
- * authentication vault (qgis-auth.db) is used only when another component has
- * already unlocked it for the session; otherwise secrets fall back to cleartext
- * QgsSettings with a once-per-session actionable hint (set a master password in
- * Settings ▸ Options ▸ Authentication to enable encryption). As soon as the
- * vault gets unlocked, new writes go encrypted and legacy cleartext secrets
- * migrate opportunistically.
- *
- * A cleartext boolean presence flag (`<secretKey>_inVault`) marks secrets that
- * live in the vault, so existence checks never need to unlock it.
- *
- * Key-loss note: if qgis-auth.db or the master password is lost, vault-stored
- * secrets are unrecoverable (same blast radius as any other QGIS credential);
- * the user simply re-enters the API keys.
+ * Secure AI credentials with asynchronous OS-keychain persistence.
+ * Synchronous reads use the session cache or legacy storage during migration.
+ * The separate chat/index encryption key remains in the QGIS authentication vault.
  */
 class APP_EXPORT QgsAiSecretStore
 {
@@ -60,39 +50,55 @@ class APP_EXPORT QgsAiSecretStore
         QString errorMessage;
     };
 
-    //! True when the auth vault is ALREADY unlocked for this session (this store never unlocks it).
+    enum class StorageState
+    {
+      Missing,
+      Persistent,
+      SessionOnly,
+      MigrationPending,
+      Failed
+    };
+    struct SecretResult
+    {
+        StorageState state = StorageState::Failed;
+        QString error;
+        bool sessionAllowed = true;
+        bool ok() const { return state == StorageState::Persistent || state == StorageState::SessionOnly; }
+    };
+    using SecretCallback = std::function<void( const SecretResult & )>;
+    enum class Operation
+    {
+      Read,
+      Write,
+      Remove
+    };
+    struct BackendResult
+    {
+        bool ok = false;
+        bool notFound = false;
+        QString value;
+    };
+    using BackendCallback = std::function<void( const BackendResult & )>;
+    using Backend = std::function<void( Operation, const QString &, const QString &, BackendCallback )>;
+
     static bool vaultUsable();
-
-    //! Cleartext presence-flag key for \a secretKey.
     static QString flagKey( const QString &secretKey );
-
-    /**
-     * Returns the secret for \a key: vault (when flagged and usable) →
-     * legacy cleartext QgsSettings (opportunistically migrated to the vault
-     * when silently possible) → first non-empty \a envFallbacks variable.
-     */
     static QString readSecret( const QString &key, const QStringList &envFallbacks = QStringList() );
-
-    /**
-     * Stores \a value for \a key in the vault when usable (removing any
-     * cleartext copy), otherwise falls back to cleartext QgsSettings with a
-     * once-per-session warning. Never fails the configuration flow.
-     */
+    //! Compatibility for blocking OAuth clients; UI saves must use writeSecretAsync.
     static bool writeSecret( const QString &key, const QString &value );
-
-    //! Removes the secret from the vault, the presence flag and any cleartext copy.
+    static void writeSecretAsync( const QString &key, const QString &value, QObject *context, SecretCallback callback );
+    static void useForSession( const QString &key, const QString &value );
     static void removeSecret( const QString &key );
-
-    //! True when a secret exists (vault flag or cleartext). Never unlocks the vault.
     static bool hasSecret( const QString &key );
-
-    /**
-     * One-time migration of legacy cleartext secrets (provider API keys and the
-     * Codex OAuth refresh token) into the vault. Strictly non-interactive: when
-     * the vault is locked the migration is deferred (single-shot retry on
-     * master-password verification, otherwise next start).
-     */
+    static StorageState storageState( const QString &key );
     static void migrateLegacySecrets();
+    static void loadSecretsAsync( QObject *context, std::function<void()> callback, bool retry = false );
+    static bool secretsLoaded();
+    static bool migrationPending();
+    //! Injected asynchronous backend: tests never access the user's actual keychain.
+    static void setBackendForTesting( Backend backend );
+    static void resetCredentialCacheForTesting();
+    static QString keychainKey( const QString &key );
 
     // --- Encryption-at-rest helpers for the AI data stores (RAG index, chat history) ---
 
@@ -136,12 +142,6 @@ class APP_EXPORT QgsAiSecretStore
 
     //! Clears the cached data key (unit tests only).
     static void resetDataKeyCacheForTesting();
-
-  private:
-    static void warnCleartextOnce();
-
-    static bool sCleartextWarned;
-    static bool sMigrationRetryRegistered;
 };
 
 #endif // QGSAISECRETSTORE_H

@@ -7,6 +7,7 @@
 #include "qgsaidatahubextracttool.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaisecretstore.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgssettings.h"
 #include "qgstest.h"
@@ -70,6 +71,7 @@ class TestQgsAiDataHubExtractTool : public QObject
 
 void TestQgsAiDataHubExtractTool::init()
 {
+  installTestSecretBackend();
   clearPlanSettings();
 }
 

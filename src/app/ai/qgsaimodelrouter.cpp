@@ -17,7 +17,7 @@
 
 #include <algorithm>
 
-#include "qgsaiclaudeoauthclient.h"
+#include "qgsaiclaudemigration.h"
 #include "qgsaicodexoauthclient.h"
 #include "qgsaisecretstore.h"
 #include "qgsaitoolregistry.h"
@@ -322,6 +322,7 @@ QgsAiModelRouter::QgsAiModelRouter( QObject *parent )
   plan.model = u"managed-plan"_s;
   mProviderSettings.insert( Provider::Plan, plan );
 
+  QgsAiClaudeMigration::run();
   loadPersistedProviderSettings();
   QgsAiSecretStore::migrateLegacySecrets();
 }
@@ -350,6 +351,7 @@ void QgsAiModelRouter::setProviderSettings( Provider provider, const ProviderSet
   normalizedSettings.model = normalizedModelForProvider( provider, normalizedSettings.model );
   if ( provider == Provider::Codex )
     normalizedSettings.credentialMode = CredentialMode::OAuth;
+  mVerifiedProviders.remove( provider );
   mProviderSettings.insert( provider, normalizedSettings );
   persistProviderSettings( provider, normalizedSettings );
 }
@@ -906,39 +908,8 @@ QByteArray QgsAiModelRouter::buildRequestPayload( Provider provider, const QList
       claudeMessages.push_back( messageObject );
     }
 
-    // Claude subscription (OAuth) requires the request to identify as Claude Code:
-    // api.anthropic.com rejects OAuth requests whose first system block is not the
-    // Claude Code identity. Send `system` as an array with that block first.
-    if ( mProviderSettings.value( provider ).credentialMode == CredentialMode::OAuth )
-    {
-      QJsonArray systemBlocks;
-      QJsonObject identityBlock;
-      identityBlock.insert( u"type"_s, u"text"_s );
-      identityBlock.insert( u"text"_s, u"You are Claude Code, Anthropic's official CLI for Claude."_s );
-      systemBlocks.push_back( identityBlock );
-      // Steer the model to Strata's local tools instead of the server-side Claude Code sandbox
-      // (bash/code_execution) that the OAuth identity injects: sandbox files never reach the
-      // user's QGIS and leaning on it burns the sandbox call quota.
-      QJsonObject toolingBlock;
-      toolingBlock.insert( u"type"_s, u"text"_s );
-      toolingBlock.insert(
-        u"text"_s,
-        u"You are running inside Strata, a QGIS-based desktop app on the user's machine — not in your usual sandbox. You do NOT have a server-side code execution or bash sandbox here; any files you create there are invisible to the user. Never use code_execution or bash. To download files into the user's project use the download_file tool; to run code use the run_python tool. Both execute locally and affect the user's QGIS project. Never guess or invent URLs."_s
-      );
-      systemBlocks.push_back( toolingBlock );
-      if ( !systemPrompt.isEmpty() )
-      {
-        QJsonObject promptBlock;
-        promptBlock.insert( u"type"_s, u"text"_s );
-        promptBlock.insert( u"text"_s, systemPrompt );
-        systemBlocks.push_back( promptBlock );
-      }
-      payload.insert( u"system"_s, systemBlocks );
-    }
-    else if ( !systemPrompt.isEmpty() )
-    {
+    if ( !systemPrompt.isEmpty() )
       payload.insert( u"system"_s, systemPrompt );
-    }
     payload.insert( u"messages"_s, claudeMessages );
 
     QJsonArray toolSchemas;
@@ -1139,30 +1110,9 @@ bool QgsAiModelRouter::hasStoredApiKey( Provider provider ) const
   return QgsAiSecretStore::hasSecret( apiKeySettingKey( provider ) );
 }
 
-static bool claudeOAuthCredentialPresent()
-{
-  // "Signed in" for Claude OAuth is satisfied by either the legacy refresh token or a
-  // subscription token from `claude setup-token` (vault or CLAUDE_CODE_OAUTH_TOKEN env).
-  return QgsAiClaudeOAuthClient::hasRefreshToken() || QgsAiSecretStore::hasSecret( u"ai/provider/claude/subscriptionToken"_s ) || !qEnvironmentVariable( "CLAUDE_CODE_OAUTH_TOKEN" ).trimmed().isEmpty();
-}
-
 bool QgsAiModelRouter::hasStoredOAuthRefreshToken( Provider provider ) const
 {
-  if ( provider == Provider::Codex )
-    return QgsAiCodexOAuthClient::hasRefreshToken();
-  if ( provider == Provider::Claude )
-    return claudeOAuthCredentialPresent();
-  return false;
-}
-
-QString QgsAiModelRouter::claudeSubscriptionTokenSettingKey()
-{
-  return u"ai/provider/claude/subscriptionToken"_s;
-}
-
-QString QgsAiModelRouter::claudeSubscriptionSettingPrefix()
-{
-  return u"ai/provider/claude/subscription"_s;
+  return provider == Provider::Codex && QgsAiCodexOAuthClient::hasRefreshToken();
 }
 
 QString QgsAiModelRouter::defaultClaudeModel()
@@ -1170,98 +1120,22 @@ QString QgsAiModelRouter::defaultClaudeModel()
   return u"claude-sonnet-5"_s;
 }
 
-bool QgsAiModelRouter::isValidClaudeSubscriptionToken( const QString &token )
+bool QgsAiModelRouter::requiresProviderSelection() const
 {
-  static const QRegularExpression pattern( u"^sk-ant-oat01-[A-Za-z0-9_-]{40,}$"_s );
-  return pattern.match( token ).hasMatch();
+  return QgsSettings().value( u"ai/security/providerSelectionRequired"_s, false ).toBool();
 }
 
-QgsAiModelRouter::ClaudeSubscriptionInfo QgsAiModelRouter::claudeSubscriptionInfo() const
+QString QgsAiModelRouter::credentialStatus( Provider provider ) const
 {
-  ClaudeSubscriptionInfo info;
-  QgsSettings settings;
-  const QString prefix = claudeSubscriptionSettingPrefix();
-  info.email = settings.value( prefix + u"/accountEmail"_s ).toString().trimmed();
-  info.orgName = settings.value( prefix + u"/orgName"_s ).toString().trimmed();
-  info.subscriptionType = settings.value( prefix + u"/subscriptionType"_s ).toString().trimmed();
-  info.source = settings.value( prefix + u"/source"_s ).toString().trimmed();
-  info.cliVersion = settings.value( prefix + u"/cliVersion"_s ).toString().trimmed();
-  const QString connectedAt = settings.value( prefix + u"/connectedAt"_s ).toString().trimmed();
-  if ( !connectedAt.isEmpty() )
-    info.connectedAt = QDateTime::fromString( connectedAt, Qt::ISODate ).toUTC();
-
-  const bool stored = QgsAiSecretStore::hasSecret( claudeSubscriptionTokenSettingKey() );
-  info.fromEnvironment = !stored && !qEnvironmentVariable( "CLAUDE_CODE_OAUTH_TOKEN" ).trimmed().isEmpty();
-  if ( info.fromEnvironment )
-    info.source = u"env"_s;
-  info.connected = stored || info.fromEnvironment;
-  return info;
-}
-
-bool QgsAiModelRouter::connectClaudeSubscription( const QString &token, const ClaudeSubscriptionInfo &info, QString *errorMessage )
-{
-  // Strip all whitespace: tokens copied from a terminal often wrap across lines.
-  const QString scrubbed = token.simplified().remove( u' ' );
-  if ( !isValidClaudeSubscriptionToken( scrubbed ) )
-  {
-    if ( errorMessage )
-      *errorMessage = tr( "This does not look like a Claude subscription token (expected sk-ant-oat01-…)." );
-    return false;
-  }
-  if ( !QgsAiSecretStore::writeSecret( claudeSubscriptionTokenSettingKey(), scrubbed ) )
-  {
-    if ( errorMessage )
-      *errorMessage = tr( "Unable to store the Claude subscription token." );
-    return false;
-  }
-
-  ClaudeSubscriptionInfo stored = info;
-  if ( !stored.connectedAt.isValid() )
-    stored.connectedAt = QDateTime::currentDateTimeUtc();
-  if ( stored.source.isEmpty() )
-    stored.source = u"manual"_s;
-  updateClaudeSubscriptionInfo( stored );
-
-  ProviderSettings settings = providerSettings( Provider::Claude );
-  settings.credentialMode = CredentialMode::OAuth;
-  settings.enabled = true;
-  if ( settings.model.trimmed().isEmpty() )
-    settings.model = defaultClaudeModel();
-  setProviderSettings( Provider::Claude, settings );
-
-  // Make the assistant usable right away, without stealing an explicit working choice.
-  if ( !isProviderUsable( mActiveProvider ) )
-    setActiveProvider( Provider::Claude );
-  return true;
-}
-
-void QgsAiModelRouter::updateClaudeSubscriptionInfo( const ClaudeSubscriptionInfo &info )
-{
-  QgsSettings settings;
-  const QString prefix = claudeSubscriptionSettingPrefix();
-  settings.setValue( prefix + u"/accountEmail"_s, info.email.trimmed() );
-  settings.setValue( prefix + u"/orgName"_s, info.orgName.trimmed() );
-  settings.setValue( prefix + u"/subscriptionType"_s, info.subscriptionType.trimmed() );
-  settings.setValue( prefix + u"/source"_s, info.source.trimmed() );
-  settings.setValue( prefix + u"/cliVersion"_s, info.cliVersion.trimmed() );
-  settings.setValue( prefix + u"/connectedAt"_s, info.connectedAt.isValid() ? info.connectedAt.toUTC().toString( Qt::ISODate ) : QString() );
-}
-
-void QgsAiModelRouter::disconnectClaudeSubscription()
-{
-  QgsAiSecretStore::removeSecret( claudeSubscriptionTokenSettingKey() );
-  QString error;
-  QgsAiClaudeOAuthClient::clearRefreshToken( &error );
-
-  QgsSettings settings;
-  const QString prefix = claudeSubscriptionSettingPrefix();
-  for ( const QString &key : { u"/accountEmail"_s, u"/orgName"_s, u"/subscriptionType"_s, u"/source"_s, u"/cliVersion"_s, u"/connectedAt"_s } )
-    settings.remove( prefix + key );
-
-  ProviderSettings claudeSettings = providerSettings( Provider::Claude );
-  claudeSettings.credentialMode = CredentialMode::ApiKey;
-  claudeSettings.enabled = hasStoredApiKey( Provider::Claude );
-  setProviderSettings( Provider::Claude, claudeSettings );
+  const QString key = provider == Provider::Plan ? planSessionTokenSettingKey() : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey() : apiKeySettingKey( provider );
+  const auto state = QgsAiSecretStore::storageState( key );
+  if ( state == QgsAiSecretStore::StorageState::SessionOnly )
+    return tr( "Available only for this session" );
+  if ( state == QgsAiSecretStore::StorageState::MigrationPending )
+    return tr( "Protection incomplete" );
+  if ( mVerifiedProviders.contains( provider ) )
+    return tr( "Connection verified" );
+  return hasConfiguredCredential( provider ) ? tr( "Configured" ) : tr( "Not configured" );
 }
 
 bool QgsAiModelRouter::hasConfiguredCredential( Provider provider ) const
@@ -1287,9 +1161,9 @@ bool QgsAiModelRouter::hasConfiguredCredential( Provider provider ) const
 
   const ProviderSettings settings = mProviderSettings.value( provider );
   if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::OAuth )
-    return claudeOAuthCredentialPresent();
+    return false;
 
-  return !storedApiKey( provider ).isEmpty();
+  return hasStoredApiKey( provider ) || !storedApiKey( provider ).isEmpty();
 }
 
 void QgsAiModelRouter::loadPersistedProviderSettings()
@@ -1366,7 +1240,7 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
     {
       providerSettings.authConfigId.clear();
       const bool hasCredential = provider == Provider::Codex                                ? QgsAiCodexOAuthClient::hasRefreshToken()
-                                 : providerSettings.credentialMode == CredentialMode::OAuth ? claudeOAuthCredentialPresent()
+                                 : providerSettings.credentialMode == CredentialMode::OAuth ? false
                                                                                             : !storedApiKey( provider ).isEmpty();
       providerSettings.enabled = settings.value( enabledSettingKey( provider ), hasCredential ).toBool();
     }
@@ -1375,8 +1249,8 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
   }
 
   // Restore the explicit active selection (runs after the per-provider loop, so
-  // it is unaffected by the OpenRouter one-time migration above). A not-yet-synced
-  // value is fine: resolveProvider() falls back when the active provider is unusable.
+  // it is unaffected by the OpenRouter one-time migration above). An unavailable
+  // selection requires an explicit user choice instead of a paid-service fallback.
   const QString activeKey = settings.value( u"ai/activeProvider"_s ).toString().trimmed();
   if ( !activeKey.isEmpty() )
   {
@@ -1412,13 +1286,17 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
   context.maxRetries = std::clamp( appSettings.value( u"ai/network/maxRetries"_s, 2 ).toInt(), 0, 5 );
   mRequests.insert( context.requestId, context );
 
-  RequestContext &storedContext = mRequests[context.requestId];
-  if ( !dispatchRequest( storedContext ) )
-  {
-    const QString fallbackError = u"Unable to start network request."_s;
-    const QString error = !storedContext.preDispatchError.isEmpty() ? storedContext.preDispatchError : fallbackError;
-    queueFailedRequestFinish( storedContext.requestId, error );
-  }
+  const QString requestId = context.requestId;
+  QgsAiSecretStore::loadSecretsAsync( this, [this, requestId]() {
+    if ( !mRequests.contains( requestId ) )
+      return;
+    RequestContext &storedContext = mRequests[requestId];
+    if ( !dispatchRequest( storedContext ) )
+    {
+      const QString error = storedContext.preDispatchError.isEmpty() ? tr( "Unable to start network request." ) : storedContext.preDispatchError;
+      queueFailedRequestFinish( requestId, error );
+    }
+  } );
 
   return context.requestId;
 }
@@ -1468,7 +1346,12 @@ bool QgsAiModelRouter::storeApiKey( Provider provider, const QString &apiKey, QS
   }
 
   ProviderSettings settings = mProviderSettings.value( provider );
-  QgsAiSecretStore::writeSecret( apiKeySettingKey( provider ), apiKey.trimmed() );
+  if ( !QgsAiSecretStore::writeSecret( apiKeySettingKey( provider ), apiKey.trimmed() ) )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Unable to save the API key securely. Retry or use it for this session only." );
+    return false;
+  }
   settings.authConfigId.clear();
   settings.credentialMode = CredentialMode::ApiKey;
   settings.enabled = true;
@@ -1478,6 +1361,12 @@ bool QgsAiModelRouter::storeApiKey( Provider provider, const QString &apiKey, QS
 
 bool QgsAiModelRouter::setCredentialMode( Provider provider, CredentialMode mode, QString *errorMessage )
 {
+  if ( provider == Provider::Claude && mode == CredentialMode::OAuth )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Claude subscription connections are temporarily suspended." );
+    return false;
+  }
   if ( provider == Provider::Plan )
   {
     if ( errorMessage )
@@ -1508,9 +1397,7 @@ bool QgsAiModelRouter::setPlanSessionToken( const QString &token, QString *error
     return false;
   }
 
-  // Never-prompt policy: the secret store uses the vault only when it is
-  // already unlocked, otherwise it falls back to cleartext settings instead of
-  // triggering the master password dialog.
+  // Interactive callers persist asynchronously before updating the provider.
   if ( !QgsAiSecretStore::writeSecret( planSessionTokenSettingKey(), token.trimmed() ) )
   {
     if ( errorMessage )
@@ -1546,7 +1433,7 @@ bool QgsAiModelRouter::clearPlanSessionToken( QString *errorMessage )
 
 QString QgsAiModelRouter::planSessionToken() const
 {
-  // Never-prompt read: vault only when already unlocked, cleartext fallback
+  // Cached keychain credential or legacy value pending migration
   // otherwise. A locked vault therefore reads as "no token" instead of
   // popping the master password dialog from UI refresh paths.
   return QgsAiSecretStore::readSecret( planSessionTokenSettingKey(), { u"STRATA_PLAN_TOKEN"_s } );
@@ -1638,25 +1525,18 @@ bool QgsAiModelRouter::applyAuthentication( Provider provider, QNetworkRequest &
 
   if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::OAuth )
   {
-    // Personal-use bridge: a long-lived token from `claude setup-token` (stored in
-    // the vault, or env CLAUDE_CODE_OAUTH_TOKEN) carries the inference scope; use it
-    // directly instead of the reverse-engineered OAuth flow (which no longer gets it).
-    const QString setupToken = QgsAiSecretStore::readSecret( u"ai/provider/claude/subscriptionToken"_s, { u"CLAUDE_CODE_OAUTH_TOKEN"_s } ).trimmed();
-    if ( !setupToken.isEmpty() )
-    {
-      request.setRawHeader( "Authorization", authHeaderValue( Provider::OpenAi, setupToken ).toUtf8() );
-      return true;
-    }
-
-    QgsAiClaudeOAuthClient::TokenSet tokens;
-    if ( !QgsAiClaudeOAuthClient::refreshAccessToken( tokens, errorMessage ) )
-      return false;
-
-    request.setRawHeader( "Authorization", authHeaderValue( Provider::OpenAi, tokens.accessToken ).toUtf8() );
-    return true;
+    if ( errorMessage )
+      *errorMessage = tr( "Claude subscription connections are temporarily suspended. Choose Strata Cloud or an API key in settings." );
+    return false;
   }
 
   const QString apiKey = storedApiKey( provider );
+  if ( provider == Provider::Claude && apiKey.startsWith( "sk-ant-oat"_L1 ) )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Use an Anthropic API key. Claude subscription tokens are not supported." );
+    return false;
+  }
   if ( apiKey.isEmpty() )
   {
     QgsMessageLog::logMessage( u"No API key configured for %1; request will fail before dispatch."_s.arg( providerDisplayName( provider ) ), u"AI"_s, Qgis::MessageLevel::Warning, false );
@@ -1682,6 +1562,11 @@ QgsAiModelRouter::RequestContext *QgsAiModelRouter::contextFromReply( QNetworkRe
 
 bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
 {
+  if ( requiresProviderSelection() )
+  {
+    context.preDispatchError = tr( "Claude subscription connections are temporarily suspended. Choose a provider before sending another message." );
+    return false;
+  }
   const ProviderSettings settings = providerSettings( context.provider );
   if ( settings.endpoint.trimmed().isEmpty() )
   {
@@ -1705,8 +1590,6 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   if ( context.provider == Provider::Claude )
   {
     request.setRawHeader( "anthropic-version", "2023-06-01" );
-    if ( settings.credentialMode == CredentialMode::OAuth )
-      request.setRawHeader( "anthropic-beta", "oauth-2025-04-20" );
   }
 
   if ( context.provider == Provider::OpenRouter )
@@ -1798,6 +1681,10 @@ void QgsAiModelRouter::finishRequest( const QString &requestId, bool success, co
 
   RequestContext &context = mRequests[requestId];
   const QString providerName = providerDisplayName( context.provider );
+  if ( success )
+    mVerifiedProviders.insert( context.provider );
+  else if ( httpStatus == 401 || httpStatus == 403 )
+    mVerifiedProviders.remove( context.provider );
   clearRequestTransport( context );
   mRequests.remove( requestId );
 
@@ -2634,6 +2521,9 @@ QgsAiModelRouter::Provider QgsAiModelRouter::activeProvider() const
 
 void QgsAiModelRouter::setActiveProvider( Provider provider )
 {
+  if ( requiresProviderSelection() && !isProviderUsable( provider ) )
+    return;
+  QgsSettings().remove( u"ai/security/providerSelectionRequired"_s );
   mActiveProvider = provider;
   const char *key = QMetaEnum::fromType<Provider>().valueToKey( static_cast<int>( provider ) );
   if ( key )
@@ -2645,15 +2535,8 @@ void QgsAiModelRouter::setActiveProvider( Provider provider )
 
 QgsAiModelRouter::Provider QgsAiModelRouter::resolveProvider() const
 {
-  // Honor the user's explicit choice when it is actually usable; otherwise fall
-  // back through the priority chain so a stale/unconfigured selection never
-  // strands the assistant.
-  if ( isProviderUsable( mActiveProvider ) )
-    return mActiveProvider;
-  for ( Provider provider : { Provider::Plan, Provider::Codex, Provider::OpenRouter, Provider::OpenAi, Provider::Claude } )
-  {
-    if ( isProviderUsable( provider ) )
-      return provider;
-  }
-  return Provider::OpenAi;
+  if ( requiresProviderSelection() )
+    return Provider::Claude;
+  // Storing credentials never authorizes a switch to a different billed service.
+  return mActiveProvider;
 }

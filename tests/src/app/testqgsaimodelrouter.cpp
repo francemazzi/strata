@@ -7,12 +7,12 @@
 #include <memory>
 
 #include "ai/qgsaiagentsessionmanager.h"
-#include "ai/qgsaiclaudeoauthclient.h"
 #include "ai/qgsaicodexoauthclient.h"
 #include "ai/qgsaimodelrouter.h"
 #include "ai/qgsaisecretstore.h"
 #include "ai/tools/qgsaiechotool.h"
 #include "ai/tools/qgsaitoolregistry.h"
+#include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgsapplication.h"
 #include "qgsauthmanager.h"
@@ -41,6 +41,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QUrlQuery>
+#include <qt6keychain/keychain.h>
 
 using namespace Qt::StringLiterals;
 
@@ -216,17 +217,15 @@ class TestQgsAiModelRouter : public QObject
 
   private slots:
     void initTestCase();
+    void init() { installTestSecretBackend(); }
+    void suspendedClaudeCannotAuthenticate();
+    void suspendedClaudeRequiresExplicitChoice();
     void buildPayloadForOpenAi();
     void buildPayloadForOpenRouterCostOptimized();
     void buildPayloadForOpenRouterToolUseOptimized();
     void buildPayloadForCodexUsesGpt54();
     void codexModelFallback();
     void extractChatGptAccountIdFromIdToken();
-    void claudeAuthorizationUrlUsesCurrentPlatformEndpoints();
-    void claudeAuthorizationCodeParsing();
-    void claudeAuthorizationStateParsing();
-    void claudeTokenExchangeIncludesState();
-    void claudeTokenExchangePreservesHttpError();
     void sanitizeSecrets();
     void storeApiKeyPersistsInSettings();
     void storeOpenRouterApiKeyPersistsInSettings();
@@ -234,12 +233,8 @@ class TestQgsAiModelRouter : public QObject
     void fallbackOrderContainsOnlyUsableProviders();
     void isProviderAvailableIgnoresEnabledFlag();
     void setActiveProviderPersistsAndResolves();
-    void resolveProviderFallsBackWhenActiveUnavailable();
+    void unavailableProviderDoesNotSilentlySwitch();
     void selectingProviderDoesNotDisableOthers();
-    void connectClaudeSubscriptionActivatesProvider();
-    void connectClaudeSubscriptionKeepsUsableActiveProvider();
-    void connectClaudeSubscriptionRejectsInvalidToken();
-    void disconnectClaudeSubscriptionClearsEverything();
     void legacyClaudeDefaultModelMigrates();
     void clearPlanSessionTokenDisablesPlanWithoutAuthcfg();
     void toolUseDisabledOmitsToolsFromOpenAiPayload();
@@ -296,6 +291,7 @@ class TestQgsAiModelRouter : public QObject
     void openRouterUsageParsedFromFinalStreamChunk();
     void openRouterUsageParsedFromNonStreamingBody();
 
+    void liveStoredOpenRouterRequest();
     void liveOpenAiRequest();
     void liveClaudeRequest();
     void liveOpenRouterRequest();
@@ -304,6 +300,44 @@ class TestQgsAiModelRouter : public QObject
 void TestQgsAiModelRouter::initTestCase()
 {
   loadEnvFileIfPresent();
+}
+
+void TestQgsAiModelRouter::suspendedClaudeCannotAuthenticate()
+{
+  const auto guard = isolateProviderState();
+  QgsAiModelRouter router;
+  auto settings = router.providerSettings( QgsAiModelRouter::Provider::Claude );
+  settings.credentialMode = QgsAiModelRouter::CredentialMode::OAuth;
+  settings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Claude, settings );
+  qputenv( "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-retired-test" );
+  const auto env = qScopeGuard( []() { qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" ); } );
+  QNetworkRequest request( QUrl( u"https://api.anthropic.com/v1/messages"_s ) );
+  QString error;
+  QVERIFY( !router.applyAuthentication( QgsAiModelRouter::Provider::Claude, request, &error ) );
+  QVERIFY( !router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
+  QVERIFY( !router.setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error ) );
+  QVERIFY( !request.hasRawHeader( "Authorization" ) );
+  QVERIFY( !router.buildRequestPayload( QgsAiModelRouter::Provider::Claude, {}, false ).contains( "You are Claude Code" ) );
+}
+
+void TestQgsAiModelRouter::suspendedClaudeRequiresExplicitChoice()
+{
+  const auto guard = isolateProviderState();
+  QgsSettings settings;
+  settings.setValue( u"ai/provider/claude/credentialMode"_s, u"oauth"_s );
+  settings.setValue( u"ai/activeProvider"_s, u"Claude"_s );
+  settings.setValue( u"ai/provider/claude/subscriptionToken"_s, u"retired-token"_s );
+  QgsAiModelRouter router;
+  QVERIFY( router.requiresProviderSelection() );
+  QVERIFY( !settings.contains( u"ai/provider/claude/subscriptionToken"_s ) );
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"test-key"_s ) );
+  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::Claude );
+  QgsAiModelRouter reloaded;
+  QVERIFY( reloaded.requiresProviderSelection() );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QVERIFY( !router.requiresProviderSelection() );
+  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::OpenRouter );
 }
 
 void TestQgsAiModelRouter::buildPayloadForOpenAi()
@@ -441,96 +475,6 @@ void TestQgsAiModelRouter::extractChatGptAccountIdFromIdToken()
   QCOMPARE( QgsAiCodexOAuthClient::extractChatGptAccountId( idToken ), u"account-test-123"_s );
 }
 
-void TestQgsAiModelRouter::claudeAuthorizationUrlUsesCurrentPlatformEndpoints()
-{
-  const QgsAiClaudeOAuthClient::AuthorizationRequest request = QgsAiClaudeOAuthClient::buildAuthorizationRequest();
-  QCOMPARE( request.redirectUri, u"https://platform.claude.com/oauth/code/callback"_s );
-  QCOMPARE( request.authorizationUrl.scheme(), u"https"_s );
-  QCOMPARE( request.authorizationUrl.host(), u"platform.claude.com"_s );
-  QCOMPARE( request.authorizationUrl.path(), u"/oauth/authorize"_s );
-
-  const QUrlQuery query( request.authorizationUrl );
-  QCOMPARE( query.queryItemValue( u"client_id"_s ), u"9d1c250a-e61b-44d9-88ed-5944d1962f5e"_s );
-  QCOMPARE( query.queryItemValue( u"redirect_uri"_s ), request.redirectUri );
-  QCOMPARE( query.queryItemValue( u"code_challenge_method"_s ), u"S256"_s );
-  const QString scope = query.queryItemValue( u"scope"_s );
-  QVERIFY( scope.contains( u"user:inference"_s ) );
-  QVERIFY( scope.contains( u"user:sessions:claude_code"_s ) );
-  QVERIFY( scope.contains( u"user:mcp_servers"_s ) );
-  QVERIFY( scope.contains( u"user:file_upload"_s ) );
-}
-
-void TestQgsAiModelRouter::claudeAuthorizationCodeParsing()
-{
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationCodeFromInput( u"manual-code"_s ), u"manual-code"_s );
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationCodeFromInput( u"manual-code#returned-state"_s ), u"manual-code"_s );
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationCodeFromInput( u"https://platform.claude.com/oauth/code/callback?code=query-code&state=returned-state"_s ), u"query-code"_s );
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationCodeFromInput( u"https://platform.claude.com/oauth/code/callback#code=fragment-code&state=returned-state"_s ), u"fragment-code"_s );
-}
-
-void TestQgsAiModelRouter::claudeAuthorizationStateParsing()
-{
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationStateFromInput( u"manual-code#returned-state"_s ), u"returned-state"_s );
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationStateFromInput( u"https://platform.claude.com/oauth/code/callback?code=query-code&state=returned-state"_s ), u"returned-state"_s );
-  QCOMPARE( QgsAiClaudeOAuthClient::authorizationStateFromInput( u"https://platform.claude.com/oauth/code/callback#code=fragment-code&state=returned-state"_s ), u"returned-state"_s );
-  QVERIFY( QgsAiClaudeOAuthClient::authorizationStateFromInput( u"manual-code"_s ).isEmpty() );
-}
-
-void TestQgsAiModelRouter::claudeTokenExchangeIncludesState()
-{
-  QgsAiTestLoopbackServer server;
-  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"access_token\":\"sk-ant-oat01-test\",\"refresh_token\":\"sk-ant-ort01-test\",\"expires_in\":3600}" ) );
-  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
-
-  const QString loopbackUrl = u"http://127.0.0.1:%1/token"_s.arg( server.serverPort() );
-  QgsAiClaudeOAuthClient::setTokenUrlForTesting( loopbackUrl );
-  const auto clearTokenUrl = qScopeGuard( [] { QgsAiClaudeOAuthClient::clearTokenUrlForTesting(); } );
-
-  const QgsAiClaudeOAuthClient::AuthorizationRequest authRequest = QgsAiClaudeOAuthClient::buildAuthorizationRequest();
-  const QString callbackInput = u"https://platform.claude.com/oauth/code/callback?code=exchange-code&state=callback-state"_s;
-
-  QString error;
-  const bool exchanged = QgsAiClaudeOAuthClient::exchangeAuthorizationCode( callbackInput, authRequest.codeVerifier, authRequest.redirectUri, authRequest.state, &error );
-
-  QCOMPARE( server.requestCount, 1 );
-  const QJsonObject requestObject = QJsonDocument::fromJson( server.lastRequestBody() ).object();
-  QCOMPARE( requestObject.value( u"grant_type"_s ).toString(), u"authorization_code"_s );
-  QCOMPARE( requestObject.value( u"code"_s ).toString(), u"exchange-code"_s );
-  QCOMPARE( requestObject.value( u"state"_s ).toString(), u"callback-state"_s );
-  QCOMPARE( requestObject.value( u"code_verifier"_s ).toString(), authRequest.codeVerifier );
-  QCOMPARE( requestObject.value( u"redirect_uri"_s ).toString(), authRequest.redirectUri );
-  QVERIFY( server.lastRawRequest().toLower().contains( "accept: application/json" ) );
-
-  QgsAuthManager *authManager = QgsApplication::authManager();
-  if ( authManager && !authManager->isDisabled() )
-  {
-    QVERIFY2( exchanged, qPrintable( error ) );
-    QVERIFY( QgsAiClaudeOAuthClient::hasRefreshToken() );
-    QgsAiClaudeOAuthClient::clearRefreshToken();
-  }
-}
-
-void TestQgsAiModelRouter::claudeTokenExchangePreservesHttpError()
-{
-  QgsAiTestLoopbackServer server;
-  server.responses << QgsAiTestLoopbackServer::jsonResponse( 429, "Too Many Requests", QByteArrayLiteral( "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limited. Please try again later.\"}}" ) );
-  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
-
-  const QString loopbackUrl = u"http://127.0.0.1:%1/token"_s.arg( server.serverPort() );
-  QgsAiClaudeOAuthClient::setTokenUrlForTesting( loopbackUrl );
-  const auto clearTokenUrl = qScopeGuard( [] { QgsAiClaudeOAuthClient::clearTokenUrlForTesting(); } );
-
-  const QgsAiClaudeOAuthClient::AuthorizationRequest authRequest = QgsAiClaudeOAuthClient::buildAuthorizationRequest();
-  const QString callbackInput = u"https://platform.claude.com/oauth/code/callback?code=exchange-code&state=callback-state"_s;
-
-  QString error;
-  QVERIFY( !QgsAiClaudeOAuthClient::exchangeAuthorizationCode( callbackInput, authRequest.codeVerifier, authRequest.redirectUri, authRequest.state, &error ) );
-  QCOMPARE( server.requestCount, 1 );
-  QVERIFY2( error.contains( u"HTTP 429"_s ), qPrintable( error ) );
-  QVERIFY2( error.contains( u"Rate limited. Please try again later."_s ), qPrintable( error ) );
-  QVERIFY2( !error.contains( u"refresh token"_s, Qt::CaseInsensitive ), qPrintable( error ) );
-}
-
 void TestQgsAiModelRouter::sanitizeSecrets()
 {
   QgsAiModelRouter router;
@@ -641,8 +585,7 @@ void TestQgsAiModelRouter::fallbackOrderContainsOnlyUsableProviders()
     QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::OpenAi ) );
   }
 
-  // Configure OpenRouter + Claude only: the chain contains exactly those two,
-  // preferred (OpenRouter, higher priority) first, no duplicates.
+  // Configuring credentials does not select a service or authorize failover.
   {
     QgsAiModelRouter router;
     QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-fallback-test"_s ) );
@@ -655,10 +598,11 @@ void TestQgsAiModelRouter::fallbackOrderContainsOnlyUsableProviders()
     QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Plan ) );
 
     QgsAiAgentSessionManager manager( &router, nullptr, nullptr );
+    QVERIFY( manager.providerFallbackOrder().isEmpty() );
+    router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
     const QList<QgsAiModelRouter::Provider> order = manager.providerFallbackOrder();
-    QCOMPARE( order.size(), 2 );
+    QCOMPARE( order.size(), 1 );
     QCOMPARE( order.at( 0 ), QgsAiModelRouter::Provider::OpenRouter );
-    QCOMPARE( order.at( 1 ), QgsAiModelRouter::Provider::Claude );
   }
 }
 
@@ -699,18 +643,17 @@ void TestQgsAiModelRouter::setActiveProviderPersistsAndResolves()
   QCOMPARE( reloaded.resolveProvider(), QgsAiModelRouter::Provider::Claude );
 }
 
-void TestQgsAiModelRouter::resolveProviderFallsBackWhenActiveUnavailable()
+void TestQgsAiModelRouter::unavailableProviderDoesNotSilentlySwitch()
 {
   const auto guard = isolateProviderState();
 
   QgsAiModelRouter router;
   QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-fallback-active-test"_s ) );
 
-  // Codex has no OAuth token, so it is not usable; resolveProvider must fall back
-  // to the synced provider instead of stranding on the stale active choice.
+  // Codex has no token. Another saved API key must not trigger paid requests.
   router.setActiveProvider( QgsAiModelRouter::Provider::Codex );
   QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Codex ) );
-  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::OpenRouter );
+  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::Codex );
 }
 
 void TestQgsAiModelRouter::selectingProviderDoesNotDisableOthers()
@@ -735,141 +678,9 @@ void TestQgsAiModelRouter::selectingProviderDoesNotDisableOthers()
   QVERIFY( router.isProviderAvailable( QgsAiModelRouter::Provider::Claude ) );
 }
 
-namespace
-{
-  const QString TEST_SETUP_TOKEN = u"sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyz-_ABCDEF"_s;
-
-  //! Isolates provider state AND the Claude subscription token/env for the test.
-  [[nodiscard]] auto isolateClaudeSubscriptionState()
-  {
-    auto providerGuard = isolateProviderState();
-    const QByteArray savedOAuthToken = qgetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
-    qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" );
-    QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
-    return qScopeGuard( [guard = std::move( providerGuard ), savedOAuthToken]() {
-      QgsAiSecretStore::removeSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() );
-      if ( !savedOAuthToken.isEmpty() )
-        qputenv( "CLAUDE_CODE_OAUTH_TOKEN", savedOAuthToken );
-    } );
-  }
-} // namespace
-
-void TestQgsAiModelRouter::connectClaudeSubscriptionActivatesProvider()
-{
-  const auto guard = isolateClaudeSubscriptionState();
-
-  QgsAiModelRouter router;
-  QVERIFY( !router.claudeSubscriptionInfo().connected );
-  QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-
-  QgsAiModelRouter::ClaudeSubscriptionInfo info;
-  info.source = u"claude-code-cli"_s;
-  info.cliVersion = u"2.1.197"_s;
-  info.email = u"tester@example.com"_s;
-  info.subscriptionType = u"max"_s;
-  QString error;
-  // Whitespace from a terminal line wrap is scrubbed before validation.
-  const QString wrapped = TEST_SETUP_TOKEN.left( 60 ) + u"\n  "_s + TEST_SETUP_TOKEN.mid( 60 );
-  QVERIFY2( router.connectClaudeSubscription( wrapped, info, &error ), qPrintable( error ) );
-
-  QVERIFY( QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
-  QCOMPARE( QgsAiSecretStore::readSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ), TEST_SETUP_TOKEN );
-
-  const QgsAiModelRouter::ProviderSettings settings = router.providerSettings( QgsAiModelRouter::Provider::Claude );
-  QCOMPARE( settings.credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
-  QVERIFY( settings.enabled );
-  QCOMPARE( settings.model, QgsAiModelRouter::defaultClaudeModel() );
-  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-  QVERIFY( router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
-  // Nothing else was usable: Claude becomes the active provider.
-  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Claude );
-  QCOMPARE( router.resolveProvider(), QgsAiModelRouter::Provider::Claude );
-
-  const QgsAiModelRouter::ClaudeSubscriptionInfo stored = router.claudeSubscriptionInfo();
-  QVERIFY( stored.connected );
-  QVERIFY( !stored.fromEnvironment );
-  QCOMPARE( stored.source, u"claude-code-cli"_s );
-  QCOMPARE( stored.cliVersion, u"2.1.197"_s );
-  QCOMPARE( stored.email, u"tester@example.com"_s );
-  QCOMPARE( stored.subscriptionType, u"max"_s );
-  QVERIFY( stored.connectedAt.isValid() );
-  QVERIFY( stored.connectedAt.secsTo( QDateTime::currentDateTimeUtc() ) < 60 );
-  QCOMPARE( stored.expiresAt(), stored.connectedAt.addYears( 1 ) );
-
-  // The token is what authenticates Claude requests in OAuth mode.
-  QNetworkRequest request( QUrl( u"https://api.anthropic.com/v1/messages"_s ) );
-  QVERIFY2( router.applyAuthentication( QgsAiModelRouter::Provider::Claude, request, &error ), qPrintable( error ) );
-  QCOMPARE( request.rawHeader( "Authorization" ), QByteArray( "Bearer " ) + TEST_SETUP_TOKEN.toUtf8() );
-
-  // A fresh router sees the same state.
-  QgsAiModelRouter reloaded;
-  QVERIFY( reloaded.claudeSubscriptionInfo().connected );
-  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
-  QVERIFY( reloaded.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-}
-
-void TestQgsAiModelRouter::connectClaudeSubscriptionKeepsUsableActiveProvider()
-{
-  const auto guard = isolateClaudeSubscriptionState();
-
-  QgsAiModelRouter router;
-  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, u"sk-or-keep-active"_s ) );
-  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
-
-  QVERIFY( router.connectClaudeSubscription( TEST_SETUP_TOKEN, QgsAiModelRouter::ClaudeSubscriptionInfo() ) );
-  // An explicit, working choice is never stolen; Claude is simply usable alongside.
-  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
-  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-  // Without an explicit source the token counts as pasted manually.
-  QCOMPARE( router.claudeSubscriptionInfo().source, u"manual"_s );
-}
-
-void TestQgsAiModelRouter::connectClaudeSubscriptionRejectsInvalidToken()
-{
-  const auto guard = isolateClaudeSubscriptionState();
-
-  QgsAiModelRouter router;
-  QString error;
-  QVERIFY( !router.connectClaudeSubscription( u"not-a-token"_s, QgsAiModelRouter::ClaudeSubscriptionInfo(), &error ) );
-  QVERIFY( !error.isEmpty() );
-  QVERIFY( !router.connectClaudeSubscription( u"sk-ant-api03-"_s + TEST_SETUP_TOKEN.mid( 13 ), QgsAiModelRouter::ClaudeSubscriptionInfo(), &error ) );
-  QVERIFY( !QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
-  QVERIFY( !router.claudeSubscriptionInfo().connected );
-  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
-}
-
-void TestQgsAiModelRouter::disconnectClaudeSubscriptionClearsEverything()
-{
-  const auto guard = isolateClaudeSubscriptionState();
-
-  QgsAiModelRouter router;
-  QgsAiModelRouter::ClaudeSubscriptionInfo info;
-  info.source = u"claude-code-cli"_s;
-  info.email = u"tester@example.com"_s;
-  QVERIFY( router.connectClaudeSubscription( TEST_SETUP_TOKEN, info ) );
-  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-
-  router.disconnectClaudeSubscription();
-
-  QVERIFY( !QgsAiSecretStore::hasSecret( QgsAiModelRouter::claudeSubscriptionTokenSettingKey() ) );
-  const QgsAiModelRouter::ClaudeSubscriptionInfo after = router.claudeSubscriptionInfo();
-  QVERIFY( !after.connected );
-  QVERIFY( after.email.isEmpty() );
-  QVERIFY( after.source.isEmpty() );
-  QVERIFY( !after.connectedAt.isValid() );
-  QgsSettings settings;
-  QVERIFY( !settings.contains( QgsAiModelRouter::claudeSubscriptionSettingPrefix() + u"/accountEmail"_s ) );
-
-  const QgsAiModelRouter::ProviderSettings claudeSettings = router.providerSettings( QgsAiModelRouter::Provider::Claude );
-  QCOMPARE( claudeSettings.credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
-  QVERIFY( !claudeSettings.enabled );
-  QVERIFY( !router.isProviderUsable( QgsAiModelRouter::Provider::Claude ) );
-  QVERIFY( !router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
-}
-
 void TestQgsAiModelRouter::legacyClaudeDefaultModelMigrates()
 {
-  const auto guard = isolateClaudeSubscriptionState();
+  const auto guard = isolateProviderState();
 
   QgsSettings settings;
   settings.setValue( u"ai/provider/claude/model"_s, u"claude-sonnet-4-20250514"_s );
@@ -1519,6 +1330,7 @@ void TestQgsAiModelRouter::dispatchLogDoesNotExposeEndpointQuery()
   message.role = QgsAiChatRole::User;
   message.content = u"hello"_s;
   const QString requestId = router.startChatRequest( QgsAiModelRouter::Provider::OpenAi, { message }, false );
+  QTRY_VERIFY( std::any_of( logSpy.cbegin(), logSpy.cend(), []( const QList<QVariant> &args ) { return args.at( 0 ).toString().contains( u"Dispatching request"_s ); } ) );
   router.cancelRequest( requestId );
 
   bool foundDispatchLog = false;
@@ -2438,23 +2250,99 @@ void TestQgsAiModelRouter::liveOpenAiRequest()
   if ( apiKey.trimmed().isEmpty() )
     QSKIP( "OPENAI_API_KEY non disponibile: test live OpenAI skippato." );
 
-  QNetworkRequest request( QUrl( u"https://api.openai.com/v1/responses"_s ) );
-  request.setHeader( QNetworkRequest::ContentTypeHeader, u"application/json"_s );
-  request.setRawHeader( "Authorization", QByteArray( "Bearer " ) + apiKey.toUtf8() );
-  request.setTransferTimeout( 30000 );
+  // Native-keychain opt-in exercises the same persistence, reload and request
+  // path used by the desktop. The test profile is isolated by QGSTEST_MAIN.
+  if ( qEnvironmentVariable( "STRATA_TEST_NATIVE_KEYCHAIN" ) == "1"_L1 )
+    QgsAiSecretStore::setBackendForTesting( {} );
+  QgsAiModelRouter router;
+  const QString key = u"ai/provider/openai/apiKey"_s;
+  const auto cleanup = qScopeGuard( [key]() {
+    QgsAiSecretStore::removeSecret( key );
+    QCoreApplication::processEvents();
+    if ( qEnvironmentVariable( "STRATA_TEST_NATIVE_KEYCHAIN" ) == "1"_L1 )
+    {
+      QEventLoop loop;
+      QKeychain::DeletePasswordJob remove( u"Strata AI"_s );
+      remove.setAutoDelete( false );
+      remove.setInsecureFallback( false );
+      remove.setKey( QgsAiSecretStore::keychainKey( key ) );
+      QObject::connect( &remove, &QKeychain::Job::finished, &loop, &QEventLoop::quit );
+      remove.start();
+      loop.exec();
+      QVERIFY( remove.error() == QKeychain::NoError || remove.error() == QKeychain::EntryNotFound );
+    }
+  } );
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenAi, apiKey ) );
+  QVERIFY( !QgsSettings().contains( key ) );
+  QgsAiSecretStore::resetCredentialCacheForTesting();
+  bool loaded = false;
+  QgsAiSecretStore::loadSecretsAsync( this, [&loaded]() { loaded = true; } );
+  QTRY_VERIFY( loaded );
+  QgsAiModelRouter reloaded;
+  auto settings = reloaded.providerSettings( QgsAiModelRouter::Provider::OpenAi );
+  settings.model = u"gpt-4.1-mini"_s;
+  reloaded.setProviderSettings( QgsAiModelRouter::Provider::OpenAi, settings );
+  reloaded.setActiveProvider( QgsAiModelRouter::Provider::OpenAi );
+  QSignalSpy finished( &reloaded, &QgsAiModelRouter::requestFinished );
+  QgsAiChatMessage message;
+  message.role = QgsAiChatRole::User;
+  message.content = u"Reply with OK."_s;
+  reloaded.startChatRequest( QgsAiModelRouter::Provider::OpenAi, { message }, false );
+  QTRY_VERIFY_WITH_TIMEOUT( !finished.isEmpty(), 45000 );
+  QVERIFY2( finished.last().at( 1 ).toBool(), "Live API request failed; inspect sanitized request status." );
+  QVERIFY( !finished.last().at( 3 ).toString().isEmpty() );
+  QCOMPARE( reloaded.credentialStatus( QgsAiModelRouter::Provider::OpenAi ), tr( "Connection verified" ) );
+}
 
-  const QByteArray payload = R"({"model":"gpt-4.1-mini","input":[{"role":"user","content":[{"type":"input_text","text":"reply with OK"}]}],"max_output_tokens":16})";
-  QNetworkAccessManager nam;
-  QNetworkReply *reply = nam.post( request, payload );
-  QVERIFY2( waitForReply( reply, 35000 ), "Timeout durante test live OpenAI" );
-
-  const int status = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
-  const QByteArray body = reply->readAll();
-  reply->deleteLater();
-
-  QVERIFY2( status >= 200 && status < 300, qPrintable( u"OpenAI HTTP status: %1"_s.arg( status ) ) );
-  const QJsonDocument doc = QJsonDocument::fromJson( body );
-  QVERIFY( doc.isObject() );
+void TestQgsAiModelRouter::liveStoredOpenRouterRequest()
+{
+  if ( !liveAiSmokeTestsEnabled() )
+    QSKIP( "Set STRATA_RUN_LIVE_AI_TESTS=1 for live provider smoke tests." );
+  const QString apiKey = qEnvironmentVariable( "OPENROUTER_API_KEY" ).trimmed();
+  if ( apiKey.isEmpty() )
+    QSKIP( "OPENROUTER_API_KEY unavailable." );
+  // Native-keychain opt-in exercises the same persistence, reload and request
+  // path used by the desktop. The test profile is isolated by QGSTEST_MAIN.
+  if ( qEnvironmentVariable( "STRATA_TEST_NATIVE_KEYCHAIN" ) == "1"_L1 )
+    QgsAiSecretStore::setBackendForTesting( {} );
+  QgsAiModelRouter router;
+  const QString key = u"ai/provider/openrouter/apiKey"_s;
+  const auto cleanup = qScopeGuard( [key]() {
+    QgsAiSecretStore::removeSecret( key );
+    QCoreApplication::processEvents();
+    if ( qEnvironmentVariable( "STRATA_TEST_NATIVE_KEYCHAIN" ) == "1"_L1 )
+    {
+      QEventLoop loop;
+      QKeychain::DeletePasswordJob remove( u"Strata AI"_s );
+      remove.setAutoDelete( false );
+      remove.setInsecureFallback( false );
+      remove.setKey( QgsAiSecretStore::keychainKey( key ) );
+      QObject::connect( &remove, &QKeychain::Job::finished, &loop, &QEventLoop::quit );
+      remove.start();
+      loop.exec();
+      QVERIFY( remove.error() == QKeychain::NoError || remove.error() == QKeychain::EntryNotFound );
+    }
+  } );
+  QVERIFY( router.storeApiKey( QgsAiModelRouter::Provider::OpenRouter, apiKey ) );
+  QVERIFY( !QgsSettings().contains( key ) );
+  QgsAiSecretStore::resetCredentialCacheForTesting();
+  bool loaded = false;
+  QgsAiSecretStore::loadSecretsAsync( this, [&loaded]() { loaded = true; } );
+  QTRY_VERIFY( loaded );
+  QgsAiModelRouter reloaded;
+  auto settings = reloaded.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  settings.model = u"openai/gpt-4.1-mini"_s;
+  reloaded.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, settings );
+  reloaded.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QSignalSpy finished( &reloaded, &QgsAiModelRouter::requestFinished );
+  QgsAiChatMessage message;
+  message.role = QgsAiChatRole::User;
+  message.content = u"Reply with OK."_s;
+  reloaded.startChatRequest( QgsAiModelRouter::Provider::OpenRouter, { message }, false );
+  QTRY_VERIFY_WITH_TIMEOUT( !finished.isEmpty(), 45000 );
+  QVERIFY2( finished.last().at( 1 ).toBool(), "Live API request failed; inspect sanitized request status." );
+  QVERIFY( !finished.last().at( 3 ).toString().isEmpty() );
+  QCOMPARE( reloaded.credentialStatus( QgsAiModelRouter::Provider::OpenRouter ), tr( "Connection verified" ) );
 }
 
 void TestQgsAiModelRouter::liveClaudeRequest()

@@ -19,8 +19,10 @@
 #include <utility>
 
 #include "qgsaiagentsessionmanager.h"
+#include "qgsaicredentialdialog.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaiplanclient.h"
+#include "qgsaisecretstore.h"
 #include "qgsaisettingsutils.h"
 #include "qgscollapsiblegroupbox.h"
 
@@ -135,29 +137,31 @@ QLabel[aiRole="rowDescription"] { color: palette(dark); }
   connect( mPlanClient, &QgsAiPlanClient::modelPreferenceUpdateFailed, this, &QgsAiAccountWidget::onModelPreferenceUpdateFailed );
   connect( mPlanClient, &QgsAiPlanClient::requestFailed, this, &QgsAiAccountWidget::onRequestFailed );
 
-  const bool signedIn = isSignedIn();
-  mStateStack->setCurrentIndex( signedIn ? 1 : 0 );
-  if ( signedIn )
-  {
-    updateAccountCard();
-    updateUsageCard();
-    populateModelList();
-    if ( endpointUsable() )
+  QgsAiSecretStore::loadSecretsAsync( this, [this]() {
+    const bool signedIn = isSignedIn();
+    mStateStack->setCurrentIndex( signedIn ? 1 : 0 );
+    if ( signedIn )
     {
-      setStatus( tr( "Signed in — loading account…" ) );
-      mPlanClient->fetchMe( currentEndpoint(), mModelRouter->planSessionToken() );
-      mPlanClient->fetchBalance( currentEndpoint(), mModelRouter->planSessionToken() );
-      mPlanClient->fetchModelPreferences( currentEndpoint(), mModelRouter->planSessionToken() );
+      updateAccountCard();
+      updateUsageCard();
+      populateModelList();
+      if ( endpointUsable() )
+      {
+        setStatus( tr( "Signed in — loading account…" ) );
+        mPlanClient->fetchMe( currentEndpoint(), mModelRouter->planSessionToken() );
+        mPlanClient->fetchBalance( currentEndpoint(), mModelRouter->planSessionToken() );
+        mPlanClient->fetchModelPreferences( currentEndpoint(), mModelRouter->planSessionToken() );
+      }
+      else
+      {
+        setStatus( tr( "Signed in." ) );
+      }
     }
     else
     {
-      setStatus( tr( "Signed in." ) );
+      setStatus( tr( "Not signed in." ) );
     }
-  }
-  else
-  {
-    setStatus( tr( "Not signed in." ) );
-  }
+  } );
   setMode( Mode::Login );
 }
 
@@ -297,6 +301,17 @@ QWidget *QgsAiAccountWidget::buildLoggedInPane()
   buttonLayout->addWidget( mRefreshModelsButton );
   buttonLayout->addStretch( 1 );
   layout->addWidget( buttonRow );
+  auto *use = new QPushButton( tr( "Use in this chat" ), pane );
+  use->setObjectName( u"aiPlanUseButton"_s );
+  layout->addWidget( use );
+  connect( use, &QPushButton::clicked, this, [this]() {
+    if ( isBusy() || !mModelRouter || !isSignedIn() )
+      return;
+    mModelRouter->setActiveProvider( QgsAiModelRouter::Provider::Plan );
+    emit authStateChanged();
+    setStatus( tr( "Strata Cloud is selected for this chat." ) );
+  } );
+
 
   connect( mLogoutButton, &QPushButton::clicked, this, &QgsAiAccountWidget::logout );
   connect( mRefreshModelsButton, &QPushButton::clicked, this, &QgsAiAccountWidget::refreshManagedModels );
@@ -377,7 +392,7 @@ void QgsAiAccountWidget::setMode( Mode mode )
   mLoginButton->setVisible( mode == Mode::Login );
   mRegisterButton->setVisible( mode == Mode::Signup );
   mPasswordHint->setVisible( mode == Mode::Signup );
-  if ( changed && !mBusy )
+  if ( changed && !isBusy() )
     setStatus( QString() );
   updateFormState();
 }
@@ -385,11 +400,13 @@ void QgsAiAccountWidget::setMode( Mode mode )
 void QgsAiAccountWidget::setBusy( bool busy )
 {
   mBusy = busy;
+  busy = isBusy();
   mModeLoginButton->setEnabled( !busy );
   mModeSignupButton->setEnabled( !busy );
   mEmail->setEnabled( !busy );
   mPassword->setEnabled( !busy );
   mRefreshModelsButton->setEnabled( !busy );
+  mLogoutButton->setEnabled( !busy );
   if ( !busy )
   {
     mLoginButton->setText( tr( "Log in" ) );
@@ -400,7 +417,8 @@ void QgsAiAccountWidget::setBusy( bool busy )
 
 void QgsAiAccountWidget::setStatus( const QString &text, bool error )
 {
-  mStatusLabel->setText( text );
+  const QString storage = mModelRouter ? mModelRouter->credentialStatus( QgsAiModelRouter::Provider::Plan ) : QString();
+  mStatusLabel->setText( text + ( isSignedIn() ? u"\n"_s + storage : QString() ) );
   mStatusLabel->setProperty( "status", error ? u"error"_s : QString() );
   if ( QStyle *labelStyle = mStatusLabel->style() )
   {
@@ -417,7 +435,7 @@ void QgsAiAccountWidget::updateFormState()
   const bool emailOk = mEmail->text().contains( '@'_L1 );
   const QString password = mPassword->text();
   const bool passwordOk = mMode == Mode::Login ? !password.isEmpty() : password.length() >= 8;
-  const bool canSubmit = !mBusy && usableEndpoint && emailOk && passwordOk;
+  const bool canSubmit = !isBusy() && usableEndpoint && emailOk && passwordOk;
   mLoginButton->setEnabled( canSubmit );
   mRegisterButton->setEnabled( canSubmit );
 }
@@ -602,6 +620,24 @@ void QgsAiAccountWidget::refreshManagedModels()
 
 void QgsAiAccountWidget::onDesktopTokenReady( const QString &token )
 {
+  if ( mSavingToken )
+    return;
+  mSavingToken = true;
+  setBusy( true );
+  QgsAiCredentialDialog::save( this, { { u"ai/provider/plan/token"_s, token } }, [this, token]( bool saved ) {
+    mSavingToken = false;
+    if ( !saved )
+    {
+      setBusy( false );
+      setStatus( tr( "Sign-in was not saved. You can retry." ), true );
+      return;
+    }
+    finishDesktopTokenReady( token );
+  } );
+}
+
+void QgsAiAccountWidget::finishDesktopTokenReady( const QString &token )
+{
   if ( mModelRouter )
   {
     // The token was minted against the live Advanced-field endpoint: persist
@@ -629,9 +665,7 @@ void QgsAiAccountWidget::onDesktopTokenReady( const QString &token )
     setBusy( false );
     return;
   }
-  // Default to the Plan provider only once sign-in actually succeeded; the user
-  // can still switch back to a BYO provider afterwards.
-  mModelRouter->setActiveProvider( QgsAiModelRouter::Provider::Plan );
+  // Provider selection is explicit through "Use in this chat".
   mTokenEdit->clear();
   mPassword->clear();
   mStateStack->setCurrentIndex( 1 );

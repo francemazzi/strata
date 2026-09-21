@@ -265,9 +265,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     static constexpr int HISTORY_TOKEN_BUDGET = 32768;
 
     /**
-     * Returns the providers to try for the next request, preferred one first.
-     * Only USABLE providers (enabled + configured credentials) are included,
-     * so the list may be empty when nothing is configured.
+     * Returns only the explicitly selected provider when usable. An empty list
+     * requires user action; another provider is never used as a paid fallback.
      */
     QList<QgsAiModelRouter::Provider> providerFallbackOrder() const;
 

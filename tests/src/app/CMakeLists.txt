@@ -99,7 +99,6 @@ if (ENABLE_AI_ASSISTANT)
   set(TESTS ${TESTS} testqgsaipythonruntime.cpp)
   set(TESTS ${TESTS} testqgsaisecretstore.cpp)
   set(TESTS ${TESTS} testqgsairulesskillsstore.cpp)
-  set(TESTS ${TESTS} testqgsaiclaudecodecli.cpp)
   set(TESTS ${TESTS} testqgsaiclaudeconnectwidget.cpp)
 endif()
 

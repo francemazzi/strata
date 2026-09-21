@@ -30,7 +30,6 @@
 #include "layers/qgsbatchedlayeraddcontroller.h"
 #include "qgisapp.h"
 #include "qgsaichatpromptedit.h"
-#include "qgsaiclaudeoauthclient.h"
 #include "qgsaicodexoauthclient.h"
 #include "qgsaigissuggestionengine.h"
 #include "qgsaimodelrouter.h"
@@ -885,10 +884,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
       }
       if ( provider == "Claude"_L1 )
       {
-        // Expired or revoked subscription token: re-run the Claude Code flow
-        // (the stored token is replaced only once a new one is minted).
         hideRequestError();
-        openProviderSettingsSection( u"providers"_s, true );
+        openProviderSettingsSection( u"providers"_s );
         return;
       }
     }
@@ -1020,6 +1017,11 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   setWidget( container );
 
   mPlanClient = new QgsAiPlanClient( this );
+  if ( mModelRouter )
+  {
+    connect( mModelRouter, &QgsAiModelRouter::requestFinished, this, [this]() { rebuildModelMenu(); } );
+    QgsAiSecretStore::loadSecretsAsync( this, [this]() { rebuildModelMenu(); } );
+  }
   connect( mPlanClient, &QgsAiPlanClient::modelsReady, this, [this]( const QList<QgsAiPlanClient::ModelInfo> &, bool ) { rebuildModelMenu(); } );
   connect( mPlanClient, &QgsAiPlanClient::agentPolicyReady, this, [this]( const QgsAiManagedAgentPolicy &policy, bool ) {
     if ( mSessionManager )
@@ -1272,10 +1274,8 @@ void QgsAiChatDockWidget::rebuildModelMenu()
     QAction *none = menu->addAction( tr( "No AI providers configured" ) );
     none->setEnabled( false );
     menu->addSeparator();
-    // One-click path for Claude Pro/Max users: jumps straight into the Claude Code flow.
-    QAction *connectClaude = menu->addAction( tr( "Connect Claude Code…" ) );
-    connectClaude->setObjectName( u"aiConnectClaudeCodeAction"_s );
-    connect( connectClaude, &QAction::triggered, this, [this]() { openProviderSettingsSection( u"providers"_s, true ); } );
+    QAction *cloud = menu->addAction( tr( "Sign in to Strata Cloud…" ) );
+    connect( cloud, &QAction::triggered, this, [this]() { openProviderSettingsSection( u"account"_s ); } );
     QAction *openSettings = menu->addAction( tr( "Open provider settings…" ) );
     connect( openSettings, &QAction::triggered, this, &QgsAiChatDockWidget::openProviderSettings );
     mModelPill->setMenu( menu );
@@ -1357,6 +1357,7 @@ void QgsAiChatDockWidget::rebuildModelMenu()
 
   mModelPill->setMenu( menu );
   mModelPill->setText( modelPillLabel( pillEntry->provider, pillEntry->displayName ) );
+  mModelPill->setToolTip( mModelRouter->credentialStatus( pillEntry->provider ) );
 
   connect( group, &QActionGroup::triggered, this, &QgsAiChatDockWidget::onModelSelected );
 }
@@ -2609,7 +2610,7 @@ void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
   if ( kind == "authentication"_L1 && ( provider == "Plan Account"_L1 || provider == "Codex"_L1 ) )
     mErrorActionButton->setText( tr( "Log out and sign in again" ) );
   else if ( kind == "authentication"_L1 && provider == "Claude"_L1 )
-    mErrorActionButton->setText( tr( "Reconnect Claude Code" ) );
+    mErrorActionButton->setText( tr( "Configure a provider" ) );
   else if ( provider == "Plan Account"_L1 )
     mErrorActionButton->setText( tr( "Open Plan Account" ) );
   else
@@ -3397,7 +3398,7 @@ void QgsAiChatDockWidget::openProviderSettings()
   openProviderSettingsSection( QString() );
 }
 
-void QgsAiChatDockWidget::openProviderSettingsSection( const QString &section, bool startClaudeConnect )
+void QgsAiChatDockWidget::openProviderSettingsSection( const QString &section )
 {
   if ( !mModelRouter )
     return;
@@ -3406,8 +3407,6 @@ void QgsAiChatDockWidget::openProviderSettingsSection( const QString &section, b
   if ( !section.isEmpty() )
     dialog.showSection( section );
   // Queued so the dialog is on screen before the browser pops up.
-  if ( startClaudeConnect )
-    QMetaObject::invokeMethod( &dialog, "startClaudeConnect", Qt::QueuedConnection );
   connect( &dialog, &QgsAiSettingsDialog::embeddingProviderSettingsChanged, this, &QgsAiChatDockWidget::embeddingProviderSettingsChanged );
   connect( &dialog, &QgsAiSettingsDialog::planAuthStateChanged, this, &QgsAiChatDockWidget::rebuildModelMenu );
   connect( &dialog, &QgsAiSettingsDialog::demoProjectCreated, this, &QgsAiChatDockWidget::refreshGisSuggestionCard );
@@ -3445,7 +3444,6 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
        || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
        || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
        || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
-       || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
        || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan ) )
   {
     settings.setValue( u"strata/welcome_seen"_s, true );
@@ -3459,14 +3457,8 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
     return;
 
   QPushButton *settingsButton = new QPushButton( tr( "Open AI onboarding" ) );
-  QgsMessageBarItem *item = new QgsMessageBarItem(
-    tr( "AI Assistant" ),
-    tr( "Sign in to Strata Cloud, connect Claude Code or add a provider API key, then review privacy, model, indexing and demo setup before using the agent." ),
-    settingsButton,
-    Qgis::MessageLevel::Info,
-    0,
-    messageBar
-  );
+  QgsMessageBarItem *item
+    = new QgsMessageBarItem( tr( "AI Assistant" ), tr( "Sign in to Strata Cloud, configure a provider API key, then review privacy, model, indexing and demo setup before using the agent." ), settingsButton, Qgis::MessageLevel::Info, 0, messageBar );
 
   connect( settingsButton, &QPushButton::clicked, this, [this, messageBar, item]() {
     openProviderSettings();
