@@ -39,10 +39,10 @@ All packages are available from **[Releases](../../releases/latest)**.
 | Platform | Download | What to do next |
 |---|---|---|
 | 🍎 **macOS** (Intel + Apple Silicon) | `*.dmg` | Signed and notarized universal build. Double-click → drag Strata to Applications. |
-| 🪟 **Windows 10/11** (x64) | `*-win64.exe`, `*-win64.zip` | EXE installer and portable ZIP. Release candidates require verified Authenticode signatures and Windows 11 acceptance; check the release evidence. |
+| 🪟 **Windows 10/11** (x64) | `*-win64.exe`, `*-win64.zip` | Authenticode-signed EXE installer and portable ZIP with verified bundled binaries. See release notes for field-test status. |
 | 🐧 **Linux** (x86_64) | `*.AppImage` | `chmod +x Strata-*.AppImage` then double-click. No installation required. |
 
-> Release 1.4.3 was built without Windows Authenticode signing. The 1.4.4 hotfix requires signed Windows binaries and recorded Smart App Control acceptance before publication. Sigstore bundles and SHA-256 checksums cover release artifacts; they do not replace Windows Authenticode. New files may still show SmartScreen reputation warnings. See the [signing and acceptance runbook](docs/releases/windows-signing.md).
+> Windows packages now include verified Authenticode signatures, including `OpenCL.dll` and the uninstaller. Sigstore bundles and SHA-256 checksums cover release artifacts; they do not replace Authenticode. Windows 11 Smart App Control field acceptance remains pending, and new files may still show SmartScreen reputation warnings. See the [1.4.13 evidence and remaining checks](docs/releases/strata-1.4.13.md) and [signing runbook](docs/releases/windows-signing.md).
 
 ### 🐧 AppImage on Linux
 

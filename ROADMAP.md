@@ -108,15 +108,16 @@ Cosa evitare:
 
 > Rendere Strata provabile senza attrito, stabile per early adopter e misurabile.
 
-- [ ] **1.4.13 credential hotfix:** retire Claude subscription-token bridge, migrate credentials to the OS keychain, preserve explicit provider selection. Implementation and validation evidence: `docs/releases/strata-1.4.13.md`.
+- [x] **1.4.13 credential hotfix:** retired Claude subscription-token bridge, migrated credentials to the OS keychain, preserved explicit provider selection; merged in PR #53 and released on 2026-09-21. Automated regressions, all three package builds and Sigstore sealing passed. Evidence: `docs/releases/strata-1.4.13.md`.
+- [ ] **1.4.13 field acceptance:** final-package Cloud/API sign-in, first response, restart/disconnect on Windows/macOS; real Linux keychain availability cases; Windows 11 Smart App Control and colleague confirmation remain pending.
 - [x] Pipeline release multi-piattaforma su tag `strata-v`* (`release-strata.yml`) + fix macOS PyQGIS (ignore user site-packages)
 - [ ] Installer firmati
   - [x] macOS sign + notarize in CI (`build-macos-qt6.yml`)
   - [x] Windows code signing integration via Azure Artifact Signing (`windows-qt6.yml`, `windows-release-manual.yml`); production configuration and acceptance are separate gates
-  - [ ] Windows 1.4.4: mandatory Authenticode, installed-payload verification, signed NSIS helpers and immutable draft releases — code implemented with 11 Node tests, 11 signing-failure scenarios and real Authenticode verification on Windows CI; Azure Public Trust, full packages and Windows 11 acceptance pending. See `docs/releases/windows-signing.md`
+  - [x] Windows Authenticode via Azure Public Trust: 1.4.13 CI verified 926 portable and 927 installed binaries, including OpenCL and the uninstaller; payload/runtime/uninstall checks passed. Windows 11 field acceptance remains separate. See `docs/releases/strata-1.4.13.md`.
   - [x] cosign release assets in CI
-  - [ ] Checksum SHA256 pubblici nelle release
-  - [ ] Dry-run firma Windows con account Azure configurato
+  - [x] Checksum SHA256 pubblici nelle release 1.4.12 e 1.4.13, con manifest e bundle Sigstore verificati
+  - [x] Firma Windows reale con account Azure configurato e verifica Authenticode in CI
   - [ ] Windows 11 Smart App Control On: installer, portable, upgrade and colleague acceptance on exact release hashes
 - [ ] Auto-update in-app
   - [x] Check versione + banner welcome (`qgsversioninfo.cpp`, `qgswelcomescreen.cpp`)

@@ -23,8 +23,13 @@ for existing chat/index data remains in the QGIS authentication vault.
 
 ## Validation and publication
 
-Candidate status: source implementation and local regression checks completed;
-release CI and packaged desktop acceptance pending. No 1.4.13 binaries published.
+Merged into `master` in [PR #53](https://github.com/francemazzi/strata/pull/53),
+commit `bc84b5c7e60a51a715b61b3ea6b6155a0855e3ec`. The immutable release tag
+`strata-v1.4.13` points to `d4e1b79c4b561aa1ab84202490e8eccc15a7b620`;
+the merge and tag have identical source trees. Released on 2026-09-21 after
+successful automatic checks, with field acceptance still pending as listed
+below. Published artifacts are the same signed packages verified in CI;
+publication does not rebuild them.
 
 Evidence collected locally on macOS:
 - All 27 AI CTest executables passed (36.68 seconds), including credential failure,
@@ -39,14 +44,42 @@ Evidence collected locally on macOS:
 - An existing OpenAI test key was rejected by
   the service; this is not recorded as a successful OpenAI acceptance test.
 
-These checks do not substitute for acceptance of the final signed artifacts.
+Final package evidence collected on 2026-09-21:
+- [Windows release CI](https://github.com/francemazzi/strata/actions/runs/35590898298)
+  passed. Authenticode verification covers all 926 portable and 927 installed
+  binaries, including `OpenCL.dll`, `qgis_app.dll`, `qt6keychain.dll` and
+  `Uninstall.exe`. Installer/ZIP payload hashes match. Installation, portable and
+  installed PyQGIS/runtime checks, project/raster/vector/Processing operations,
+  OpenCL loading and uninstallation passed on the CI runner.
+- [macOS release CI](https://github.com/francemazzi/strata/actions/runs/35590898227)
+  passed for Intel and Apple Silicon, including bundled PyQGIS, signing,
+  notarization and stapling. The downloaded DMG hash matches its build receipt.
+  Local deep bundle verification and Gatekeeper assessment passed. The packaged
+  app launched with an isolated profile; AI panel, account settings, cancellation
+  and application quit passed.
+- [Linux release CI](https://github.com/francemazzi/strata/actions/runs/35590898229)
+  passed, including bundled PyQGIS and AppImage artifact checks. The downloaded
+  AppImage hash matches its build receipt.
+- Source CI passed: Ubuntu/Fedora QGIS test matrices, database provider suites,
+  Windows/macOS builds, WASM, clang-tidy, code layout and pre-commit checks.
+- [Artifact sealing](https://github.com/francemazzi/strata/actions/runs/35611378423)
+  verified all platform receipts against the immutable source commit and actual
+  package hashes, then signed and verified four binaries plus the release
+  manifest with Sigstore. All 19 release assets were checked against the sealed
+  inventory before publication. Checksums, bundles, receipts and the Windows
+  signature report are available with the [release](https://github.com/francemazzi/strata/releases/tag/strata-v1.4.13).
 
-Required evidence before publication:
-- Focused credential/router/UI regressions and existing CI checks.
-- Signed Windows EXE and ZIP, notarized macOS DMG and Linux AppImage receipts.
-- Real Windows/macOS Cloud or API sign-in, first response, restart and disconnect.
-- Linux behavior with and without a keychain service.
+Field acceptance still pending:
+- Complete Cloud/API sign-in, first response, desktop restart and disconnect on
+  the final Windows/macOS packages. Local native Keychain/API checks and the
+  basic packaged macOS launch are separate evidence, not full field acceptance.
+- Real Linux credential behavior with and without a keychain service. Simulated
+  unavailable/denied/failing keychain regressions passed locally.
+- Windows 11 Smart App Control On, upgrade/profile preservation, GPU/no-GPU
+  scenarios and confirmation on the affected colleagues' computers.
 
-Windows 11 Smart App Control acceptance remains assigned to colleagues and must
-be reported separately. No acceptance result is implied by a successful build.
-The published 1.4.12 files must not be replaced.
+`windows-verification.json` explicitly reports `smartAppControlTested: false`.
+No manual acceptance or resolution on the affected PCs is implied by signing or
+successful CI. New signed files may still trigger SmartScreen reputation
+warnings or organization-specific policies. The published 1.4.12 files remain
+unchanged.
