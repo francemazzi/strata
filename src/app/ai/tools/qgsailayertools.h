@@ -16,6 +16,8 @@
 #ifndef QGSAILAYERTOOLS_H
 #define QGSAILAYERTOOLS_H
 
+#include <functional>
+
 #include "qgis_app.h"
 #include "qgsaitool.h"
 
@@ -136,6 +138,13 @@ class APP_EXPORT QgsAiRunProcessingAlgorithmTool : public QgsAiTool
   private:
     QgsProject *mProject = nullptr;
 };
+
+//! Reports progress for the Processing algorithm currently running on a background task.
+APP_EXPORT void qgsAiSetProcessingProgressHandler( const std::function<void( double progress )> &handler );
+//! True while run_processing_algorithm is waiting on its background task.
+APP_EXPORT bool qgsAiHasActiveProcessingAlgorithm();
+//! Cancels the Processing algorithm currently running inside run_processing_algorithm, if any.
+APP_EXPORT void qgsAiCancelActiveProcessingAlgorithm();
 
 /**
  * style_layer: applies common map styling changes directly through QGIS APIs.

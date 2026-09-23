@@ -386,6 +386,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QString mRetrievalContextMessageId;
     //! Non-null exactly while a background retrieval task is in flight.
     QPointer<QgsTask> mRetrievalTask;
+    //! Set when Stop cancels the Processing algorithm running inside the current tool round.
+    bool mProcessingRunCanceled = false;
     //! Every spawned retrieval task still alive, including ones detached by a cancel.
     QList<QPointer<QgsTask>> mLiveRetrievalTasks;
     QgsAiChatHistoryStore *mHistoryStore = nullptr;

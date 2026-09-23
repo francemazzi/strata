@@ -31,8 +31,10 @@
 #include "qgslayoutmanager.h"
 #include "qgslayoutpagecollection.h"
 #include "qgsmapcanvas.h"
+#include "qgsnativealgorithms.h"
 #include "qgspallabeling.h"
 #include "qgsprintlayout.h"
+#include "qgsprocessingregistry.h"
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsrenderer.h"
@@ -55,6 +57,7 @@
 #include <QSize>
 #include <QString>
 #include <QTemporaryDir>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -143,6 +146,7 @@ class TestQgsAiToolRegistry : public QObject
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
     void createPrintLayoutAndExportMap();
     void processingToolReportsMissingAlgorithm();
+    void processingToolAcceptsJsonEnumAndRunsOffThread();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -150,6 +154,8 @@ class TestQgsAiToolRegistry : public QObject
 void TestQgsAiToolRegistry::initTestCase()
 {
   QgsApplication::initQgis();
+  if ( QgsApplication::processingRegistry() && !QgsApplication::processingRegistry()->algorithmById( u"native:serviceareafromlayer"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
 }
 
 void TestQgsAiToolRegistry::cleanupTestCase()
@@ -812,6 +818,100 @@ void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"Unknown Processing algorithm"_s ) || result.errorMessage.contains( u"not available"_s ) );
+}
+
+void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  QgsProject project;
+  project.setCrs( QgsCoordinateReferenceSystem( u"EPSG:3857"_s ) );
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+
+  const auto parameterByName = []( const QJsonArray &parameters, const QString &name ) {
+    for ( const QJsonValue &value : parameters )
+    {
+      const QJsonObject object = value.toObject();
+      if ( object.value( u"name"_s ).toString() == name )
+        return object;
+    }
+    return QJsonObject();
+  };
+
+  QJsonObject serviceAreaDryRun;
+  serviceAreaDryRun.insert( u"algorithm_id"_s, u"native:serviceareafromlayer"_s );
+  serviceAreaDryRun.insert( u"dry_run"_s, true );
+  const QgsAiToolResult serviceAreaMetadata = tool.execute( serviceAreaDryRun );
+  QVERIFY2( serviceAreaMetadata.success, qPrintable( serviceAreaMetadata.errorMessage ) );
+  const QJsonObject strategy = parameterByName( serviceAreaMetadata.output.toObject().value( u"parameters"_s ).toArray(), u"STRATEGY"_s );
+  QVERIFY( strategy.value( u"default"_s ).isDouble() );
+  QCOMPARE( strategy.value( u"default"_s ).toInt(), 0 );
+  QCOMPARE( strategy.value( u"options"_s ).toArray().size(), 2 );
+
+  QJsonObject snapDryRun;
+  snapDryRun.insert( u"algorithm_id"_s, u"native:snapgeometries"_s );
+  snapDryRun.insert( u"dry_run"_s, true );
+  const QgsAiToolResult snapMetadata = tool.execute( snapDryRun );
+  QVERIFY2( snapMetadata.success, qPrintable( snapMetadata.errorMessage ) );
+  const QJsonObject behavior = parameterByName( snapMetadata.output.toObject().value( u"parameters"_s ).toArray(), u"BEHAVIOR"_s );
+  QVERIFY( behavior.value( u"default"_s ).isDouble() );
+  QCOMPARE( behavior.value( u"default"_s ).toInt(), 0 );
+  QCOMPARE( behavior.value( u"options"_s ).toArray().size(), 8 );
+
+  auto *network = new QgsVectorLayer( u"LineString?crs=EPSG:3857"_s, u"network"_s, u"memory"_s );
+  QVERIFY( network->isValid() );
+  QgsFeature line( network->fields() );
+  line.setGeometry( QgsGeometry::fromWkt( u"LineString (0 0, 100 0)"_s ) );
+  QVERIFY( network->dataProvider()->addFeature( line ) );
+  network->updateExtents();
+  project.addMapLayer( network );
+
+  auto *starts = new QgsVectorLayer( u"Point?crs=EPSG:3857"_s, u"starts"_s, u"memory"_s );
+  QVERIFY( starts->isValid() );
+  QgsFeature start( starts->fields() );
+  start.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( starts->dataProvider()->addFeature( start ) );
+  starts->updateExtents();
+  project.addMapLayer( starts );
+
+  QJsonObject serviceAreaParameters;
+  serviceAreaParameters.insert( u"INPUT"_s, network->id() );
+  serviceAreaParameters.insert( u"START_POINTS"_s, starts->id() );
+  serviceAreaParameters.insert( u"STRATEGY"_s, 0 );
+  serviceAreaParameters.insert( u"TRAVEL_COST2"_s, 50 );
+  serviceAreaParameters.insert( u"DEFAULT_DIRECTION"_s, 2 );
+  serviceAreaParameters.insert( u"DEFAULT_SPEED"_s, 50 );
+  serviceAreaParameters.insert( u"TOLERANCE"_s, 0 );
+  serviceAreaParameters.insert( u"POINT_TOLERANCE"_s, 5 );
+  serviceAreaParameters.insert( u"OUTPUT_LINES"_s, u"TEMPORARY_OUTPUT"_s );
+  QJsonObject serviceAreaArgs;
+  serviceAreaArgs.insert( u"algorithm_id"_s, u"native:serviceareafromlayer"_s );
+  serviceAreaArgs.insert( u"parameters"_s, serviceAreaParameters );
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+  const QgsAiToolResult serviceArea = tool.execute( serviceAreaArgs );
+  QVERIFY2( serviceArea.success, qPrintable( serviceArea.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "Processing blocked the interface thread until the algorithm returned" );
+  QVERIFY( serviceArea.output.toObject().value( u"result"_s ).toObject().contains( u"OUTPUT_LINES"_s ) );
+
+  QJsonArray behaviorValue;
+  behaviorValue.append( 0 );
+  QJsonObject snapParameters;
+  snapParameters.insert( u"INPUT"_s, starts->id() );
+  snapParameters.insert( u"REFERENCE_LAYER"_s, network->id() );
+  snapParameters.insert( u"TOLERANCE"_s, 10 );
+  snapParameters.insert( u"BEHAVIOR"_s, behaviorValue );
+  snapParameters.insert( u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s );
+  QJsonObject snapArgs;
+  snapArgs.insert( u"algorithm_id"_s, u"native:snapgeometries"_s );
+  snapArgs.insert( u"parameters"_s, snapParameters );
+  const QgsAiToolResult snap = tool.execute( snapArgs );
+  QVERIFY2( snap.success, qPrintable( snap.errorMessage ) );
+  QVERIFY( snap.output.toObject().value( u"result"_s ).toObject().contains( u"OUTPUT"_s ) );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

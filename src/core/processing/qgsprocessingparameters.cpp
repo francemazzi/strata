@@ -5368,7 +5368,12 @@ bool QgsProcessingParameterEnum::checkValueIsAcceptable( const QVariant &value, 
       }
       return true;
     }
-    else if ( input.userType() == QMetaType::Type::Int || input.userType() == QMetaType::Type::Double )
+    // Qt 6.11 QJsonValue::toVariant() stores whole JSON numbers as qlonglong.
+    else if ( input.userType() == QMetaType::Type::Int
+              || input.userType() == QMetaType::Type::Long
+              || input.userType() == QMetaType::Type::LongLong
+              || input.userType() == QMetaType::Type::ULongLong
+              || input.userType() == QMetaType::Type::Double )
     {
       bool ok = false;
       const int res = input.toInt( &ok );

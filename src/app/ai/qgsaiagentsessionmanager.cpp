@@ -16,8 +16,10 @@
 #include "qgsaiagentsessionmanager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
+#include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsairunpythontool.h"
 #include "qgsaiauditlog.h"
 #include "qgsaifilecontextprovider.h"
@@ -438,6 +440,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   if ( QCoreApplication::instance() )
     connect( QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &QgsAiAgentSessionManager::closeDesktopAgentSession );
 
+  qgsAiSetProcessingProgressHandler( [this]( double progress ) { emit requestStateChanged( u"tool_use"_s, tr( "Processing… %1%" ).arg( static_cast<int>( std::round( progress ) ) ) ); } );
+
   if ( mRouter )
   {
     connect( mRouter, &QgsAiModelRouter::toolCallsRequested, this, &QgsAiAgentSessionManager::onToolCallsRequested );
@@ -564,6 +568,10 @@ void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
 
 QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 {
+  qgsAiSetProcessingProgressHandler( {} );
+  if ( qgsAiHasActiveProcessingAlgorithm() )
+    qgsAiCancelActiveProcessingAlgorithm();
+
   // Detach before canceling: canceling a still-queued task emits taskTerminated
   // synchronously, and the finish lambda must not dispatch a request from here.
   // Then wait for the worker so it cannot touch the workspace index (destroyed right
@@ -1031,6 +1039,13 @@ void QgsAiAgentSessionManager::deleteSession( const QString &sessionId )
 
 void QgsAiAgentSessionManager::cancelActiveRequest()
 {
+  if ( qgsAiHasActiveProcessingAlgorithm() )
+  {
+    mProcessingRunCanceled = true;
+    qgsAiCancelActiveProcessingAlgorithm();
+    return;
+  }
+
   if ( mAwaitingAgentRunApproval )
   {
     mAwaitingAgentRunApproval = false;
@@ -3073,6 +3088,18 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
       roundHadError = true;
     recordHistoryMessage( resultMessage );
+    if ( mProcessingRunCanceled )
+    {
+      mProcessingRunCanceled = false;
+      const QString message = tr( "Stopped because the Processing algorithm was canceled." );
+      recordHistoryMessage( buildAssistantMessage( message ) );
+      mActiveRequestId.clear();
+      if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
+        completeManagedAgentRun();
+      emit requestStateChanged( u"cancelled"_s, message );
+      emit requestRunningChanged( false );
+      return;
+    }
   }
 
   mLastToolRoundHadError = roundHadError;

@@ -6405,6 +6405,11 @@ void TestQgsProcessing::parameterEnum()
   QVERIFY( def->checkValueIsAcceptable( "1" ) );
   QVERIFY( !def->checkValueIsAcceptable( "1,2" ) );
   QVERIFY( def->checkValueIsAcceptable( 0 ) );
+  QVERIFY( def->checkValueIsAcceptable( QVariant::fromValue<qlonglong>( 0 ) ) );
+  QVERIFY( def->checkValueIsAcceptable( QVariant::fromValue<qlonglong>( 2 ) ) );
+  QVERIFY( !def->checkValueIsAcceptable( QVariant::fromValue<qlonglong>( 3 ) ) );
+  QVERIFY( def->checkValueIsAcceptable( QVariant::fromValue<qulonglong>( 1 ) ) );
+  QVERIFY( def->checkValueIsAcceptable( QVariant::fromValue<long>( 1 ) ) );
   QVERIFY( !def->checkValueIsAcceptable( QVariantList() ) );
   QVERIFY( !def->checkValueIsAcceptable( QVariantList() << 1 ) );
   QVERIFY( !def->checkValueIsAcceptable( QVariantList() << "a" ) );
@@ -6414,7 +6419,12 @@ void TestQgsProcessing::parameterEnum()
   QVERIFY( !def->checkValueIsAcceptable( "" ) );
   QVERIFY( def->checkValueIsAcceptable( QVariant() ) ); // should be acceptable, because falls back to default value
   QVERIFY( !def->checkValueIsAcceptable( "B" ) );       // should not be acceptable, because static strings flag is not set
-  QVERIFY( !def->checkValueIsAcceptable( "Z" ) );       // should not be acceptable, because static strings flag is not set
+
+  auto pathType = std::make_unique<QgsProcessingParameterEnum>( "path_type", QString(), QStringList() << "Shortest" << "Fastest", false, 0 );
+  QVERIFY( pathType->checkValueIsAcceptable( QVariant::fromValue<qlonglong>( 0 ) ) );
+  QVERIFY( !pathType->checkValueIsAcceptable( QVariant::fromValue<qlonglong>( 2 ) ) );
+  QVERIFY( !pathType->checkValueIsAcceptable( QVariantList() << 0 << 1 ) );
+  QVERIFY( !def->checkValueIsAcceptable( "Z" ) ); // should not be acceptable, because static strings flag is not set
 
   // string representing a number
   QVariantMap params;

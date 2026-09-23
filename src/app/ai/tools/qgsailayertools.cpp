@@ -16,6 +16,7 @@
 #include "qgsailayertools.h"
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 
 #include "qgsaifilecontextprovider.h"
@@ -23,6 +24,7 @@
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgsexception.h"
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
@@ -48,6 +50,7 @@
 #include "qgsmaprendererparalleljob.h"
 #include "qgsmapsettings.h"
 #include "qgsmasterlayoutinterface.h"
+#include "qgsmessagelog.h"
 #include "qgspallabeling.h"
 #include "qgsprintlayout.h"
 #include "qgsprocessingalgorithm.h"
@@ -65,6 +68,7 @@
 #include "qgsrenderer.h"
 #include "qgssinglesymbolrenderer.h"
 #include "qgssymbol.h"
+#include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerlabeling.h"
 #include "qgswkbtypes.h"
@@ -72,12 +76,14 @@
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <QSet>
 #include <QSize>
 #include <QString>
@@ -88,6 +94,28 @@
 #include <QVariant>
 
 using namespace Qt::StringLiterals;
+
+namespace
+{
+  QPointer<QgsProcessingFeedback> sActiveProcessingFeedback;
+  std::function<void( double progress )> sProcessingProgressHandler;
+} // namespace
+
+void qgsAiSetProcessingProgressHandler( const std::function<void( double progress )> &handler )
+{
+  sProcessingProgressHandler = handler;
+}
+
+bool qgsAiHasActiveProcessingAlgorithm()
+{
+  return !sActiveProcessingFeedback.isNull();
+}
+
+void qgsAiCancelActiveProcessingAlgorithm()
+{
+  if ( sActiveProcessingFeedback )
+    sActiveProcessingFeedback->cancel();
+}
 
 namespace
 {
@@ -411,6 +439,38 @@ namespace
     return map;
   }
 
+  // Single-select enums store their default as a one-element list. parameterAsInt
+  // cannot read that list (it falls back to 0), so unwrap it before validation.
+  QVariantMap normalizeSingleEnumParameters( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters )
+  {
+    QVariantMap normalized = parameters;
+    if ( !algorithm )
+      return normalized;
+
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition );
+      if ( !enumDefinition || enumDefinition->allowMultiple() )
+        continue;
+
+      const QVariant value = normalized.value( enumDefinition->name() );
+      if ( value.userType() != QMetaType::Type::QVariantList )
+        continue;
+
+      const QVariantList values = value.toList();
+      if ( values.size() != 1 )
+        continue;
+
+      bool ok = false;
+      const int index = values.constFirst().toInt( &ok );
+      if ( !ok )
+        continue;
+      normalized.insert( enumDefinition->name(), index );
+    }
+    return normalized;
+  }
+
   QJsonArray processingParametersJson( const QgsProcessingAlgorithm *algorithm )
   {
     QJsonArray array;
@@ -429,8 +489,28 @@ namespace
       entry.insert( u"type"_s, definition->type() );
       entry.insert( u"optional"_s, definition->flags().testFlag( Qgis::ProcessingParameterFlag::Optional ) );
       entry.insert( u"destination"_s, definition->isDestination() );
+      if ( const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition ) )
+      {
+        QJsonArray options;
+        const QStringList labels = enumDefinition->options();
+        for ( const QString &label : labels )
+          options.append( label );
+        entry.insert( u"options"_s, options );
+      }
       if ( definition->defaultValue().isValid() )
-        entry.insert( u"default"_s, QJsonValue::fromVariant( definition->defaultValue() ) );
+      {
+        QVariant defaultValue = definition->defaultValue();
+        if ( const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition ) )
+        {
+          if ( !enumDefinition->allowMultiple() && defaultValue.userType() == QMetaType::Type::QVariantList )
+          {
+            const QVariantList values = defaultValue.toList();
+            if ( values.size() == 1 )
+              defaultValue = values.constFirst();
+          }
+        }
+        entry.insert( u"default"_s, QJsonValue::fromVariant( defaultValue ) );
+      }
       array.push_back( entry );
     }
     return array;
@@ -1225,6 +1305,89 @@ QString QgsAiRunProcessingAlgorithmTool::availabilityReason() const
   return u"QGIS Processing registry is not available."_s;
 }
 
+namespace
+{
+  // Same thread split as QgsProcessingAlgRunnerTask (prepare on the GUI thread,
+  // runPrepared on the worker, postProcess back on the GUI thread) and keeps the
+  // optional algorithm configuration map, which the stock task drops.
+  class AiProcessingRunnerTask : public QgsTask
+  {
+    public:
+      AiProcessingRunnerTask( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, const QVariantMap &configuration, QgsProcessingContext &context, QgsProcessingFeedback *feedback )
+        : QgsTask( QObject::tr( "Executing “%1”" ).arg( algorithm ? algorithm->displayName() : QString() ), QgsTask::CanCancel )
+        , mParameters( parameters )
+        , mContext( context )
+        , mFeedback( feedback )
+      {
+        if ( !algorithm || !mFeedback )
+        {
+          cancel();
+          return;
+        }
+        try
+        {
+          mAlgorithm.reset( algorithm->create( configuration ) );
+          if ( !( mAlgorithm && mAlgorithm->prepare( mParameters, mContext, mFeedback ) ) )
+            cancel();
+        }
+        catch ( QgsProcessingException &e )
+        {
+          QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
+          mFeedback->reportError( e.what() );
+          cancel();
+        }
+      }
+
+      QVariantMap results() const { return mPublishedResults; }
+      bool succeeded() const { return mSucceeded; }
+
+      void cancel() override
+      {
+        if ( mFeedback )
+          mFeedback->cancel();
+        QgsTask::cancel();
+      }
+
+    protected:
+      bool run() override
+      {
+        if ( isCanceled() || !mAlgorithm )
+          return false;
+
+        connect( mFeedback, &QgsFeedback::progressChanged, this, &AiProcessingRunnerTask::setProgress );
+        try
+        {
+          mRunResults = mAlgorithm->runPrepared( mParameters, mContext, mFeedback );
+          return !mFeedback->isCanceled();
+        }
+        catch ( QgsProcessingException &e )
+        {
+          QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
+          mFeedback->reportError( e.what() );
+          return false;
+        }
+      }
+
+      void finished( bool result ) override
+      {
+        QVariantMap postProcessed;
+        if ( mAlgorithm )
+          postProcessed = mAlgorithm->postProcess( mContext, mFeedback, result );
+        mSucceeded = result && mFeedback && !mFeedback->isCanceled();
+        mPublishedResults = !postProcessed.isEmpty() ? postProcessed : mRunResults;
+      }
+
+    private:
+      QVariantMap mParameters;
+      QVariantMap mRunResults;
+      QVariantMap mPublishedResults;
+      QgsProcessingContext &mContext;
+      QgsProcessingFeedback *mFeedback = nullptr;
+      std::unique_ptr<QgsProcessingAlgorithm> mAlgorithm;
+      bool mSucceeded = false;
+  };
+} // namespace
+
 QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &args )
 {
   QgsProcessingRegistry *registry = QgsApplication::processingRegistry();
@@ -1257,20 +1420,68 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   QgsProcessingContext context;
   if ( project )
     context.setProject( project );
-  QgsProcessingFeedback feedback;
-  context.setFeedback( &feedback );
 
-  const QVariantMap parameters = jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() );
+  const QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
   const QVariantMap configuration = args.value( u"configuration"_s ).isObject() ? jsonObjectToVariantMap( args.value( u"configuration"_s ).toObject() ) : QVariantMap();
+
+  auto feedback = std::make_unique<QgsProcessingFeedback>();
+  context.setFeedback( feedback.get() );
 
   QString checkMessage;
   if ( !algorithm->checkParameterValues( parameters, context, &checkMessage ) )
     return QgsAiToolResult::error( checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage );
 
-  bool ok = false;
-  const QVariantMap result = algorithm->run( parameters, context, &feedback, &ok, configuration, true );
-  if ( !ok )
-    return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( feedback.textLog().trimmed() ) );
+  if ( !QgsApplication::taskManager() )
+    return QgsAiToolResult::error( u"Processing task manager is not available."_s );
+
+  struct ActiveFeedbackGuard
+  {
+      explicit ActiveFeedbackGuard( QgsProcessingFeedback *active ) { sActiveProcessingFeedback = active; }
+      ~ActiveFeedbackGuard() { sActiveProcessingFeedback = nullptr; }
+  };
+  const ActiveFeedbackGuard activeFeedback( feedback.get() );
+
+  // prepare() runs on this thread; runPrepared() runs on the task thread.
+  // The nested event loop keeps the window painting and lets Stop cancel the feedback.
+  auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback.get() );
+  if ( task->status() == QgsTask::Terminated )
+  {
+    const QString log = feedback->textLog().trimmed();
+    delete task;
+    return QgsAiToolResult::error( log.isEmpty() ? u"Processing algorithm failed."_s : u"Processing algorithm failed: %1"_s.arg( log ) );
+  }
+
+  QEventLoop loop;
+  bool successful = false;
+  QVariantMap taskResults;
+  const auto finishRun = [&successful, &taskResults, &loop, task]() {
+    successful = task->succeeded();
+    taskResults = task->results();
+    loop.quit();
+  };
+  QObject::connect( task, &QgsTask::taskCompleted, &loop, finishRun );
+  QObject::connect( task, &QgsTask::taskTerminated, &loop, finishRun );
+  QObject::connect(
+    task,
+    &QgsTask::progressChanged,
+    &loop,
+    []( double progress ) {
+      if ( sProcessingProgressHandler )
+        sProcessingProgressHandler( progress );
+    },
+    Qt::QueuedConnection
+  );
+
+  QgsApplication::taskManager()->addTask( task );
+  loop.exec();
+
+  if ( feedback->isCanceled() )
+    return QgsAiToolResult::error( u"Processing algorithm was canceled."_s );
+  if ( !successful )
+  {
+    const QString log = feedback->textLog().trimmed();
+    return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
+  }
 
   QJsonObject output = processingAlgorithmMetadataJson( algorithm );
   QJsonObject diff;
@@ -1278,8 +1489,8 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   diff.insert( u"algorithm_id"_s, algorithm->id() );
   diff.insert( u"rollback_supported"_s, false );
   output.insert( u"dry_run"_s, false );
-  output.insert( u"result"_s, QJsonObject::fromVariantMap( result ) );
-  output.insert( u"log"_s, feedback.textLog() );
+  output.insert( u"result"_s, QJsonObject::fromVariantMap( taskResults ) );
+  output.insert( u"log"_s, feedback->textLog() );
   output.insert( u"diff"_s, diff );
   return QgsAiToolResult::ok( output );
 }
