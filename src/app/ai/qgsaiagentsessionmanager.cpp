@@ -236,6 +236,128 @@ namespace
     return explicitStatus.match( text ).hasMatch() || completionPhrase.match( text ).hasMatch();
   }
 
+  bool toolAffectsMapVisibility( const QString &toolName )
+  {
+    static const QSet<QString> names {
+      u"run_processing_algorithm"_s,
+      u"style_layer"_s,
+      u"add_layer_from_file"_s,
+      u"add_layer_from_service"_s,
+      u"reorder_layers"_s,
+      u"export_print_layout"_s,
+    };
+    return names.contains( toolName );
+  }
+
+  QString scalarToolValue( const QJsonValue &value )
+  {
+    if ( value.isString() )
+      return value.toString();
+    if ( value.isDouble() )
+      return QString::number( value.toDouble() );
+    if ( value.isBool() )
+      return value.toBool() ? u"true"_s : u"false"_s;
+    if ( value.isObject() )
+    {
+      const QJsonObject object = value.toObject();
+      const QString name = object.value( u"name"_s ).toString();
+      if ( !name.isEmpty() )
+        return name;
+      const QString id = object.value( u"id"_s ).toString();
+      if ( !id.isEmpty() )
+        return id;
+    }
+    return QString();
+  }
+
+  QString summarizeToolHistoryMessage( const QgsAiChatMessage &message )
+  {
+    QString name = message.metadata.value( u"tool_name"_s ).toString();
+    if ( name.isEmpty() )
+      name = u"tool"_s;
+    const QJsonObject output = QJsonDocument::fromJson( message.content.toUtf8() ).object();
+    const QVariantMap args = message.metadata.value( u"tool_args"_s ).toMap();
+
+    if ( name == "run_processing_algorithm"_L1 )
+    {
+      const QString displayName = output.value( u"display_name"_s ).toString();
+      QString algorithmId = output.value( u"algorithm_id"_s ).toString();
+      if ( algorithmId.isEmpty() )
+        algorithmId = args.value( u"algorithm_id"_s ).toString();
+      const bool dryRun = output.contains( u"dry_run"_s ) ? output.value( u"dry_run"_s ).toBool() : args.value( u"dry_run"_s ).toBool();
+      QString line;
+      if ( !displayName.isEmpty() && !algorithmId.isEmpty() && displayName != algorithmId )
+        line = u"%1 (`%2`)"_s.arg( displayName, algorithmId );
+      else if ( !displayName.isEmpty() )
+        line = displayName;
+      else if ( !algorithmId.isEmpty() )
+        line = u"`%1`"_s.arg( algorithmId );
+      else
+        line = name;
+      if ( dryRun )
+        line += u" — parameter check only"_s;
+      const QJsonObject result = output.value( u"result"_s ).toObject();
+      QStringList outputs;
+      for ( auto it = result.constBegin(); it != result.constEnd(); ++it )
+      {
+        if ( !it.key().contains( u"OUTPUT"_s, Qt::CaseInsensitive ) )
+          continue;
+        const QString value = scalarToolValue( it.value() );
+        if ( !value.isEmpty() )
+          outputs << value;
+      }
+      if ( !outputs.isEmpty() )
+        line += u" → %1"_s.arg( outputs.join( u", "_s ) );
+      return u"`%1`: %2"_s.arg( name, line );
+    }
+
+    if ( name == "list_project_layers"_L1 )
+    {
+      const int count = output.value( u"layer_count"_s ).toInt( output.value( u"count"_s ).toInt( -1 ) );
+      if ( count >= 0 )
+        return u"`%1`: %2 layer(s) in the project"_s.arg( name ).arg( count );
+    }
+
+    return u"`%1`"_s.arg( name );
+  }
+
+  QString fallbackAssistantTextAfterEmptyReply( const QList<QgsAiChatMessage> &history )
+  {
+    QList<QgsAiChatMessage> tools;
+    for ( int i = history.size() - 1; i >= 0; --i )
+    {
+      const QgsAiChatMessage &message = history.at( i );
+      if ( message.role == QgsAiChatRole::User )
+        break;
+      if ( message.role == QgsAiChatRole::Tool )
+        tools.prepend( message );
+    }
+
+    if ( tools.isEmpty() )
+      return QgsAiAgentSessionManager::tr( "The model returned an empty reply. Please try sending the request again." );
+
+    QStringList lines;
+    lines << QgsAiAgentSessionManager::tr( "Here is what I ran:" );
+    bool mapWork = false;
+    for ( const QgsAiChatMessage &toolMessage : std::as_const( tools ) )
+    {
+      lines << u"- %1"_s.arg( summarizeToolHistoryMessage( toolMessage ) );
+      if ( toolAffectsMapVisibility( toolMessage.metadata.value( u"tool_name"_s ).toString() ) )
+        mapWork = true;
+    }
+    if ( mapWork )
+    {
+      lines << QgsAiAgentSessionManager::tr(
+        "The result is in the current project. If it is not obvious on the map at a glance, I can restyle the output, zoom to it, or add extra visual evidence. Do you want that?"
+      );
+    }
+    else
+    {
+      lines << QgsAiAgentSessionManager::tr( "If you want me to continue or show more evidence, say what to do next." );
+    }
+    return lines.join( u'\n' );
+  }
+
   QStringList reviewerReadOnlyTools()
   {
     return QStringList {
@@ -504,6 +626,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
           }
           finalText = u"I cannot confirm successful completion because the latest tool round failed its verification checks. Review the last tool result before continuing."_s;
         }
+        if ( finalText.trimmed().isEmpty() )
+          finalText = fallbackAssistantTextAfterEmptyReply( mHistory );
         const QgsAiChatMessage assistant = buildAssistantMessage( finalText );
         recordHistoryMessage( assistant );
         emit requestStateChanged( u"completed"_s, u"%1 (%2 ms)"_s.arg( providerName ).arg( latencyMs ) );
@@ -2161,6 +2285,7 @@ QString QgsAiAgentSessionManager::buildSystemPrompt( const QString &extraContext
   );
   prompt += "- After every tool result, read the embedded verification object before the next action. If success=false, if expected diff is missing, or if rollback is unavailable for a mutation, stop and explain.\n"_L1;
   prompt += "- If a download, WCS/WFS request, Processing job, or other tool fails, stop and report the failure. Never substitute synthetic, guessed, or placeholder data.\n"_L1;
+  prompt += "- After tools that change the map or project, always write a short closing message: which native QGIS tool ran (human name and id), which inputs/outputs, and that a progress bar in the QGIS status bar is expected while Processing runs. If the result may be hard to see at a glance, ask whether the user wants stronger visual evidence (restyle, zoom to output, labels, extra overlay). Never end a turn with an empty message.\n"_L1;
   if ( mActiveAgent == "planner"_L1 )
   {
     prompt += "- You are in Plan mode. Do not call tools, do not download data, do not run Python, and do not modify project or workspace state.\n"_L1;
