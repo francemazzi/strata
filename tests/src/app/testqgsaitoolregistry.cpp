@@ -848,6 +848,8 @@ void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
   QVERIFY( strategy.value( u"default"_s ).isDouble() );
   QCOMPARE( strategy.value( u"default"_s ).toInt(), 0 );
   QCOMPARE( strategy.value( u"options"_s ).toArray().size(), 2 );
+  const QJsonObject outputLinesMeta = parameterByName( serviceAreaMetadata.output.toObject().value( u"parameters"_s ).toArray(), u"OUTPUT_LINES"_s );
+  QVERIFY( outputLinesMeta.value( u"create_by_default"_s ).toBool() );
 
   QJsonObject snapDryRun;
   snapDryRun.insert( u"algorithm_id"_s, u"native:snapgeometries"_s );
@@ -897,6 +899,11 @@ void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
   QVERIFY2( serviceArea.success, qPrintable( serviceArea.errorMessage ) );
   QVERIFY2( interfaceEventsRan, "Processing blocked the interface thread until the algorithm returned" );
   QVERIFY( serviceArea.output.toObject().value( u"result"_s ).toObject().contains( u"OUTPUT_LINES"_s ) );
+  const QJsonArray serviceAreaLoaded = serviceArea.output.toObject().value( u"loaded_layers"_s ).toArray();
+  QCOMPARE( serviceAreaLoaded.size(), 1 );
+  const QString serviceAreaLayerId = serviceAreaLoaded.at( 0 ).toObject().value( u"id"_s ).toString();
+  QVERIFY( project.mapLayer( serviceAreaLayerId ) );
+  QCOMPARE( project.mapLayers().size(), 3 );
 
   QJsonArray behaviorValue;
   behaviorValue.append( 0 );
@@ -912,6 +919,20 @@ void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
   const QgsAiToolResult snap = tool.execute( snapArgs );
   QVERIFY2( snap.success, qPrintable( snap.errorMessage ) );
   QVERIFY( snap.output.toObject().value( u"result"_s ).toObject().contains( u"OUTPUT"_s ) );
+  QCOMPARE( snap.output.toObject().value( u"loaded_layers"_s ).toArray().size(), 1 );
+  QCOMPARE( project.mapLayers().size(), 4 );
+
+  QJsonObject bufferParameters;
+  bufferParameters.insert( u"INPUT"_s, starts->id() );
+  bufferParameters.insert( u"DISTANCE"_s, 10 );
+  QJsonObject bufferArgs;
+  bufferArgs.insert( u"algorithm_id"_s, u"native:buffer"_s );
+  bufferArgs.insert( u"parameters"_s, bufferParameters );
+  const QgsAiToolResult buffer = tool.execute( bufferArgs );
+  QVERIFY2( buffer.success, qPrintable( buffer.errorMessage ) );
+  QCOMPARE( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().size(), 1 );
+  QVERIFY( project.mapLayer( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().at( 0 ).toObject().value( u"id"_s ).toString() ) );
+  QCOMPARE( project.mapLayers().size(), 5 );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

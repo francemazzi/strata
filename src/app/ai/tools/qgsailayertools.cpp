@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "qgsaifilecontextprovider.h"
 #include "qgsaitoolschemautil.h"
@@ -53,13 +54,16 @@
 #include "qgsmessagelog.h"
 #include "qgspallabeling.h"
 #include "qgsprintlayout.h"
+#include "qgsprocessing.h"
 #include "qgsprocessingalgorithm.h"
 #include "qgsprocessingcontext.h"
 #include "qgsprocessingfeedback.h"
 #include "qgsprocessingoutputs.h"
 #include "qgsprocessingparameters.h"
 #include "qgsprocessingregistry.h"
+#include "qgsprocessingutils.h"
 #include "qgsproject.h"
+#include "qgslayertreeregistrybridge.h"
 #include "qgsprovidermetadata.h"
 #include "qgsproviderregistry.h"
 #include "qgsrasterlayer.h"
@@ -471,6 +475,113 @@ namespace
     return normalized;
   }
 
+  bool isLoadableProcessingDestination( const QgsProcessingParameterDefinition *definition )
+  {
+    return dynamic_cast<const QgsProcessingParameterFeatureSink *>( definition )
+           || dynamic_cast<const QgsProcessingParameterVectorDestination *>( definition )
+           || dynamic_cast<const QgsProcessingParameterRasterDestination *>( definition )
+           || dynamic_cast<const QgsProcessingParameterPointCloudDestination *>( definition )
+           || dynamic_cast<const QgsProcessingParameterVectorTileDestination *>( definition );
+  }
+
+  // Match processing.runAndLoadResults: wrap layer destinations so TEMPORARY_OUTPUT
+  // (and file sinks) stay attached to the project instead of dying with the context.
+  void bindProcessingDestinationsToProject( const QgsProcessingAlgorithm *algorithm, QVariantMap &parameters, QgsProject *project )
+  {
+    if ( !algorithm || !project )
+      return;
+
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      if ( !isLoadableProcessingDestination( definition ) )
+        continue;
+      if ( definition->flags().testFlag( Qgis::ProcessingParameterFlag::Hidden ) )
+        continue;
+
+      const auto *destination = dynamic_cast<const QgsProcessingDestinationParameter *>( definition );
+      if ( !destination )
+        continue;
+
+      if ( !parameters.contains( definition->name() ) )
+      {
+        if ( !destination->createByDefault() )
+          continue;
+        parameters.insert( definition->name(), QgsProcessing::TEMPORARY_OUTPUT );
+      }
+
+      const QVariant value = parameters.value( definition->name() );
+      if ( value.userType() == qMetaTypeId<QgsProcessingOutputLayerDefinition>() )
+      {
+        QgsProcessingOutputLayerDefinition layerDefinition = value.value<QgsProcessingOutputLayerDefinition>();
+        if ( !layerDefinition.destinationProject )
+          layerDefinition.destinationProject = project;
+        parameters.insert( definition->name(), QVariant::fromValue( layerDefinition ) );
+        continue;
+      }
+
+      const QString destinationString = value.toString();
+      if ( destinationString.isEmpty() )
+        continue;
+
+      parameters.insert( definition->name(), QVariant::fromValue( QgsProcessingOutputLayerDefinition( destinationString, project ) ) );
+    }
+  }
+
+  QJsonArray loadProcessingResultsIntoProject( QgsProcessingContext &context, QgsProject *project )
+  {
+    QJsonArray loaded;
+    if ( !project )
+      return loaded;
+
+    QgsLayerTreeGroup *root = project->layerTreeRoot();
+    QgsLayerTreeRegistryBridge *bridge = project->layerTreeRegistryBridge();
+    std::optional<QgsLayerTreeRegistryBridge::InsertionPoint> previousPoint;
+    if ( bridge )
+      previousPoint.emplace( bridge->layerInsertionPoint() );
+
+    const QMap<QString, QgsProcessingContext::LayerDetails> pending = context.layersToLoadOnCompletion();
+    int insertIndex = 0;
+    for ( auto it = pending.constBegin(); it != pending.constEnd(); ++it )
+    {
+      const QgsProcessingContext::LayerDetails &details = it.value();
+      QgsMapLayer *layer = QgsProcessingUtils::mapLayerFromString( it.key(), context, true, details.layerTypeHint );
+      if ( !layer )
+        continue;
+
+      QJsonObject info;
+      info.insert( u"id"_s, layer->id() );
+      info.insert( u"name"_s, layer->name() );
+      info.insert( u"output"_s, details.outputName );
+
+      if ( project->mapLayer( layer->id() ) )
+      {
+        loaded.append( info );
+        continue;
+      }
+
+      details.setOutputLayerName( layer );
+      QgsMapLayer *owned = context.temporaryLayerStore()->takeMapLayer( layer );
+      if ( !owned )
+        continue;
+
+      if ( bridge && root )
+        bridge->setLayerInsertionPoint( QgsLayerTreeRegistryBridge::InsertionPoint( root, insertIndex ) );
+      project->addMapLayer( owned );
+      ++insertIndex;
+
+      info.insert( u"id"_s, owned->id() );
+      info.insert( u"name"_s, owned->name() );
+      info.insert( u"temporary"_s, owned->providerType() == u"memory"_s );
+      loaded.append( info );
+    }
+
+    if ( bridge && previousPoint.has_value() )
+      bridge->setLayerInsertionPoint( *previousPoint );
+
+    return loaded;
+  }
+
   QJsonArray processingParametersJson( const QgsProcessingAlgorithm *algorithm )
   {
     QJsonArray array;
@@ -489,6 +600,8 @@ namespace
       entry.insert( u"type"_s, definition->type() );
       entry.insert( u"optional"_s, definition->flags().testFlag( Qgis::ProcessingParameterFlag::Optional ) );
       entry.insert( u"destination"_s, definition->isDestination() );
+      if ( const auto *destination = dynamic_cast<const QgsProcessingDestinationParameter *>( definition ) )
+        entry.insert( u"create_by_default"_s, destination->createByDefault() );
       if ( const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition ) )
       {
         QJsonArray options;
@@ -1281,7 +1394,9 @@ QString QgsAiRunProcessingAlgorithmTool::description() const
   return QStringLiteral(
     "Runs a QGIS Processing algorithm by id with JSON parameters, or returns a dry-run schema for the algorithm. "
     "Use this native tool for common GIS transformations (buffers, dissolve, reprojection, statistics, raster tools) "
-    "instead of generating run_python code. Mutating or output-producing runs require approval."
+    "instead of generating run_python code. Output layers (including TEMPORARY_OUTPUT memory layers) are added to the "
+    "current project like the QGIS Toolbox; they are not discarded when the tool returns. Mutating or output-producing "
+    "runs require approval."
   );
 }
 
@@ -1289,7 +1404,7 @@ QJsonObject QgsAiRunProcessingAlgorithmTool::schema() const
 {
   QJsonObject properties;
   properties.insert( u"algorithm_id"_s, prop( u"string"_s, u"QGIS Processing algorithm id, e.g. 'native:buffer'."_s ) );
-  properties.insert( u"parameters"_s, prop( u"object"_s, u"Algorithm parameters as a JSON object. Use dry_run first if unsure."_s ) );
+  properties.insert( u"parameters"_s, prop( u"object"_s, u"Algorithm parameters as a JSON object. Use dry_run first if unsure. Layer destinations such as OUTPUT or OUTPUT_LINES default to TEMPORARY_OUTPUT and are loaded into the project."_s ) );
   properties.insert( u"configuration"_s, prop( u"object"_s, u"Optional Processing algorithm configuration map."_s ) );
   properties.insert( u"dry_run"_s, prop( u"boolean"_s, u"If true, returns algorithm parameter/output metadata without executing it."_s ) );
   return schemaObject( properties, QJsonArray { u"algorithm_id"_s } );
@@ -1421,7 +1536,8 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   if ( project )
     context.setProject( project );
 
-  const QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
+  QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
+  bindProcessingDestinationsToProject( algorithm, parameters, project );
   const QVariantMap configuration = args.value( u"configuration"_s ).isObject() ? jsonObjectToVariantMap( args.value( u"configuration"_s ).toObject() ) : QVariantMap();
 
   auto feedback = std::make_unique<QgsProcessingFeedback>();
@@ -1484,12 +1600,14 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   }
 
   QJsonObject output = processingAlgorithmMetadataJson( algorithm );
+  const QJsonArray loadedLayers = loadProcessingResultsIntoProject( context, project );
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Executed a QGIS Processing algorithm."_s );
+  diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
   diff.insert( u"algorithm_id"_s, algorithm->id() );
   diff.insert( u"rollback_supported"_s, false );
   output.insert( u"dry_run"_s, false );
   output.insert( u"result"_s, QJsonObject::fromVariantMap( taskResults ) );
+  output.insert( u"loaded_layers"_s, loadedLayers );
   output.insert( u"log"_s, feedback->textLog() );
   output.insert( u"diff"_s, diff );
   return QgsAiToolResult::ok( output );
