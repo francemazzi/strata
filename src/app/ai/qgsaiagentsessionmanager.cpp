@@ -307,7 +307,7 @@ namespace
           outputs << value;
       }
       if ( !outputs.isEmpty() )
-        line += u" → %1"_s.arg( outputs.join( u", "_s ) );
+        line += u" → %1"_s.arg( outputs.join( ", "_L1 ) );
       return u"`%1`: %2"_s.arg( name, line );
     }
 

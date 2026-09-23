@@ -33,6 +33,7 @@
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
 #include "qgslayertreelayer.h"
+#include "qgslayertreeregistrybridge.h"
 #include "qgslayoutexporter.h"
 #include "qgslayoutitemlabel.h"
 #include "qgslayoutitemlegend.h"
@@ -63,7 +64,6 @@
 #include "qgsprocessingregistry.h"
 #include "qgsprocessingutils.h"
 #include "qgsproject.h"
-#include "qgslayertreeregistrybridge.h"
 #include "qgsprovidermetadata.h"
 #include "qgsproviderregistry.h"
 #include "qgsrasterlayer.h"
@@ -572,7 +572,7 @@ namespace
 
       info.insert( u"id"_s, owned->id() );
       info.insert( u"name"_s, owned->name() );
-      info.insert( u"temporary"_s, owned->providerType() == u"memory"_s );
+      info.insert( u"temporary"_s, owned->providerType() == "memory"_L1 );
       loaded.append( info );
     }
 

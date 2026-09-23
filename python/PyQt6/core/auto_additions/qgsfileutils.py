@@ -26,6 +26,7 @@ try:
     QgsFileUtils.driveType = staticmethod(QgsFileUtils.driveType)
     QgsFileUtils.pathIsSlowDevice = staticmethod(QgsFileUtils.pathIsSlowDevice)
     QgsFileUtils.sidecarFilesForPath = staticmethod(QgsFileUtils.sidecarFilesForPath)
+    QgsFileUtils.pathIsSidecarFile = staticmethod(QgsFileUtils.pathIsSidecarFile)
     QgsFileUtils.renameDataset = staticmethod(QgsFileUtils.renameDataset)
     QgsFileUtils.splitPathToComponents = staticmethod(QgsFileUtils.splitPathToComponents)
     QgsFileUtils.uniquePath = staticmethod(QgsFileUtils.uniquePath)

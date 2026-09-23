@@ -2621,9 +2621,7 @@ void QgisApp::dropEvent( QDropEvent *event )
     // Strata: when many plain data files are dropped at once, scan them in a background
     // task and add them in batches instead of opening each synchronously in this loop
     QStringList filesToProcess = files;
-    filesToProcess.removeIf( []( const QString &file ) {
-      return QgsFileUtils::pathIsSidecarFile( file );
-    } );
+    filesToProcess.removeIf( []( const QString &file ) { return QgsFileUtils::pathIsSidecarFile( file ); } );
     const int bulkThreshold = QgsBatchedLayerAddController::settingsBatchThreshold->value();
     if ( bulkThreshold > 0 && filesToProcess.size() >= bulkThreshold )
     {
