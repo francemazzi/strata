@@ -171,6 +171,19 @@ For instance, if ``path`` specified a .shp file then the corresponding
 .. versionadded:: 3.22
 %End
 
+    static bool pathIsSidecarFile( const QString &path );
+%Docstring
+Returns ``True`` if ``path`` is a sidecar file of another dataset in the
+same directory.
+
+A sidecar is a file that ``sidecarFilesForPath()`` lists for a sibling
+dataset with the same basename (for instance ``layer.prj`` next to
+``layer.shp``). A standalone ``.dbf`` with no sibling shapefile is not
+treated as a sidecar, so it can still be opened as a table.
+
+.. versionadded:: 4.3
+%End
+
     static bool renameDataset(
       const QString &oldPath, const QString &newPath, QString &error /Out/, Qgis::FileOperationFlags flags = Qgis::FileOperationFlag::IncludeMetadataFile | Qgis::FileOperationFlag::IncludeStyleFile
     );

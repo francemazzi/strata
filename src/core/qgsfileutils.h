@@ -157,6 +157,18 @@ class CORE_EXPORT QgsFileUtils
     static QSet< QString > sidecarFilesForPath( const QString &path );
 
     /**
+     * Returns TRUE if \a path is a sidecar file of another dataset in the same directory.
+     *
+     * A sidecar is a file that ``sidecarFilesForPath()`` lists for a sibling dataset with the
+     * same basename (for instance ``layer.prj`` next to ``layer.shp``). Extensions that are
+     * never a dataset (``.prj``, ``.cpg``, ``.shx``, …) are always treated as sidecars.
+     * A standalone ``.dbf`` with no sibling shapefile is not treated as a sidecar, so it can still be opened as a table.
+     *
+     * \since QGIS 4.3
+     */
+    static bool pathIsSidecarFile( const QString &path );
+
+    /**
      * Renames the dataset at \a oldPath to \a newPath, renaming both the file at \a oldPath and
      * all associated sidecar files which exist for it.
      *

@@ -172,6 +172,9 @@ class APP_EXPORT QgsAppLayerHandling
      * Set \a allowInteractive to TRUE if it is OK to ask the user for information (mostly for
      * when a vector layer has sublayers and we want to ask which sublayers to use).
      *
+     * Shapefile sidecar files (``.prj``, ``.cpg``, ``.shx``, …) next to a ``.shp`` are skipped
+     * silently: \a ok is set to TRUE and the returned list is empty.
+     *
      * \returns a list of added map layers if the file is successfully opened
      */
     static QList<QgsMapLayer *> openLayer( const QString &fileName, bool &ok, bool allowInteractive = false, bool suppressBulkLayerPostProcessing = false, bool addToLegend = true );

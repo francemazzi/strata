@@ -953,6 +953,14 @@ QList<QgsMapLayer *> QgsAppLayerHandling::openLayer( const QString &fileName, bo
   ok = false;
   const QFileInfo fileInfo( fileName );
 
+  // Shapefile (and similar) sidecars are not datasets. Opening them as layers used to
+  // raise "invalid data source" and then SIGSEGV when mixed with the real .shp in one drop.
+  if ( QgsFileUtils::pathIsSidecarFile( fileName ) )
+  {
+    ok = true;
+    return {};
+  }
+
   // highest priority = delegate to provider registry to handle
   const QList<QgsProviderRegistry::ProviderCandidateDetails> candidateProviders = QgsProviderRegistry::instance()->preferredProvidersForUri( fileName );
   if ( candidateProviders.size() == 1 && candidateProviders.at( 0 ).layerTypes().size() == 1 )

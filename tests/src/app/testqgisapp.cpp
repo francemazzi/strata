@@ -14,6 +14,7 @@
  ***************************************************************************/
 #include <gdal.h>
 
+#include "layers/qgsapplayerhandling.h"
 #include "qgisapp.h"
 #include "qgsclipboard.h"
 #include "qgsfillsymbol.h"
@@ -52,6 +53,7 @@ class TestQgisApp : public QObject
     void pasteRasterStyleCategory();
     void copyPasteMultipleStyles();
     void autoSelectAddedLayerIgnoresStalePointers();
+    void dropShapefileSidecarsDoesNotCrash();
 
   public slots:
     void addVectorLayerShp();
@@ -308,6 +310,34 @@ void TestQgisApp::autoSelectAddedLayerIgnoresStalePointers()
   QCOMPARE( mQgisApp->activeLayer(), static_cast<QgsMapLayer *>( live ) );
 
   QgsProject::instance()->layerStore()->removeMapLayers( QStringList() << live->id() );
+}
+
+void TestQgisApp::dropShapefileSidecarsDoesNotCrash()
+{
+  const QString shp = mTestDataDir + u"points.shp"_s;
+  const QStringList dropOrder {
+    shp,
+    mTestDataDir + u"points.prj"_s,
+    mTestDataDir + u"points.shx"_s,
+    mTestDataDir + u"points.dbf"_s,
+  };
+
+  QList<QgsMapLayer *> added;
+  for ( const QString &file : dropOrder )
+  {
+    bool ok = false;
+    const QList<QgsMapLayer *> opened = QgsAppLayerHandling::openLayer( file, ok, false, true, true );
+    QVERIFY2( ok, file.toUtf8().constData() );
+    added.append( opened );
+  }
+
+  QCOMPARE( added.size(), 1 );
+  mQgisApp->autoSelectAddedLayer( added );
+  QgsAppLayerHandling::postProcessAddedLayers( added );
+  QCOMPARE( QgsProject::instance()->mapLayers().size(), 1 );
+  QCOMPARE( mQgisApp->activeLayer(), added.at( 0 ) );
+
+  QgsProject::instance()->layerStore()->removeMapLayers( QStringList() << added.at( 0 )->id() );
 }
 
 QGSTEST_MAIN( TestQgisApp )

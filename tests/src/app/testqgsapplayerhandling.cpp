@@ -5,12 +5,15 @@
 ***************************************************************************/
 
 #include "layers/qgsapplayerhandling.h"
+#include "qgsfileutils.h"
 #include "qgsprovidersublayerdetails.h"
 #include "qgssettings.h"
 #include "qgssettingsentryimpl.h"
 #include "qgstest.h"
 
+#include <QFile>
 #include <QString>
+#include <QTemporaryDir>
 
 using namespace Qt::StringLiterals;
 
@@ -27,6 +30,8 @@ class TestQgsAppLayerHandling : public QObject
     void guardrailDisabledWithZeroThreshold();
     void guardrailAppliesToAskExcludingRasterBands();
     void otherPromptModesUnaffected();
+    void pathIsSidecarFileDetectsShapefileParts();
+    void openLayerSkipsShapefileSidecars();
 
   private:
     static QList<QgsProviderSublayerDetails> makeDetails( int count, Qgis::LayerType type = Qgis::LayerType::Vector );
@@ -108,6 +113,53 @@ void TestQgsAppLayerHandling::otherPromptModesUnaffected()
   // non-layer items always ask, independent of the guardrail
   QgsSettings().setEnumValue( u"qgis/promptForSublayers"_s, Qgis::SublayerPromptMode::NeverAskLoadAll );
   QCOMPARE( QgsAppLayerHandling::shouldAskUserForSublayers( makeDetails( 1 ), true ), QgsAppLayerHandling::SublayerHandling::AskUser );
+}
+
+void TestQgsAppLayerHandling::pathIsSidecarFileDetectsShapefileParts()
+{
+  const QString dataDir = QStringLiteral( TEST_DATA_DIR ) + '/';
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( dataDir + u"points.prj"_s ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( dataDir + u"points.shx"_s ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( dataDir + u"points.dbf"_s ) );
+  QVERIFY( !QgsFileUtils::pathIsSidecarFile( dataDir + u"points.shp"_s ) );
+
+  QTemporaryDir tmp;
+  QVERIFY( tmp.isValid() );
+  const QString loneDbf = tmp.filePath( u"table.dbf"_s );
+  QVERIFY( QFile::copy( dataDir + u"points.dbf"_s, loneDbf ) );
+  QVERIFY( !QgsFileUtils::pathIsSidecarFile( loneDbf ) );
+
+  const QString lonePrj = tmp.filePath( u"only.prj"_s );
+  QVERIFY( QFile::copy( dataDir + u"points.prj"_s, lonePrj ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( lonePrj ) );
+
+  QVERIFY( QFile::copy( dataDir + u"points.shp"_s, tmp.filePath( u"layer.shp"_s ) ) );
+  QVERIFY( QFile::copy( dataDir + u"points.shx"_s, tmp.filePath( u"layer.shx"_s ) ) );
+  QVERIFY( QFile::copy( dataDir + u"points.dbf"_s, tmp.filePath( u"layer.dbf"_s ) ) );
+  QVERIFY( QFile::copy( dataDir + u"points.prj"_s, tmp.filePath( u"layer.prj"_s ) ) );
+  QFile cpg( tmp.filePath( u"layer.cpg"_s ) );
+  QVERIFY( cpg.open( QIODevice::WriteOnly ) );
+  QCOMPARE( cpg.write( "UTF-8" ), 5 );
+  cpg.close();
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.cpg"_s ) ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.prj"_s ) ) );
+  QVERIFY( !QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.shp"_s ) ) );
+}
+
+void TestQgsAppLayerHandling::openLayerSkipsShapefileSidecars()
+{
+  const QString dataDir = QStringLiteral( TEST_DATA_DIR ) + '/';
+  bool ok = false;
+  QCOMPARE( QgsAppLayerHandling::openLayer( dataDir + u"points.prj"_s, ok, false, true, false ).size(), 0 );
+  QVERIFY( ok );
+
+  ok = false;
+  QCOMPARE( QgsAppLayerHandling::openLayer( dataDir + u"points.shx"_s, ok, false, true, false ).size(), 0 );
+  QVERIFY( ok );
+
+  ok = false;
+  QCOMPARE( QgsAppLayerHandling::openLayer( dataDir + u"points.dbf"_s, ok, false, true, false ).size(), 0 );
+  QVERIFY( ok );
 }
 
 QGSTEST_MAIN( TestQgsAppLayerHandling )

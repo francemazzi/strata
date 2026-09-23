@@ -471,6 +471,71 @@ QSet<QString> QgsFileUtils::sidecarFilesForPath( const QString &path )
   return res;
 }
 
+bool QgsFileUtils::pathIsSidecarFile( const QString &path )
+{
+  const QFileInfo info( path );
+  if ( !info.exists() || !info.isFile() )
+    return false;
+
+  const QString suffix = info.suffix().toLower();
+  // These extensions are never a dataset. Do not list the parent directory to
+  // decide — macOS TCC can hide Downloads siblings while still allowing the
+  // dropped file path itself to be opened (that is the Accessi300 SIGSEGV).
+  static const QSet<QString> neverDatasetSuffixes {
+    u"prj"_s,
+    u"cpg"_s,
+    u"shx"_s,
+    u"sbn"_s,
+    u"sbx"_s,
+    u"qix"_s,
+    u"qpj"_s,
+    u"idm"_s,
+    u"ind"_s,
+  };
+  if ( neverDatasetSuffixes.contains( suffix ) )
+    return true;
+
+  const QString absolute = info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath();
+  const QDir dir = info.absoluteDir();
+
+  QStringList bases { info.completeBaseName() };
+  if ( info.baseName() != info.completeBaseName() )
+    bases << info.baseName();
+
+  static const QStringList datasetSuffixes {
+    u"shp"_s,
+    u"tab"_s,
+    u"mif"_s,
+    u"gml"_s,
+    u"csv"_s,
+  };
+
+  for ( const QString &base : std::as_const( bases ) )
+  {
+    for ( const QString &datasetSuffix : datasetSuffixes )
+    {
+      const QString datasetPath = dir.filePath( base + '.' + datasetSuffix );
+      if ( !QFile::exists( datasetPath ) )
+        continue;
+
+      const QFileInfo datasetInfo( datasetPath );
+      const QString datasetAbsolute = datasetInfo.canonicalFilePath().isEmpty() ? datasetInfo.absoluteFilePath() : datasetInfo.canonicalFilePath();
+      if ( QString::compare( datasetAbsolute, absolute, Qt::CaseInsensitive ) == 0 )
+        continue;
+
+      const QSet<QString> sidecars = sidecarFilesForPath( datasetPath );
+      for ( const QString &sidecar : sidecars )
+      {
+        const QFileInfo sidecarInfo( sidecar );
+        const QString sidecarAbsolute = sidecarInfo.canonicalFilePath().isEmpty() ? sidecarInfo.absoluteFilePath() : sidecarInfo.canonicalFilePath();
+        if ( QString::compare( sidecarAbsolute, absolute, Qt::CaseInsensitive ) == 0 )
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool QgsFileUtils::renameDataset( const QString &oldPath, const QString &newPath, QString &error, Qgis::FileOperationFlags flags )
 {
   if ( !QFile::exists( oldPath ) )
