@@ -62,8 +62,7 @@ QgsAiFunctionTask::QgsAiFunctionTask( const QString &description, std::function<
   : QgsTask( description, QgsTask::CanCancel | QgsTask::CancelWithoutPrompt )
   , mWork( std::move( work ) )
   , mFeedback( feedback )
-{
-}
+{}
 
 void QgsAiFunctionTask::cancel()
 {
@@ -127,7 +126,7 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsTask *task, QgsFeedback *feedb
     return result;
   }
 
-    if ( task->status() == QgsTask::Terminated )
+  if ( task->status() == QgsTask::Terminated )
   {
     if ( onFinished )
       onFinished();
@@ -168,4 +167,28 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsTask *task, QgsFeedback *feedb
   if ( !result.succeeded && result.error.isEmpty() )
     result.error = result.canceled ? u"Canceled."_s : u"Background task failed."_s;
   return result;
+}
+
+QgsAiTaskWaitResult qgsAiRunFunction( const QString &description, QgsFeedback *feedback, const std::function<bool( QgsFeedback * )> &work, bool forceGuiThread )
+{
+  QgsAiTaskWaitResult result;
+  if ( !work )
+  {
+    result.error = u"Task is not available."_s;
+    return result;
+  }
+
+  if ( forceGuiThread || !QgsApplication::taskManager() )
+  {
+    QgsAiActiveFeedbackScope scope( feedback );
+    const bool ok = work( feedback );
+    result.canceled = feedback && feedback->isCanceled();
+    result.succeeded = ok && !result.canceled;
+    if ( !result.succeeded )
+      result.error = result.canceled ? u"Canceled."_s : u"Task failed."_s;
+    return result;
+  }
+
+  auto *task = new QgsAiFunctionTask( description, work, feedback );
+  return qgsAiRunTaskWithEventLoop( task, feedback, description );
 }

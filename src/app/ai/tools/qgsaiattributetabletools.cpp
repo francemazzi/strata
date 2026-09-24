@@ -16,28 +16,38 @@
 #include "qgsaiattributetabletools.h"
 
 #include <algorithm>
+#include <memory>
 
+#include "qgis.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgscoordinatetransform.h"
 #include "qgsexception.h"
 #include "qgsexpression.h"
+#include "qgsexpressioncontext.h"
+#include "qgsexpressioncontextutils.h"
 #include "qgsfeature.h"
+#include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
+#include "qgsfeedback.h"
 #include "qgsfield.h"
 #include "qgsfields.h"
 #include "qgsgeometry.h"
-#include "qgspointxy.h"
+#include "qgsmaplayer.h"
 #include "qgsmessagelog.h"
+#include "qgspointxy.h"
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsvectorlayer.h"
+#include "qgsvectorlayerfeatureiterator.h"
 
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPointer>
 #include <QString>
 #include <QUuid>
 #include <QVariant>
@@ -64,6 +74,34 @@ namespace
   void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
   {
     QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+  }
+
+  struct LayerChangeWatch
+  {
+      bool changed = false;
+      QList<QMetaObject::Connection> connections;
+
+      explicit LayerChangeWatch( QgsVectorLayer *layer )
+      {
+        const auto mark = [this]() { changed = true; };
+        connections << QObject::connect( layer, &QgsVectorLayer::layerModified, mark );
+        connections << QObject::connect( layer, &QgsVectorLayer::editingStarted, mark );
+        connections << QObject::connect( layer, &QgsVectorLayer::editingStopped, mark );
+        connections << QObject::connect( layer, &QgsMapLayer::dataChanged, mark );
+        connections << QObject::connect( layer, &QgsVectorLayer::updatedFields, mark );
+        connections << QObject::connect( layer, &QgsVectorLayer::subsetStringChanged, mark );
+      }
+
+      ~LayerChangeWatch()
+      {
+        for ( const QMetaObject::Connection &connection : connections )
+          QObject::disconnect( connection );
+      }
+  };
+
+  bool providerUsesTransaction( const QgsVectorLayer *layer )
+  {
+    return layer && layer->dataProvider() && layer->dataProvider()->transaction();
   }
 
   QString storeRollback( const AttributeTableRollbackEntry &entry )
@@ -380,17 +418,71 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( !layer->fields().at( fieldIndex ).convertCompatible( convertedValue, &conversionError ) )
     return QgsAiToolResult::error( conversionError.isEmpty() ? u"Value is not compatible with field: %1"_s.arg( fieldName ) : conversionError );
 
+  QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
+  context.setFields( layer->fields() );
+  QgsExpression filter( filterExpression );
+  filter.prepare( &context );
+
   QgsFeatureRequest request;
   request.setFilterExpression( filterExpression );
+  request.setExpressionContext( context );
+  QSet<int> attributeIndexes = filter.referencedAttributeIndexes( layer->fields() );
+  attributeIndexes.insert( fieldIndex );
+  request.setSubsetOfAttributes( qgis::setToList( attributeIndexes ) );
+  if ( !filter.needsGeometry() )
+    request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
-  QList<QgsFeature> matchingFeatures;
+  struct PendingUpdate
+  {
+      QgsFeatureId featureId = FID_NULL;
+      QVariant oldValue;
+  };
+  QList<PendingUpdate> pendingUpdates;
+  auto source = std::make_shared<QgsVectorLayerFeatureSource>( layer );
+  auto feedback = std::make_unique<QgsFeedback>();
+  const QPointer<QgsVectorLayer> layerGuard( layer );
+  const long long total = std::max( 0LL, layer->featureCount() );
+  QgsAiTaskWaitResult wait;
+  bool layerChanged = false;
+
   QElapsedTimer phaseTimer;
   phaseTimer.start();
-  QgsFeatureIterator it = layer->getFeatures( request );
-  QgsFeature feature;
-  while ( it.nextFeature( feature ) )
-    matchingFeatures.push_back( feature );
+  {
+    LayerChangeWatch watcher( layer );
+    wait = qgsAiRunFunction(
+      u"Updating attributes"_s,
+      feedback.get(),
+      [&]( QgsFeedback *workerFeedback ) {
+        QgsFeatureRequest scanRequest = request;
+        QgsFeatureIterator it = source->getFeatures( scanRequest );
+        QgsFeature feature;
+        int n = 0;
+        while ( it.nextFeature( feature ) )
+        {
+          if ( workerFeedback->isCanceled() )
+            return false;
+          PendingUpdate pending;
+          pending.featureId = feature.id();
+          pending.oldValue = feature.attribute( fieldIndex );
+          pendingUpdates.push_back( pending );
+          ++n;
+          if ( total > 0 )
+            workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+        }
+        return true;
+      },
+      providerUsesTransaction( layer )
+    );
+    layerChanged = watcher.changed;
+  }
   logAiPerf( u"batch_update_attributes"_s, u"read_calculate"_s, phaseTimer.elapsed() );
+
+  if ( wait.canceled )
+    return QgsAiToolResult::canceledResult( u"Batch attribute update was canceled."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( wait.error );
+  if ( layerGuard.isNull() || layerChanged )
+    return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
 
   const bool startedEditing = !layer->isEditable();
   if ( startedEditing && !layer->startEditing() )
@@ -399,15 +491,15 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   QHash<QgsFeatureId, QVariant> oldValues;
   layer->beginEditCommand( u"AI batch attribute update"_s );
   phaseTimer.restart();
-  for ( const QgsFeature &matchingFeature : std::as_const( matchingFeatures ) )
+  for ( const PendingUpdate &pending : std::as_const( pendingUpdates ) )
   {
-    oldValues.insert( matchingFeature.id(), matchingFeature.attribute( fieldIndex ) );
-    if ( !layer->changeAttributeValue( matchingFeature.id(), fieldIndex, convertedValue, matchingFeature.attribute( fieldIndex ), true ) )
+    oldValues.insert( pending.featureId, pending.oldValue );
+    if ( !layer->changeAttributeValue( pending.featureId, fieldIndex, convertedValue, pending.oldValue, true ) )
     {
       layer->destroyEditCommand();
       if ( startedEditing )
         layer->rollBack();
-      return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( matchingFeature.id() ) );
+      return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( pending.featureId ) );
     }
   }
   layer->endEditCommand();
@@ -428,13 +520,13 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   diff.insert( u"summary"_s, u"Batch-updated feature attributes."_s );
   diff.insert( u"layer_id"_s, layer->id() );
   diff.insert( u"field_name"_s, fieldName );
-  diff.insert( u"updated_feature_count"_s, matchingFeatures.size() );
+  diff.insert( u"updated_feature_count"_s, pendingUpdates.size() );
   diff.insert( u"filter_expression"_s, filterExpression );
 
   QJsonObject output;
   output.insert( u"layer_id"_s, layer->id() );
   output.insert( u"field_name"_s, fieldName );
-  output.insert( u"updated_feature_count"_s, matchingFeatures.size() );
+  output.insert( u"updated_feature_count"_s, pendingUpdates.size() );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, attributeTableRollbackJson( token, u"restore_batch_attribute_values"_s ) );
@@ -480,9 +572,23 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   if ( !validateFilterExpression( filterExpression, error ) )
     return QgsAiToolResult::error( error );
 
+  QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
+  context.setFields( layer->fields() );
+
   QgsFeatureRequest request;
+  request.setNoAttributes();
+  bool needsGeometry = false;
   if ( !filterExpression.isEmpty() )
+  {
+    QgsExpression filter( filterExpression );
+    filter.prepare( &context );
+    needsGeometry = filter.needsGeometry();
+    const QSet<int> attributeIndexes = filter.referencedAttributeIndexes( layer->fields() );
+    if ( !attributeIndexes.isEmpty() )
+      request.setSubsetOfAttributes( qgis::setToList( attributeIndexes ) );
     request.setFilterExpression( filterExpression );
+    request.setExpressionContext( context );
+  }
 
   QgsRectangle bbox;
   if ( args.contains( u"bbox"_s ) )
@@ -491,19 +597,56 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
       return QgsAiToolResult::error( error );
     request.setFilterRect( bbox );
   }
+  if ( !needsGeometry )
+    request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
   QgsFeatureIds ids;
-  QgsFeature feature;
+  auto source = std::make_shared<QgsVectorLayerFeatureSource>( layer );
+  auto feedback = std::make_unique<QgsFeedback>();
+  const QPointer<QgsVectorLayer> layerGuard( layer );
+  const long long total = std::max( 0LL, layer->featureCount() );
+  QgsAiTaskWaitResult wait;
+  bool layerChanged = false;
+
   QElapsedTimer phaseTimer;
   phaseTimer.start();
-  QgsFeatureIterator it = layer->getFeatures( request );
-  while ( it.nextFeature( feature ) )
-    ids.insert( feature.id() );
+  {
+    LayerChangeWatch watcher( layer );
+    wait = qgsAiRunFunction(
+      u"Selecting features"_s,
+      feedback.get(),
+      [&]( QgsFeedback *workerFeedback ) {
+        QgsFeatureRequest scanRequest = request;
+        QgsFeatureIterator it = source->getFeatures( scanRequest );
+        QgsFeature feature;
+        int n = 0;
+        while ( it.nextFeature( feature ) )
+        {
+          if ( workerFeedback->isCanceled() )
+            return false;
+          ids.insert( feature.id() );
+          ++n;
+          if ( total > 0 )
+            workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+        }
+        return true;
+      },
+      providerUsesTransaction( layer )
+    );
+    layerChanged = watcher.changed;
+  }
   logAiPerf( u"select_features"_s, u"read_calculate"_s, phaseTimer.elapsed() );
+
+  if ( wait.canceled )
+    return QgsAiToolResult::canceledResult( u"Feature selection was canceled."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( wait.error );
+  if ( layerGuard.isNull() || layerChanged )
+    return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
 
   const int beforeSelectedCount = layer->selectedFeatureCount();
   phaseTimer.restart();
-  layer->selectByIds( ids, behavior, true );
+  layer->selectByIds( ids, behavior, layerChanged );
   logAiPerf( u"select_features"_s, u"apply"_s, phaseTimer.elapsed() );
 
   QJsonObject diff;

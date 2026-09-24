@@ -20,6 +20,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -34,7 +35,10 @@ class TestQgsAiAttributeTableTools : public QObject
     void queryFeaturesCapsLargeResult();
     void reorderLayersUsesNativeTreeOrder();
     void batchUpdateAttributesUpdatesAndRollsBack();
+    void batchUpdateAttributesKeepsInterfaceResponsive();
     void selectFeaturesUpdatesLayerSelection();
+    void selectFeaturesSupportsModeAndBbox();
+    void selectFeaturesKeepsInterfaceResponsive();
     void identifyFeaturesAtReturnsMatchingFeature();
 };
 
@@ -219,6 +223,103 @@ void TestQgsAiAttributeTableTools::selectFeaturesUpdatesLayerSelection()
   QVERIFY2( empty.success, qPrintable( empty.errorMessage ) );
   QCOMPARE( empty.output.toObject().value( u"selected_count"_s ).toInt(), 0 );
   QCOMPARE( layer->selectedFeatureIds().size(), 0 );
+}
+
+void TestQgsAiAttributeTableTools::selectFeaturesSupportsModeAndBbox()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QVERIFY( layer );
+
+  QgsAiSelectFeaturesTool tool( &project );
+  QJsonObject bboxArgs;
+  bboxArgs.insert( u"layer_id"_s, layer->id() );
+  bboxArgs.insert( u"mode"_s, u"replace"_s );
+  QJsonObject bbox;
+  bbox.insert( u"xmin"_s, 0.5 );
+  bbox.insert( u"ymin"_s, 0.5 );
+  bbox.insert( u"xmax"_s, 1.5 );
+  bbox.insert( u"ymax"_s, 1.5 );
+  bboxArgs.insert( u"bbox"_s, bbox );
+  const QgsAiToolResult bboxResult = tool.execute( bboxArgs );
+  QVERIFY2( bboxResult.success, qPrintable( bboxResult.errorMessage ) );
+  QCOMPARE( layer->selectedFeatureIds().size(), 1 );
+  QCOMPARE( bboxResult.output.toObject().value( u"matched_feature_count"_s ).toInt(), 1 );
+
+  QJsonObject addArgs;
+  addArgs.insert( u"layer_id"_s, layer->id() );
+  addArgs.insert( u"mode"_s, u"add"_s );
+  addArgs.insert( u"filter_expression"_s, u"\"value\" = 3"_s );
+  const QgsAiToolResult addResult = tool.execute( addArgs );
+  QVERIFY2( addResult.success, qPrintable( addResult.errorMessage ) );
+  QCOMPARE( layer->selectedFeatureIds().size(), 2 );
+}
+
+void TestQgsAiAttributeTableTools::batchUpdateAttributesKeepsInterfaceResponsive()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=name:string&field=value:integer"_s, u"Places"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  for ( int i = 0; i < 2500; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setAttribute( u"name"_s, u"row"_s );
+    feature.setAttribute( u"value"_s, i );
+    features.push_back( feature );
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+
+  QgsAiBatchUpdateAttributesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= 0"_s );
+  args.insert( u"field_name"_s, u"name"_s );
+  args.insert( u"value"_s, u"updated"_s );
+
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "Batch update blocked the interface thread" );
+}
+
+void TestQgsAiAttributeTableTools::selectFeaturesKeepsInterfaceResponsive()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=value:integer"_s, u"Places"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  for ( int i = 0; i < 2500; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setAttribute( u"value"_s, i );
+    features.push_back( feature );
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+
+  QgsAiSelectFeaturesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= 0"_s );
+
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "Feature selection blocked the interface thread" );
 }
 
 void TestQgsAiAttributeTableTools::identifyFeaturesAtReturnsMatchingFeature()

@@ -6,8 +6,11 @@
 ***************************************************************************/
 
 #include "ai/tools/qgsaieditingtools.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsapplication.h"
 #include "qgsfeature.h"
+#include "qgsfeaturerequest.h"
+#include "qgsfield.h"
 #include "qgsgeometry.h"
 #include "qgsproject.h"
 #include "qgstest.h"
@@ -17,6 +20,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -34,6 +38,11 @@ class TestQgsAiEditingTools : public QObject
     void updateFeatureAttributesRejectsIncompatibleType();
     void calculateFieldCreatesFieldForFilteredFeaturesAndRollsBack();
     void calculateFieldRejectsInvalidExpression();
+    void calculateFieldKeepsInterfaceResponsive();
+    void calculateFieldSeesUncommittedEdits();
+    void calculateFieldUsesVirtualFields();
+    void calculateFieldAbortsWhenLayerChangesDuringRun();
+    void calculateFieldCancelLeavesLayerUnchanged();
 };
 
 void TestQgsAiEditingTools::initTestCase()
@@ -352,6 +361,156 @@ void TestQgsAiEditingTools::calculateFieldRejectsInvalidExpression()
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"parser error"_s ) );
   QCOMPARE( layer->fields().lookupField( u"broken"_s ), -1 );
+}
+
+static QgsVectorLayer *makeCalculatedLayer( QgsProject &project, int featureCount )
+{
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=value:double"_s, u"Places"_s, u"memory"_s );
+  Q_ASSERT( layer->isValid() );
+  QgsFeatureList features;
+  features.reserve( featureCount );
+  for ( int i = 0; i < featureCount; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setAttribute( u"value"_s, static_cast<double>( i ) );
+    features.push_back( feature );
+  }
+  Q_ASSERT( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+  return layer;
+}
+
+void TestQgsAiEditingTools::calculateFieldKeepsInterfaceResponsive()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 2500 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"copy"_s );
+  args.insert( u"expression"_s, u"\"value\""_s );
+  args.insert( u"create_field"_s, true );
+
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "Field calculation blocked the interface thread" );
+}
+
+void TestQgsAiEditingTools::calculateFieldSeesUncommittedEdits()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=value:double"_s, u"Places"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeature first( layer->fields() );
+  first.setGeometry( QgsGeometry::fromWkt( u"Point(1 1)"_s ) );
+  first.setAttribute( u"value"_s, 2.0 );
+  QgsFeature second( layer->fields() );
+  second.setGeometry( QgsGeometry::fromWkt( u"Point(2 2)"_s ) );
+  second.setAttribute( u"value"_s, 3.0 );
+  QVERIFY( layer->dataProvider()->addFeatures( QgsFeatureList() << first << second ) );
+  project.addMapLayer( layer );
+
+  QgsFeature stored;
+  QVERIFY( layer->getFeatures().nextFeature( stored ) );
+  QVERIFY( layer->startEditing() );
+  QVERIFY( layer->changeAttributeValue( stored.id(), layer->fields().lookupField( u"value"_s ), 10.0 ) );
+
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"double_value"_s );
+  args.insert( u"expression"_s, u"\"value\" * 2"_s );
+  args.insert( u"create_field"_s, true );
+  args.insert( u"field_type"_s, u"double"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY( layer->isEditable() );
+  QVERIFY( layer->isModified() );
+
+  const int calculatedIndex = layer->fields().lookupField( u"double_value"_s );
+  QVERIFY( calculatedIndex >= 0 );
+
+  QgsFeature edited;
+  QVERIFY( layer->getFeatures( QgsFeatureRequest().setFilterFid( stored.id() ) ).nextFeature( edited ) );
+  QCOMPARE( edited.attribute( u"value"_s ).toDouble(), 10.0 );
+  QCOMPARE( edited.attribute( calculatedIndex ).toDouble(), 20.0 );
+
+  QgsFeature providerFeature;
+  QVERIFY( layer->dataProvider()->getFeatures( QgsFeatureRequest().setFilterFid( stored.id() ) ).nextFeature( providerFeature ) );
+  QCOMPARE( providerFeature.attribute( u"value"_s ).toDouble(), 2.0 );
+  QCOMPARE( layer->dataProvider()->fields().lookupField( u"double_value"_s ), -1 );
+}
+
+void TestQgsAiEditingTools::calculateFieldUsesVirtualFields()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=value:double"_s, u"Places"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeature feature( layer->fields() );
+  feature.setGeometry( QgsGeometry::fromWkt( u"Point(1 1)"_s ) );
+  feature.setAttribute( u"value"_s, 4.0 );
+  QVERIFY( layer->dataProvider()->addFeatures( QgsFeatureList() << feature ) );
+  layer->addExpressionField( u"\"value\" * 10"_s, QgsField( u"virtual_value"_s, QMetaType::Type::Double ) );
+  project.addMapLayer( layer );
+
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"copied"_s );
+  args.insert( u"expression"_s, u"\"virtual_value\""_s );
+  args.insert( u"create_field"_s, true );
+  args.insert( u"field_type"_s, u"double"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+
+  const int copiedIndex = layer->fields().lookupField( u"copied"_s );
+  QVERIFY( copiedIndex >= 0 );
+  QgsFeature stored;
+  QVERIFY( layer->getFeatures().nextFeature( stored ) );
+  QCOMPARE( stored.attribute( copiedIndex ).toDouble(), 40.0 );
+}
+
+void TestQgsAiEditingTools::calculateFieldAbortsWhenLayerChangesDuringRun()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 2500 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"copy"_s );
+  args.insert( u"expression"_s, u"\"value\""_s );
+  args.insert( u"create_field"_s, true );
+
+  QTimer::singleShot( 0, layer, [layer]() { layer->startEditing(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.errorMessage.contains( u"Layer changed while computing"_s ) );
+  QCOMPARE( layer->fields().lookupField( u"copy"_s ), -1 );
+}
+
+void TestQgsAiEditingTools::calculateFieldCancelLeavesLayerUnchanged()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 2500 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"copy"_s );
+  args.insert( u"expression"_s, u"\"value\""_s );
+  args.insert( u"create_field"_s, true );
+
+  QTimer::singleShot( 0, []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( result.canceled );
+  QVERIFY( !result.success );
+  QCOMPARE( layer->fields().lookupField( u"copy"_s ), -1 );
 }
 
 QGSTEST_MAIN( TestQgsAiEditingTools )

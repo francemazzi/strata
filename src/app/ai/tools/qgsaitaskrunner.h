@@ -77,6 +77,9 @@ struct APP_EXPORT QgsAiTaskWaitResult
  */
 APP_EXPORT QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsTask *task, QgsFeedback *feedback, const QString &label, const std::function<void()> &onFinished = {} );
 
+//! Runs \a work on a worker thread, or on the GUI thread when \a forceGuiThread is true.
+APP_EXPORT QgsAiTaskWaitResult qgsAiRunFunction( const QString &description, QgsFeedback *feedback, const std::function<bool( QgsFeedback * )> &work, bool forceGuiThread = false );
+
 //! Reports progress for the AI background tool currently running.
 APP_EXPORT void qgsAiSetBackgroundToolProgressHandler( const std::function<void( const QString &label, double progress )> &handler );
 //! True while an AI tool is waiting on the shared background helper or an active feedback scope.
