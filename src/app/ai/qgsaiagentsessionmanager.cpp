@@ -602,7 +602,7 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       Q_UNUSED( retryCount )
       Q_UNUSED( retriable )
 
-      const bool emptyHttpCompletion = ( httpStatus == 0 || ( httpStatus >= 200 && httpStatus < 300 ) ) && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
+      const bool emptyHttpCompletion = httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
       if ( success || emptyHttpCompletion )
       {
         QString finalText = !responseText.isEmpty() ? responseText : mStreamedText;
