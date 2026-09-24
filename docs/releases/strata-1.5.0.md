@@ -1,9 +1,9 @@
 # Strata 1.5.0
 
-Local-built release. GitHub Actions minutes are exhausted, so packages are
-produced on the developer machine and uploaded to GitHub. They are not the
-CI-sealed 1.4.13 set (no Azure Authenticode, no Linux AppImage builder, no
-GitHub OIDC Sigstore identity).
+Tag `strata-v1.5.0`. Packages are produced by the same GitHub Actions pipeline as
+1.4.13: Windows Authenticode, notarized macOS DMG, Linux AppImage, SHA-256
+checksums and Sigstore sealing. The sealed draft stays unpublished until the
+signed assets and receipts match this tag.
 
 ## Changes
 
@@ -21,7 +21,7 @@ upstream limit instead of a blank reply.
 
 ## Packages
 
-Build locally with `-DSTRATA_VERSION=1.5.0`. Do not dispatch the tag-triggered
-GitHub Actions workflows. Attach SHA-256 checksums next to each uploaded file.
-Windows EXE/ZIP and the Linux AppImage require the CI runners used for 1.4.13
-and are omitted until those runners are available again.
+Built on tag by `release-strata.yml`, `build-macos-qt6.yml`, `windows-qt6.yml`,
+`build-appimage.yml` and `sign-release-assets.yml`. Expected assets match 1.4.13:
+installer EXE and portable ZIP, `Strata-Installer.dmg`, `*-x86_64.AppImage`,
+platform receipts, checksums, Sigstore bundles and `windows-verification.json`.
