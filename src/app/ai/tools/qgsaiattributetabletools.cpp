@@ -28,10 +28,12 @@
 #include "qgsfields.h"
 #include "qgsgeometry.h"
 #include "qgspointxy.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsvectorlayer.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -57,6 +59,11 @@ namespace
   {
     static QHash<QString, AttributeTableRollbackEntry> store;
     return store;
+  }
+
+  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
+  {
+    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
   }
 
   QString storeRollback( const AttributeTableRollbackEntry &entry )
@@ -377,10 +384,13 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   request.setFilterExpression( filterExpression );
 
   QList<QgsFeature> matchingFeatures;
+  QElapsedTimer phaseTimer;
+  phaseTimer.start();
   QgsFeatureIterator it = layer->getFeatures( request );
   QgsFeature feature;
   while ( it.nextFeature( feature ) )
     matchingFeatures.push_back( feature );
+  logAiPerf( u"batch_update_attributes"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
   const bool startedEditing = !layer->isEditable();
   if ( startedEditing && !layer->startEditing() )
@@ -388,6 +398,7 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
 
   QHash<QgsFeatureId, QVariant> oldValues;
   layer->beginEditCommand( u"AI batch attribute update"_s );
+  phaseTimer.restart();
   for ( const QgsFeature &matchingFeature : std::as_const( matchingFeatures ) )
   {
     oldValues.insert( matchingFeature.id(), matchingFeature.attribute( fieldIndex ) );
@@ -400,9 +411,12 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
     }
   }
   layer->endEditCommand();
+  logAiPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
 
+  phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
     return QgsAiToolResult::error( u"Could not commit batch update: %1"_s.arg( layer->commitErrors().join( "; "_L1 ) ) );
+  logAiPerf( u"batch_update_attributes"_s, u"save"_s, phaseTimer.elapsed() );
 
   AttributeTableRollbackEntry rollback;
   rollback.layerId = layer->id();
@@ -480,12 +494,17 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
 
   QgsFeatureIds ids;
   QgsFeature feature;
+  QElapsedTimer phaseTimer;
+  phaseTimer.start();
   QgsFeatureIterator it = layer->getFeatures( request );
   while ( it.nextFeature( feature ) )
     ids.insert( feature.id() );
+  logAiPerf( u"select_features"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
   const int beforeSelectedCount = layer->selectedFeatureCount();
+  phaseTimer.restart();
   layer->selectByIds( ids, behavior, true );
+  logAiPerf( u"select_features"_s, u"apply"_s, phaseTimer.elapsed() );
 
   QJsonObject diff;
   diff.insert( u"summary"_s, u"Updated vector layer selection."_s );

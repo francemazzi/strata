@@ -46,6 +46,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
@@ -3187,7 +3188,15 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     }
     else
     {
+      QElapsedTimer toolTimer;
+      toolTimer.start();
       result = mToolRegistry->execute( call.name, call.args );
+      QgsMessageLog::logMessage(
+        u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ),
+        u"AI"_s,
+        Qgis::MessageLevel::Info,
+        false
+      );
     }
     QVariantMap memory;
     memory.insert( u"tool_name"_s, call.name );

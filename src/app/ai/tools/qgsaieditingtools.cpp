@@ -25,9 +25,11 @@
 #include "qgsfields.h"
 #include "qgsgeometry.h"
 #include "qgspoint.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
 #include "qgsvectorlayer.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -65,6 +67,11 @@ namespace
   {
     static QHash<QString, EditingRollbackEntry> store;
     return store;
+  }
+
+  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
+  {
+    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
   }
 
   QString storeEditingRollback( const EditingRollbackEntry &entry )
@@ -825,6 +832,8 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   };
   QList<PendingValue> pendingValues;
 
+  QElapsedTimer phaseTimer;
+  phaseTimer.start();
   QgsFeatureIterator it = layer->getFeatures( request );
   QgsFeature feature;
   while ( it.nextFeature( feature ) )
@@ -849,6 +858,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     pending.newValue = value;
     pendingValues.push_back( pending );
   }
+  logAiPerf( u"calculate_field"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
   const bool startedEditing = !layer->isEditable();
   if ( startedEditing && !layer->startEditing() )
@@ -878,6 +888,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   }
 
   QHash<QgsFeatureId, QVariant> oldFieldValues;
+  phaseTimer.restart();
   for ( const PendingValue &pending : std::as_const( pendingValues ) )
   {
     if ( !layer->changeAttributeValue( pending.featureId, targetFieldIndex, pending.newValue, pending.oldValue, true ) )
@@ -890,9 +901,12 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     oldFieldValues.insert( pending.featureId, pending.oldValue );
   }
   layer->endEditCommand();
+  logAiPerf( u"calculate_field"_s, u"apply"_s, phaseTimer.elapsed() );
 
+  phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
     return QgsAiToolResult::error( u"Could not commit field calculation: %1"_s.arg( layer->commitErrors().join( "; "_L1 ) ) );
+  logAiPerf( u"calculate_field"_s, u"save"_s, phaseTimer.elapsed() );
 
   EditingRollbackEntry rollback;
   rollback.type = EditingRollbackType::RestoreFieldCalculation;

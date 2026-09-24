@@ -76,11 +76,11 @@
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerlabeling.h"
-#include "qgswkbtypes.h"
 
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -323,6 +323,11 @@ namespace
     e.insert( u"xmax"_s, extent.xMaximum() );
     e.insert( u"ymax"_s, extent.yMaximum() );
     return e;
+  }
+
+  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
+  {
+    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
   }
 
   QJsonObject layerQualityChecks( QgsMapLayer *layer, QgsProject *project )
@@ -1068,13 +1073,18 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   QJsonObject output;
   output.insert( u"kind"_s, kind );
 
+  QElapsedTimer phaseTimer;
   if ( kind == "vector"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( path, name, u"ogr"_s );
+    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Vector layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
+    phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), fileMayBeNonSpatialTable( path ) );
+    logAiPerf( u"add_layer_from_file"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
       return QgsAiToolResult::error( u"Refusing to add unusable vector layer '%1': %2 No project layer was added."_s.arg( name, validationError ) );
 
@@ -1084,7 +1094,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   }
   else if ( kind == "raster"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( path, name, u"gdal"_s );
+    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Raster layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
@@ -1098,7 +1110,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Unknown 'kind': %1 (expected 'vector' or 'raster')."_s.arg( kind ) );
   }
 
+  phaseTimer.restart();
   project->addMapLayer( added );
+  logAiPerf( u"add_layer_from_file"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1121,7 +1135,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
+  phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  logAiPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1205,9 +1221,12 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"provider_key"_s, providerKey );
   output.insert( u"layer_type"_s, layerType );
 
+  QElapsedTimer phaseTimer;
   if ( layerType == "raster"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
+    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Service raster layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() ) );
     output.insert( u"width"_s, layer->width() );
@@ -1217,7 +1236,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   }
   else
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( uri, name, providerKey );
+    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
     {
       if ( provider == "wfs"_L1 )
@@ -1231,7 +1252,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     }
 
     const bool allowNonSpatialTable = provider == "postgres"_L1 || provider == "postgis"_L1;
+    phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), allowNonSpatialTable );
+    logAiPerf( u"add_layer_from_service"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
     {
       const QString guidance = provider == "wfs"_L1 ? u" Verify the WFS typename, filters, server capabilities, and response payload."_s : QString();
@@ -1242,7 +1265,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     added = layer.release();
   }
 
+  phaseTimer.restart();
   project->addMapLayer( added );
+  logAiPerf( u"add_layer_from_service"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1265,7 +1290,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
+  phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  logAiPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
