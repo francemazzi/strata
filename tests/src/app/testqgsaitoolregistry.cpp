@@ -143,6 +143,7 @@ class TestQgsAiToolRegistry : public QObject
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
+    void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
@@ -580,6 +581,43 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
   QVERIFY( qmlResult.errorMessage.contains( u"style"_s ) );
   QVERIFY( qmlResult.errorMessage.contains( u"layer.geojson"_s ) );
   QCOMPARE( project.mapLayers().size(), 0 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceResponsive()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+
+  QFile geojson( tempDir.filePath( u"trees.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly | QIODevice::Text ) );
+  QByteArray body = R"({"type":"FeatureCollection","features":[)";
+  for ( int i = 0; i < 2500; ++i )
+  {
+    if ( i > 0 )
+      body += ',';
+    body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":"park"},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
+  }
+  body += "]}";
+  QVERIFY( geojson.write( body ) > 0 );
+  geojson.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "add_layer quality check blocked the interface thread" );
+  QCOMPARE( result.output.toObject().value( u"quality_checks"_s ).toObject().value( u"context_values_valid"_s ).toBool(), true );
+  QCOMPARE( project.mapLayers().size(), 1 );
 }
 
 void TestQgsAiToolRegistry::addLayerFromServiceLoadsXyzAndRollsBack()

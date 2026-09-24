@@ -21,6 +21,7 @@
 #include <optional>
 
 #include "qgsaifilecontextprovider.h"
+#include "qgis.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsapplication.h"
@@ -31,6 +32,7 @@
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
+#include "qgsfeedback.h"
 #include "qgsfields.h"
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
@@ -76,6 +78,7 @@
 #include "qgssymbol.h"
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
+#include "qgsvectorlayerfeatureiterator.h"
 #include "qgsvectorlayerlabeling.h"
 
 #include <QColor>
@@ -331,18 +334,43 @@ namespace
         if ( contextIdx >= 0 )
         {
           contextValuesValid = true;
-          QgsFeatureIterator it = vector->getFeatures();
-          QgsFeature feature;
-          const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
-          while ( it.nextFeature( feature ) )
-          {
-            const QString context = feature.attribute( contextIdx ).toString().trimmed();
-            if ( !context.isEmpty() && !allowed.contains( context ) )
-            {
-              contextValuesValid = false;
-              break;
-            }
-          }
+          QgsFeatureRequest request;
+          request.setSubsetOfAttributes( QList<int> { contextIdx } );
+          request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
+          auto source = std::make_shared<QgsVectorLayerFeatureSource>( vector );
+          auto feedback = std::make_unique<QgsFeedback>();
+          const long long total = std::max( 0LL, vector->featureCount() );
+          bool contextValuesInvalid = false;
+          QElapsedTimer contextTimer;
+          contextTimer.start();
+          qgsAiRunFunction(
+            u"Checking layer context values"_s,
+            feedback.get(),
+            [&]( QgsFeedback *workerFeedback ) {
+              QgsFeatureIterator it = source->getFeatures( request );
+              QgsFeature feature;
+              int n = 0;
+              const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
+              while ( it.nextFeature( feature ) )
+              {
+                if ( workerFeedback->isCanceled() )
+                  return false;
+                const QString context = feature.attribute( contextIdx ).toString().trimmed();
+                if ( !context.isEmpty() && !allowed.contains( context ) )
+                {
+                  contextValuesInvalid = true;
+                  return true;
+                }
+                ++n;
+                if ( total > 0 )
+                  workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+              }
+              return true;
+            },
+            vector->dataProvider() && vector->dataProvider()->transaction()
+          );
+          logAiPerf( u"layer_quality_checks"_s, u"context_scan"_s, contextTimer.elapsed() );
+          contextValuesValid = !contextValuesInvalid;
         }
         checks.insert( u"estimate_fields_present"_s, estimateFieldsPresent );
         checks.insert( u"context_values_valid"_s, contextValuesValid );
