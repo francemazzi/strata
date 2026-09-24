@@ -16,6 +16,7 @@
 #include "qgsailayertools.h"
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -323,11 +324,6 @@ namespace
     return e;
   }
 
-  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
-  {
-    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
-  }
-
   QJsonObject layerQualityChecks( QgsMapLayer *layer, QgsProject *project )
   {
     const bool layerInProject = layer && project && project->mapLayer( layer->id() ) == layer;
@@ -349,44 +345,52 @@ namespace
         bool contextValuesValid = contextIdx < 0;
         if ( contextIdx >= 0 )
         {
-          contextValuesValid = true;
-          QgsFeatureRequest request;
-          request.setSubsetOfAttributes( QList<int> { contextIdx } );
-          request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
-          auto source = std::make_shared<QgsVectorLayerFeatureSource>( vector );
-          auto feedback = std::make_unique<QgsFeedback>();
-          const long long total = std::max( 0LL, vector->featureCount() );
-          bool contextValuesInvalid = false;
+          // Shared with the worker, which may outlive this call if Strata quits mid-run.
+          struct ContextScanJob
+          {
+              std::unique_ptr<QgsVectorLayerFeatureSource> source;
+              QgsFeatureRequest request;
+              int contextIdx = -1;
+              long long total = 0;
+              std::atomic_bool invalid { false };
+          };
+          auto job = std::make_shared<ContextScanJob>();
+          job->source = std::make_unique<QgsVectorLayerFeatureSource>( vector );
+          job->request.setSubsetOfAttributes( QList<int> { contextIdx } );
+          job->request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
+          job->contextIdx = contextIdx;
+          job->total = std::max( 0LL, vector->featureCount() );
+          QgsAiBackgroundRunOptions options;
+          options.forceGuiThread = qgsAiProviderUsesTransaction( vector );
           QElapsedTimer contextTimer;
           contextTimer.start();
           qgsAiRunFunction(
             u"Checking layer context values"_s,
-            feedback.get(),
-            [&]( QgsFeedback *workerFeedback ) {
-              QgsFeatureIterator it = source->getFeatures( request );
+            [job]( QgsFeedback *feedback ) {
+              QgsFeatureIterator it = job->source->getFeatures( job->request );
               QgsFeature feature;
               int n = 0;
               const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
               while ( it.nextFeature( feature ) )
               {
-                if ( workerFeedback->isCanceled() )
+                if ( feedback->isCanceled() )
                   return false;
-                const QString context = feature.attribute( contextIdx ).toString().trimmed();
+                const QString context = feature.attribute( job->contextIdx ).toString().trimmed();
                 if ( !context.isEmpty() && !allowed.contains( context ) )
                 {
-                  contextValuesInvalid = true;
+                  job->invalid = true;
                   return true;
                 }
                 ++n;
-                if ( total > 0 )
-                  workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+                if ( job->total > 0 )
+                  feedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( job->total ) ) );
               }
               return true;
             },
-            vector->dataProvider() && vector->dataProvider()->transaction()
+            options
           );
-          logAiPerf( u"layer_quality_checks"_s, u"context_scan"_s, contextTimer.elapsed() );
-          contextValuesValid = !contextValuesInvalid;
+          qgsAiLogPerf( u"layer_quality_checks"_s, u"context_scan"_s, contextTimer.elapsed() );
+          contextValuesValid = !job->invalid;
         }
         checks.insert( u"estimate_fields_present"_s, estimateFieldsPresent );
         checks.insert( u"context_values_valid"_s, contextValuesValid );
@@ -1101,13 +1105,13 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   {
     phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( path, name, u"ogr"_s );
-    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Vector layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
     phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), fileMayBeNonSpatialTable( path ) );
-    logAiPerf( u"add_layer_from_file"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_file"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
       return QgsAiToolResult::error( u"Refusing to add unusable vector layer '%1': %2 No project layer was added."_s.arg( name, validationError ) );
 
@@ -1119,7 +1123,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   {
     phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( path, name, u"gdal"_s );
-    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Raster layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
@@ -1135,7 +1139,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
 
   phaseTimer.restart();
   project->addMapLayer( added );
-  logAiPerf( u"add_layer_from_file"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"add_layer_from_file"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1160,7 +1164,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
   phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
-  logAiPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1249,7 +1253,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   {
     phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
-    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Service raster layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() ) );
     output.insert( u"width"_s, layer->width() );
@@ -1261,7 +1265,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   {
     phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( uri, name, providerKey );
-    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
     {
       if ( provider == "wfs"_L1 )
@@ -1277,7 +1281,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     const bool allowNonSpatialTable = provider == "postgres"_L1 || provider == "postgis"_L1;
     phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), allowNonSpatialTable );
-    logAiPerf( u"add_layer_from_service"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
+    qgsAiLogPerf( u"add_layer_from_service"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
     {
       const QString guidance = provider == "wfs"_L1 ? u" Verify the WFS typename, filters, server capabilities, and response payload."_s : QString();
@@ -1290,7 +1294,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
 
   phaseTimer.restart();
   project->addMapLayer( added );
-  logAiPerf( u"add_layer_from_service"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"add_layer_from_service"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1315,7 +1319,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
   phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
-  logAiPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1526,16 +1530,19 @@ namespace
   // Same thread split as QgsProcessingAlgRunnerTask (prepare on the GUI thread,
   // runPrepared on the worker, postProcess back on the GUI thread) and keeps the
   // optional algorithm configuration map, which the stock task drops.
-  class AiProcessingRunnerTask : public QgsTask
+  // It shares ownership of the context and feedback so it outlives an abandoned wait.
+  class AiProcessingRunnerTask : public QgsAiBackgroundTask
   {
     public:
-      AiProcessingRunnerTask( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, const QVariantMap &configuration, QgsProcessingContext &context, QgsProcessingFeedback *feedback )
-        : QgsTask( QObject::tr( "Executing “%1”" ).arg( algorithm ? algorithm->displayName() : QString() ), QgsTask::CanCancel )
+      AiProcessingRunnerTask(
+        const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, const QVariantMap &configuration, std::shared_ptr<QgsProcessingContext> context, std::shared_ptr<QgsProcessingFeedback> feedback
+      )
+        : QgsAiBackgroundTask( QObject::tr( "Executing “%1”" ).arg( algorithm ? algorithm->displayName() : QString() ), feedback )
         , mParameters( parameters )
-        , mContext( context )
-        , mFeedback( feedback )
+        , mContext( std::move( context ) )
+        , mProcessingFeedback( std::move( feedback ) )
       {
-        if ( !algorithm || !mFeedback )
+        if ( !algorithm || !mContext || !mProcessingFeedback )
         {
           cancel();
           return;
@@ -1543,13 +1550,13 @@ namespace
         try
         {
           mAlgorithm.reset( algorithm->create( configuration ) );
-          if ( !( mAlgorithm && mAlgorithm->prepare( mParameters, mContext, mFeedback ) ) )
+          if ( !( mAlgorithm && mAlgorithm->prepare( mParameters, *mContext, mProcessingFeedback.get() ) ) )
             cancel();
         }
         catch ( QgsProcessingException &e )
         {
           QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
-          mFeedback->reportError( e.what() );
+          mProcessingFeedback->reportError( e.what() );
           cancel();
         }
       }
@@ -1557,29 +1564,22 @@ namespace
       QVariantMap results() const { return mPublishedResults; }
       bool succeeded() const { return mSucceeded; }
 
-      void cancel() override
-      {
-        if ( mFeedback )
-          mFeedback->cancel();
-        QgsTask::cancel();
-      }
-
     protected:
       bool run() override
       {
         if ( isCanceled() || !mAlgorithm )
           return false;
 
-        connect( mFeedback, &QgsFeedback::progressChanged, this, &AiProcessingRunnerTask::setProgress );
+        connect( mProcessingFeedback.get(), &QgsFeedback::progressChanged, this, &AiProcessingRunnerTask::setProgress );
         try
         {
-          mRunResults = mAlgorithm->runPrepared( mParameters, mContext, mFeedback );
-          return !mFeedback->isCanceled();
+          mRunResults = mAlgorithm->runPrepared( mParameters, *mContext, mProcessingFeedback.get() );
+          return !mProcessingFeedback->isCanceled();
         }
         catch ( QgsProcessingException &e )
         {
           QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
-          mFeedback->reportError( e.what() );
+          mProcessingFeedback->reportError( e.what() );
           return false;
         }
       }
@@ -1588,8 +1588,8 @@ namespace
       {
         QVariantMap postProcessed;
         if ( mAlgorithm )
-          postProcessed = mAlgorithm->postProcess( mContext, mFeedback, result );
-        mSucceeded = result && mFeedback && !mFeedback->isCanceled();
+          postProcessed = mAlgorithm->postProcess( *mContext, mProcessingFeedback.get(), result );
+        mSucceeded = result && !mProcessingFeedback->isCanceled();
         mPublishedResults = !postProcessed.isEmpty() ? postProcessed : mRunResults;
       }
 
@@ -1597,8 +1597,8 @@ namespace
       QVariantMap mParameters;
       QVariantMap mRunResults;
       QVariantMap mPublishedResults;
-      QgsProcessingContext &mContext;
-      QgsProcessingFeedback *mFeedback = nullptr;
+      std::shared_ptr<QgsProcessingContext> mContext;
+      std::shared_ptr<QgsProcessingFeedback> mProcessingFeedback;
       std::unique_ptr<QgsProcessingAlgorithm> mAlgorithm;
       bool mSucceeded = false;
   };
@@ -1633,85 +1633,77 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
     return QgsAiToolResult::error( u"Argument 'parameters' must be an object. Call with dry_run=true to inspect required parameters."_s );
 
   QgsProject *project = mProject ? mProject : QgsProject::instance();
-  QgsProcessingContext context;
+  // Shared with the task: it may outlive this call if Strata quits mid-run.
+  auto context = std::make_shared<QgsProcessingContext>();
   if ( project )
-    context.setProject( project );
+    context->setProject( project );
 
   QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
   bindProcessingDestinationsToProject( algorithm, parameters, project );
   const QVariantMap configuration = args.value( u"configuration"_s ).isObject() ? jsonObjectToVariantMap( args.value( u"configuration"_s ).toObject() ) : QVariantMap();
 
-  auto feedback = std::make_unique<QgsProcessingFeedback>();
-  context.setFeedback( feedback.get() );
+  auto feedback = std::make_shared<QgsProcessingFeedback>();
+  context->setFeedback( feedback.get() );
 
   QString checkMessage;
-  if ( !algorithm->checkParameterValues( parameters, context, &checkMessage ) )
+  if ( !algorithm->checkParameterValues( parameters, *context, &checkMessage ) )
     return QgsAiToolResult::error( checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage );
 
   if ( !QgsApplication::taskManager() )
     return QgsAiToolResult::error( u"Processing task manager is not available."_s );
 
+  const auto failedResult = [&feedback]() {
+    const QString log = feedback->textLog().trimmed();
+    return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
+  };
+
+  QVariantMap results;
   if ( algorithm->flags() & Qgis::ProcessingAlgorithmFlag::NoThreading )
   {
-    QgsAiActiveFeedbackScope activeFeedback( feedback.get() );
+    // Like the Toolbox: algorithms that touch the GUI or the project run on this thread.
+    const QgsAiActiveFeedbackScope activeFeedback( feedback.get(), algorithm->displayName() );
     bool ok = false;
-    QVariantMap results;
     try
     {
-      results = algorithm->run( parameters, context, feedback.get(), &ok, configuration );
+      results = algorithm->run( parameters, *context, feedback.get(), &ok, configuration );
     }
     catch ( QgsProcessingException &e )
     {
       QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
       return QgsAiToolResult::error( e.what() );
     }
-    if ( feedback->isCanceled() )
+    if ( activeFeedback.canceledByUser() )
       return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
     if ( !ok )
-    {
-      const QString log = feedback->textLog().trimmed();
-      return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
-    }
-
-    QJsonObject output = processingAlgorithmMetadataJson( algorithm );
-    const QJsonArray loadedLayers = loadProcessingResultsIntoProject( context, project );
-    QJsonObject diff;
-    diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
-    diff.insert( u"algorithm_id"_s, algorithm->id() );
-    diff.insert( u"rollback_supported"_s, false );
-    output.insert( u"dry_run"_s, false );
-    output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
-    output.insert( u"loaded_layers"_s, loadedLayers );
-    output.insert( u"log"_s, feedback->textLog() );
-    output.insert( u"diff"_s, diff );
-    return QgsAiToolResult::ok( output );
+      return failedResult();
   }
-
-  // prepare() runs on this thread; runPrepared() runs on the task thread.
-  // The nested event loop keeps the window painting and lets Stop cancel the feedback.
-  auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback.get() );
-  bool successful = false;
-  QVariantMap taskResults;
-  const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, feedback.get(), algorithm->displayName(), [task, &successful, &taskResults]() {
-    successful = task->succeeded();
-    taskResults = task->results();
-  } );
-  if ( wait.canceled || feedback->isCanceled() )
-    return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
-  if ( !successful )
+  else
   {
-    const QString log = feedback->textLog().trimmed();
-    return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
+    // prepare() runs on this thread; runPrepared() runs on the task thread.
+    // The nested event loop keeps the window painting and lets Stop cancel the feedback.
+    auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback );
+    bool successful = false;
+    const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, algorithm->displayName(), [task, &successful, &results]() {
+      successful = task->succeeded();
+      results = task->results();
+    } );
+    if ( wait.abandoned )
+      return QgsAiToolResult::canceledResult( wait.error );
+    // A failed prepare() also cancels the feedback, but only a user cancel stops the turn.
+    if ( wait.canceled )
+      return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
+    if ( !successful )
+      return failedResult();
   }
 
   QJsonObject output = processingAlgorithmMetadataJson( algorithm );
-  const QJsonArray loadedLayers = loadProcessingResultsIntoProject( context, project );
+  const QJsonArray loadedLayers = loadProcessingResultsIntoProject( *context, project );
   QJsonObject diff;
   diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
   diff.insert( u"algorithm_id"_s, algorithm->id() );
   diff.insert( u"rollback_supported"_s, false );
   output.insert( u"dry_run"_s, false );
-  output.insert( u"result"_s, QJsonObject::fromVariantMap( taskResults ) );
+  output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
   output.insert( u"loaded_layers"_s, loadedLayers );
   output.insert( u"log"_s, feedback->textLog() );
   output.insert( u"diff"_s, diff );

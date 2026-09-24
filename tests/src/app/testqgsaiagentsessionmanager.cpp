@@ -15,8 +15,8 @@
 #include "ai/qgsaireviewpatchengine.h"
 #include "ai/qgsaiworkspacetrust.h"
 #include "ai/tools/qgsaiechotool.h"
-#include "ai/tools/qgsaitoolregistry.h"
 #include "ai/tools/qgsaitaskrunner.h"
+#include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgsfeedback.h"
@@ -178,17 +178,11 @@ namespace
       {
         if ( mManager && *mManager )
           QTimer::singleShot( 0, *mManager, &QgsAiAgentSessionManager::cancelActiveRequest );
-        auto feedback = std::make_unique<QgsFeedback>();
-        auto *task = new QgsAiFunctionTask(
-          u"slow"_s,
-          []( QgsFeedback *workerFeedback ) {
-            while ( !workerFeedback->isCanceled() )
-              QThread::msleep( 5 );
-            return false;
-          },
-          feedback.get()
-        );
-        const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, feedback.get(), u"slow"_s );
+        const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"slow"_s, []( QgsFeedback *workerFeedback ) {
+          while ( !workerFeedback->isCanceled() )
+            QThread::msleep( 5 );
+          return false;
+        } );
         if ( wait.canceled )
           return QgsAiToolResult::canceledResult( u"slow tool canceled"_s );
         return QgsAiToolResult::ok( QJsonObject() );

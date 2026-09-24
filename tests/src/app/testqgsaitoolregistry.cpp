@@ -20,6 +20,7 @@
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgsexception.h"
 #include "qgsfeature.h"
 #include "qgsgeometry.h"
 #include "qgsgraduatedsymbolrenderer.h"
@@ -34,6 +35,8 @@
 #include "qgsnativealgorithms.h"
 #include "qgspallabeling.h"
 #include "qgsprintlayout.h"
+#include "qgsprocessingalgorithm.h"
+#include "qgsprocessingprovider.h"
 #include "qgsprocessingregistry.h"
 #include "qgsproject.h"
 #include "qgsrectangle.h"
@@ -63,6 +66,30 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  //! Fails in prepareAlgorithm(), which the AI runner's task calls in its constructor.
+  class FailingPrepareAlgorithm : public QgsProcessingAlgorithm
+  {
+    public:
+      QString name() const override { return u"failingprepare"_s; }
+      QString displayName() const override { return u"Failing prepare"_s; }
+      void initAlgorithm( const QVariantMap & = QVariantMap() ) override {}
+      QgsProcessingAlgorithm *createInstance() const override { return new FailingPrepareAlgorithm(); }
+
+    protected:
+      bool prepareAlgorithm( const QVariantMap &, QgsProcessingContext &, QgsProcessingFeedback * ) override { throw QgsProcessingException( u"prepare boom"_s ); }
+      QVariantMap processAlgorithm( const QVariantMap &, QgsProcessingContext &, QgsProcessingFeedback * ) override { return QVariantMap(); }
+  };
+
+  class AiTestProcessingProvider : public QgsProcessingProvider
+  {
+    public:
+      QString id() const override { return u"aitest"_s; }
+      QString name() const override { return u"AI test"_s; }
+
+    protected:
+      void loadAlgorithms() override { addAlgorithm( new FailingPrepareAlgorithm() ); }
+  };
+
   class FakeEchoTool : public QgsAiTool
   {
     public:
@@ -151,6 +178,7 @@ class TestQgsAiToolRegistry : public QObject
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
     void processingToolRunsNoThreadingOnMainThread();
+    void processingPrepareFailureIsAnErrorNotACancel();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -1073,6 +1101,23 @@ void TestQgsAiToolRegistry::processingToolRunsNoThreadingOnMainThread()
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
   QCOMPARE( points->selectedFeatureCount(), 1 );
+}
+
+void TestQgsAiToolRegistry::processingPrepareFailureIsAnErrorNotACancel()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"aitest"_s ) )
+    QVERIFY( QgsApplication::processingRegistry()->addProvider( new AiTestProcessingProvider() ) );
+
+  QgsProject project;
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"aitest:failingprepare"_s );
+  args.insert( u"parameters"_s, QJsonObject() );
+  const QgsAiToolResult result = tool.execute( args );
+  // The model must see the real error and be able to retry: this is not a user Stop.
+  QVERIFY( !result.success );
+  QVERIFY( !result.canceled );
+  QVERIFY2( result.errorMessage.contains( u"prepare boom"_s ), qPrintable( result.errorMessage ) );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()
