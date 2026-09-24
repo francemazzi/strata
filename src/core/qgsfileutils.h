@@ -161,7 +161,7 @@ class CORE_EXPORT QgsFileUtils
      *
      * A sidecar is a file that ``sidecarFilesForPath()`` lists for a sibling dataset with the
      * same basename (for instance ``layer.prj`` next to ``layer.shp``). Extensions that are
-     * never a dataset (``.prj``, ``.cpg``, ``.shx``, …) are always treated as sidecars.
+     * never a dataset (``.prj``, ``.cpg``, ``.shx``, ``.qmd``, ``.qml``, …) are always treated as sidecars.
      * A standalone ``.dbf`` with no sibling shapefile is not treated as a sidecar, so it can still be opened as a table.
      *
      * \since QGIS 4.3

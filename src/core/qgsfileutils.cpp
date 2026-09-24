@@ -491,6 +491,8 @@ bool QgsFileUtils::pathIsSidecarFile( const QString &path )
     u"qpj"_s,
     u"idm"_s,
     u"ind"_s,
+    u"qmd"_s,
+    u"qml"_s,
   };
   if ( neverDatasetSuffixes.contains( suffix ) )
     return true;

@@ -26,6 +26,7 @@
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
+#include "qgsfileutils.h"
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
@@ -188,6 +189,53 @@ namespace
     if ( rasterExts().contains( ext ) )
       return u"raster"_s;
     return QString();
+  }
+
+  QString siblingDatasetPath( const QString &sidecarPath )
+  {
+    const QFileInfo info( sidecarPath );
+    const QDir dir = info.absoluteDir();
+    QStringList bases { info.completeBaseName() };
+    if ( info.baseName() != info.completeBaseName() )
+      bases << info.baseName();
+
+    QStringList suffixes;
+    suffixes.reserve( vectorExts().size() + rasterExts().size() );
+    for ( const QString &ext : vectorExts() )
+      suffixes << ext;
+    for ( const QString &ext : rasterExts() )
+      suffixes << ext;
+    suffixes.removeDuplicates();
+    suffixes.sort();
+
+    for ( const QString &base : std::as_const( bases ) )
+    {
+      for ( const QString &suffix : std::as_const( suffixes ) )
+      {
+        const QString candidate = dir.filePath( base + '.' + suffix );
+        if ( QFileInfo::exists( candidate ) )
+          return candidate;
+      }
+    }
+    return QString();
+  }
+
+  QString sidecarRefusalMessage( const QString &path )
+  {
+    const QString suffix = QFileInfo( path ).suffix().toLower();
+    QString message;
+    if ( suffix == "qml"_L1 )
+    {
+      message = u"Refusing to open style file '%1' as a map layer. A .qml file is a QGIS style, not a dataset."_s.arg( path );
+    }
+    else
+    {
+      message = u"Refusing to open sidecar file '%1' as a map layer. Use the dataset file instead of metadata or style sidecars (.qmd, .qml, .prj, .cpg)."_s.arg( path );
+    }
+    const QString sibling = siblingDatasetPath( path );
+    if ( !sibling.isEmpty() )
+      message += u" Open '%1' instead."_s.arg( QFileInfo( sibling ).fileName() );
+    return message;
   }
 
   // Resolve a user-supplied layer path inside the AI workspace only.
@@ -1002,6 +1050,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   const QString path = resolvePath( mContextProvider, rawPath );
   if ( path.isEmpty() )
     return QgsAiToolResult::error( u"Cannot resolve path to an existing file: %1"_s.arg( rawPath ) );
+
+  if ( QgsFileUtils::pathIsSidecarFile( path ) )
+    return QgsAiToolResult::error( sidecarRefusalMessage( path ) );
 
   const int beforeLayerCount = project->mapLayers().size();
 

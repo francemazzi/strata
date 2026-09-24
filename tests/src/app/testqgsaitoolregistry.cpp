@@ -141,6 +141,7 @@ class TestQgsAiToolRegistry : public QObject
     void setCanvasExtentSetsZoomsAndRollsBack();
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
+    void addLayerFromFileRejectsSidecarFiles();
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
@@ -528,6 +529,45 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsUnusableVectors()
   QCOMPARE( output.value( u"spatial"_s ).toBool(), false );
   QVERIFY( output.value( u"extent"_s ).isNull() );
   QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+
+  QFile geojson( tempDir.filePath( u"layer.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly ) );
+  QVERIFY( geojson.write( R"({"type":"FeatureCollection","features":[]})" ) > 0 );
+  geojson.close();
+  QFile qmd( tempDir.filePath( u"layer.qmd"_s ) );
+  QVERIFY( qmd.open( QIODevice::WriteOnly ) );
+  QVERIFY( qmd.write( "<qgis/>" ) > 0 );
+  qmd.close();
+  QFile qml( tempDir.filePath( u"layer.qml"_s ) );
+  QVERIFY( qml.open( QIODevice::WriteOnly ) );
+  QVERIFY( qml.write( "<qgis/>" ) > 0 );
+  qml.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+
+  QJsonObject qmdArgs;
+  qmdArgs.insert( u"path"_s, u"layer.qmd"_s );
+  const QgsAiToolResult qmdResult = tool.execute( qmdArgs );
+  QVERIFY( !qmdResult.success );
+  QVERIFY( qmdResult.errorMessage.contains( u"sidecar"_s ) );
+  QVERIFY( qmdResult.errorMessage.contains( u"layer.geojson"_s ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
+
+  QJsonObject qmlArgs;
+  qmlArgs.insert( u"path"_s, u"layer.qml"_s );
+  const QgsAiToolResult qmlResult = tool.execute( qmlArgs );
+  QVERIFY( !qmlResult.success );
+  QVERIFY( qmlResult.errorMessage.contains( u"style"_s ) );
+  QVERIFY( qmlResult.errorMessage.contains( u"layer.geojson"_s ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
 }
 
 void TestQgsAiToolRegistry::addLayerFromServiceLoadsXyzAndRollsBack()

@@ -31,6 +31,7 @@ class TestQgsAppLayerHandling : public QObject
     void guardrailAppliesToAskExcludingRasterBands();
     void otherPromptModesUnaffected();
     void pathIsSidecarFileDetectsShapefileParts();
+    void pathIsSidecarFileDetectsMetadataAndStyleSidecars();
     void openLayerSkipsShapefileSidecars();
 
   private:
@@ -144,6 +145,42 @@ void TestQgsAppLayerHandling::pathIsSidecarFileDetectsShapefileParts()
   QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.cpg"_s ) ) );
   QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.prj"_s ) ) );
   QVERIFY( !QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.shp"_s ) ) );
+}
+
+void TestQgsAppLayerHandling::pathIsSidecarFileDetectsMetadataAndStyleSidecars()
+{
+  const QString dataDir = QStringLiteral( TEST_DATA_DIR ) + '/';
+  QTemporaryDir tmp;
+  QVERIFY( tmp.isValid() );
+  QVERIFY( QFile::copy( dataDir + u"points.shp"_s, tmp.filePath( u"layer.shp"_s ) ) );
+  QVERIFY( QFile::copy( dataDir + u"points.shx"_s, tmp.filePath( u"layer.shx"_s ) ) );
+  QVERIFY( QFile::copy( dataDir + u"points.dbf"_s, tmp.filePath( u"layer.dbf"_s ) ) );
+
+  QFile qmd( tmp.filePath( u"layer.qmd"_s ) );
+  QVERIFY( qmd.open( QIODevice::WriteOnly ) );
+  QCOMPARE( qmd.write( "<qgis/>" ), 7 );
+  qmd.close();
+  QFile qml( tmp.filePath( u"layer.qml"_s ) );
+  QVERIFY( qml.open( QIODevice::WriteOnly ) );
+  QCOMPARE( qml.write( "<qgis/>" ), 7 );
+  qml.close();
+
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.qmd"_s ) ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.qml"_s ) ) );
+  QVERIFY( !QgsFileUtils::pathIsSidecarFile( tmp.filePath( u"layer.shp"_s ) ) );
+
+  QTemporaryDir lone;
+  QVERIFY( lone.isValid() );
+  QFile loneQmd( lone.filePath( u"only.qmd"_s ) );
+  QVERIFY( loneQmd.open( QIODevice::WriteOnly ) );
+  QCOMPARE( loneQmd.write( "<qgis/>" ), 7 );
+  loneQmd.close();
+  QFile loneQml( lone.filePath( u"only.qml"_s ) );
+  QVERIFY( loneQml.open( QIODevice::WriteOnly ) );
+  QCOMPARE( loneQml.write( "<qgis/>" ), 7 );
+  loneQml.close();
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( lone.filePath( u"only.qmd"_s ) ) );
+  QVERIFY( QgsFileUtils::pathIsSidecarFile( lone.filePath( u"only.qml"_s ) ) );
 }
 
 void TestQgsAppLayerHandling::openLayerSkipsShapefileSidecars()
