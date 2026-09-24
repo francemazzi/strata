@@ -21,6 +21,7 @@
 
 #include <functional>
 
+#include <QMetaObject>
 #include <QString>
 
 class QgsFeedback;
@@ -52,15 +53,16 @@ class APP_EXPORT QgsAiFunctionTask : public QgsTask
 class APP_EXPORT QgsAiActiveFeedbackScope
 {
   public:
-    explicit QgsAiActiveFeedbackScope( QgsFeedback *feedback );
+    explicit QgsAiActiveFeedbackScope( QgsFeedback *feedback, const QString &label = QString() );
     ~QgsAiActiveFeedbackScope();
 
     QgsAiActiveFeedbackScope( const QgsAiActiveFeedbackScope & ) = delete;
     QgsAiActiveFeedbackScope &operator=( const QgsAiActiveFeedbackScope & ) = delete;
 
   private:
-    QgsFeedback *mFeedback = nullptr;
     QgsFeedback *mPreviousFeedback = nullptr;
+    QString mPreviousLabel;
+    QMetaObject::Connection mProgressConnection;
 };
 
 struct APP_EXPORT QgsAiTaskWaitResult

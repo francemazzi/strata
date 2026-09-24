@@ -57,18 +57,26 @@ class APP_EXPORT QgsAiRunPythonTool : public QgsAiTool
     bool isAvailable() const override;
     QString availabilityReason() const override;
     void setRememberApprovalsForSession( bool enabled );
+    void setTimeoutSeconds( int seconds );
+    int timeoutSeconds() const { return mTimeoutSeconds; }
 
     /**
      * Classifies captured Python output using conservative, explicit failure
      * signals. This deliberately does not treat arbitrary occurrences of the
      * word "error" as failures.
      */
-    static QJsonObject diagnoseCapturedOutput( const QString &stdoutText, const QString &stderrText, const QString &tracebackText, const QString &exceptionType = QString(), const QString &exceptionMessage = QString() );
+    static QJsonObject diagnoseCapturedOutput(
+      const QString &stdoutText, const QString &stderrText, const QString &tracebackText, const QString &exceptionType = QString(), const QString &exceptionMessage = QString()
+    );
+
+    //! Advisory hint for GIS feature loops. Does not change approval or diagnosis status.
+    static QStringList featureLoopHints( const QString &code );
 
   private:
     QWidget *mDialogParent = nullptr;
     bool mRememberApprovalsForSession = false;
     bool mLowRiskApprovalGrantedForSession = false;
+    int mTimeoutSeconds = 120;
 };
 
 #endif // QGSAIRUNPYTHONTOOL_H

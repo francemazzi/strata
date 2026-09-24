@@ -639,6 +639,7 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
     QCOMPARE( defaults.maxToolIterationsPerTurn, QgsAiAgentBehaviorSettings::DEFAULT_TOOL_CALL_PAUSE_LIMIT );
     QCOMPARE( defaults.maxTotalToolIterationsPerTurn, QgsAiAgentBehaviorSettings::DEFAULT_TOTAL_TOOL_CALL_LIMIT );
     QCOMPARE( defaults.autoContinueToolBlocks, false );
+    QCOMPARE( defaults.runPythonTimeoutSeconds, QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS );
 
     QgsAiAgentBehaviorSettings updated = defaults;
     updated.allowCustomActions = true;
@@ -649,6 +650,7 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
     updated.maxToolIterationsPerTurn = 7;
     updated.maxTotalToolIterationsPerTurn = 42;
     updated.autoContinueToolBlocks = true;
+    updated.runPythonTimeoutSeconds = 45;
     manager.setAgentBehaviorSettings( updated );
 
     const QgsAiAgentBehaviorSettings reread = manager.agentBehaviorSettings();
@@ -661,6 +663,7 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
     QCOMPARE( reread.maxToolIterationsPerTurn, 7 );
     QCOMPARE( reread.maxTotalToolIterationsPerTurn, 42 );
     QCOMPARE( reread.autoContinueToolBlocks, true );
+    QCOMPARE( reread.runPythonTimeoutSeconds, 45 );
   }
 
   QgsAiAgentSessionManager reloaded( nullptr, &contextProvider, &reviewEngine );
@@ -671,6 +674,7 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
   QCOMPARE( restored.maxToolIterationsPerTurn, 7 );
   QCOMPARE( restored.maxTotalToolIterationsPerTurn, 42 );
   QCOMPARE( restored.autoContinueToolBlocks, true );
+  QCOMPARE( restored.runPythonTimeoutSeconds, 45 );
 
   settings.setValue( u"strata/agent/max_tool_iterations_per_turn"_s, 0 );
   QgsAiAgentSessionManager invalidLow( nullptr, &contextProvider, &reviewEngine );
@@ -679,6 +683,14 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
   settings.setValue( u"strata/agent/max_tool_iterations_per_turn"_s, 999 );
   QgsAiAgentSessionManager invalidHigh( nullptr, &contextProvider, &reviewEngine );
   QCOMPARE( invalidHigh.agentBehaviorSettings().maxToolIterationsPerTurn, QgsAiAgentBehaviorSettings::DEFAULT_TOOL_CALL_PAUSE_LIMIT );
+
+  settings.setValue( u"strata/agent/run_python_timeout_seconds"_s, 1 );
+  QgsAiAgentSessionManager invalidTimeoutLow( nullptr, &contextProvider, &reviewEngine );
+  QCOMPARE( invalidTimeoutLow.agentBehaviorSettings().runPythonTimeoutSeconds, QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS );
+
+  settings.setValue( u"strata/agent/run_python_timeout_seconds"_s, 99999 );
+  QgsAiAgentSessionManager invalidTimeoutHigh( nullptr, &contextProvider, &reviewEngine );
+  QCOMPARE( invalidTimeoutHigh.agentBehaviorSettings().runPythonTimeoutSeconds, QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS );
 
   settings.remove( u"strata/agent"_s );
   settings.remove( u"geoai/agent"_s );

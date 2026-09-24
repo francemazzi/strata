@@ -59,6 +59,9 @@ struct APP_EXPORT QgsAiAgentBehaviorSettings
     static constexpr int DEFAULT_TOTAL_TOOL_CALL_LIMIT = 48;
     static constexpr int MIN_TOTAL_TOOL_CALL_LIMIT = 6;
     static constexpr int MAX_TOTAL_TOOL_CALL_LIMIT = 200;
+    static constexpr int MIN_RUN_PYTHON_TIMEOUT_SECONDS = 10;
+    static constexpr int MAX_RUN_PYTHON_TIMEOUT_SECONDS = 3600;
+    static constexpr int DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS = 120;
 
     //! Master toggle. When false the agent must not use any custom tool/action.
     bool allowCustomActions = false;
@@ -82,6 +85,8 @@ struct APP_EXPORT QgsAiAgentBehaviorSettings
     bool autoContinueToolBlocks = false;
     //! When true, one low-risk run_python approval grants subsequent low-risk Python runs for this app session.
     bool rememberPythonApprovalsForSession = false;
+    //! Seconds before run_python is interrupted. Time spent in patched Processing.execute is excluded.
+    int runPythonTimeoutSeconds = DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS;
 };
 
 class APP_EXPORT QgsAiAgentSessionManager : public QObject

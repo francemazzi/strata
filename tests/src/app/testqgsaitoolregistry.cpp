@@ -138,6 +138,7 @@ class TestQgsAiToolRegistry : public QObject
     void captureMapCanvasRequiresConsent();
     void captureMapCanvasCreatesCappedPng();
     void runPythonDiagnosticsAreConservative();
+    void runPythonFeatureLoopHintDoesNotChangeDiagnosis();
     void setCanvasExtentSetsZoomsAndRollsBack();
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
@@ -386,6 +387,16 @@ void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
   diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"{\"success\":false,\"message\":\"No output layer was created\"}"_s, QString(), QString() );
   QCOMPARE( diagnosis.value( u"failure_code"_s ).toString(), u"explicit_failure"_s );
   QCOMPARE( diagnosis.value( u"failure_message"_s ).toString(), u"No output layer was created"_s );
+}
+
+void TestQgsAiToolRegistry::runPythonFeatureLoopHintDoesNotChangeDiagnosis()
+{
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"print('ok')"_s ), QStringList() );
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList { u"slow_feature_loop"_s } );
+
+  QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"ok"_s, QString(), QString() );
+  QCOMPARE( diagnosis.value( u"status"_s ).toString(), u"ok"_s );
+  QVERIFY( !diagnosis.contains( u"hints"_s ) );
 }
 
 void TestQgsAiToolRegistry::setCanvasExtentSetsZoomsAndRollsBack()

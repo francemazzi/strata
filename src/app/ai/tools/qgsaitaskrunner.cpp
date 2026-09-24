@@ -20,6 +20,7 @@
 #include "qgstaskmanager.h"
 
 #include <QEventLoop>
+#include <QObject>
 #include <QPointer>
 
 using namespace Qt::StringLiterals;
@@ -80,16 +81,28 @@ bool QgsAiFunctionTask::run()
   return mWork( mFeedback ) && !isCanceled() && !( mFeedback && mFeedback->isCanceled() );
 }
 
-QgsAiActiveFeedbackScope::QgsAiActiveFeedbackScope( QgsFeedback *feedback )
-  : mFeedback( feedback )
+QgsAiActiveFeedbackScope::QgsAiActiveFeedbackScope( QgsFeedback *feedback, const QString &label )
 {
   mPreviousFeedback = sActiveFeedback;
+  mPreviousLabel = sActiveLabel;
   sActiveFeedback = feedback;
+  if ( !label.isEmpty() )
+    sActiveLabel = label;
+  if ( feedback )
+  {
+    mProgressConnection = QObject::connect( feedback, &QgsFeedback::progressChanged, [label]( double progress ) {
+      if ( sProgressHandler )
+        sProgressHandler( sActiveLabel.isEmpty() ? label : sActiveLabel, progress );
+    } );
+  }
 }
 
 QgsAiActiveFeedbackScope::~QgsAiActiveFeedbackScope()
 {
+  if ( mProgressConnection )
+    QObject::disconnect( mProgressConnection );
   sActiveFeedback = mPreviousFeedback;
+  sActiveLabel = mPreviousLabel;
 }
 
 void qgsAiSetBackgroundToolProgressHandler( const std::function<void( const QString &label, double progress )> &handler )

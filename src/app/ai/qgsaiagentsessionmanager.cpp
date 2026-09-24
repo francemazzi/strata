@@ -224,6 +224,15 @@ namespace
     return parsed;
   }
 
+  int normalizedRunPythonTimeoutSeconds( const QVariant &value )
+  {
+    bool ok = false;
+    const int parsed = value.toInt( &ok );
+    if ( !ok || parsed < QgsAiAgentBehaviorSettings::MIN_RUN_PYTHON_TIMEOUT_SECONDS || parsed > QgsAiAgentBehaviorSettings::MAX_RUN_PYTHON_TIMEOUT_SECONDS )
+      return QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS;
+    return parsed;
+  }
+
   QString toolCallFingerprint( const QgsAiToolCall &call )
   {
     const QByteArray payload = call.name.toUtf8() + '\0' + QJsonDocument( call.args ).toJson( QJsonDocument::Compact );
@@ -593,7 +602,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       Q_UNUSED( retryCount )
       Q_UNUSED( retriable )
 
-      if ( success )
+      const bool emptyHttpCompletion = ( httpStatus == 0 || ( httpStatus >= 200 && httpStatus < 300 ) ) && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
+      if ( success || emptyHttpCompletion )
       {
         QString finalText = !responseText.isEmpty() ? responseText : mStreamedText;
         if ( finalText.trimmed().isEmpty() && mLastToolRoundHadError && !mEmptyErrorRecoveryAttempted )
@@ -1746,9 +1756,10 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
   mPendingProviders = providerFallbackOrder();
   if ( mPendingProviders.isEmpty() || !mRouter )
   {
-    const QString noProviderMessage = mRouter && mRouter->requiresProviderSelection()
-                                        ? tr( "Choose a provider before sending another message. Open settings to sign in to Strata Cloud, connect Claude, or configure an API key, then choose Use in this chat." )
-                                        : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
+    const QString noProviderMessage
+      = mRouter && mRouter->requiresProviderSelection()
+          ? tr( "Choose a provider before sending another message. Open settings to sign in to Strata Cloud, connect Claude, or configure an API key, then choose Use in this chat." )
+          : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
     const QgsAiChatMessage assistant = buildAssistantMessage( noProviderMessage );
     recordHistoryMessage( assistant );
     emit requestStateChanged( u"failed"_s, noProviderMessage );
@@ -1784,6 +1795,7 @@ void QgsAiAgentSessionManager::setAgentBehaviorSettings( const QgsAiAgentBehavio
   mBehaviorSettings.maxToolIterationsPerTurn = normalizedToolCallPauseLimit( mBehaviorSettings.maxToolIterationsPerTurn );
   mBehaviorSettings.maxTotalToolIterationsPerTurn = normalizedTotalToolCallLimit( mBehaviorSettings.maxTotalToolIterationsPerTurn );
   mBehaviorSettings.maxTotalToolIterationsPerTurn = std::max( mBehaviorSettings.maxTotalToolIterationsPerTurn, mBehaviorSettings.maxToolIterationsPerTurn );
+  mBehaviorSettings.runPythonTimeoutSeconds = normalizedRunPythonTimeoutSeconds( mBehaviorSettings.runPythonTimeoutSeconds );
 
   syncRunPythonApprovalSettings();
   persistBehaviorSettings();
@@ -1889,6 +1901,7 @@ void QgsAiAgentSessionManager::syncRunPythonApprovalSettings()
     return;
 
   runPythonTool->setRememberApprovalsForSession( mBehaviorSettings.rememberPythonApprovalsForSession );
+  runPythonTool->setTimeoutSeconds( mBehaviorSettings.runPythonTimeoutSeconds );
 }
 
 void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
@@ -1912,6 +1925,9 @@ void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
   mBehaviorSettings.maxTotalToolIterationsPerTurn = std::max( mBehaviorSettings.maxTotalToolIterationsPerTurn, mBehaviorSettings.maxToolIterationsPerTurn );
   mBehaviorSettings.autoContinueToolBlocks = settings.value( u"strata/agent/auto_continue_tool_blocks"_s, false ).toBool();
   mBehaviorSettings.rememberPythonApprovalsForSession = settings.value( u"strata/agent/remember_python_approvals_for_session"_s, false ).toBool();
+  mBehaviorSettings.runPythonTimeoutSeconds = normalizedRunPythonTimeoutSeconds(
+    settings.value( u"strata/agent/run_python_timeout_seconds"_s, QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS )
+  );
 }
 
 void QgsAiAgentSessionManager::persistBehaviorSettings() const
@@ -1928,6 +1944,7 @@ void QgsAiAgentSessionManager::persistBehaviorSettings() const
   settings.setValue( u"strata/agent/max_total_tool_iterations_per_turn"_s, mBehaviorSettings.maxTotalToolIterationsPerTurn );
   settings.setValue( u"strata/agent/auto_continue_tool_blocks"_s, mBehaviorSettings.autoContinueToolBlocks );
   settings.setValue( u"strata/agent/remember_python_approvals_for_session"_s, mBehaviorSettings.rememberPythonApprovalsForSession );
+  settings.setValue( u"strata/agent/run_python_timeout_seconds"_s, mBehaviorSettings.runPythonTimeoutSeconds );
   settings.remove( u"geoai/agent"_s );
   settings.remove( u"qgis_ai/agent"_s );
 }
@@ -3138,9 +3155,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     const QString fingerprint = toolCallFingerprint( call );
     const int equivalentCount = mToolCallFingerprints.value( fingerprint ) + 1;
     const int toolCount = mToolCallCounts.value( call.name ) + 1;
-    if ( equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
-         || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
-         || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN ) )
+    if (
+      equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
+      || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
+      || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN )
+    )
     {
       const QString message = equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
                                 ? tr( "Stopped a repeated tool loop: '%1' was requested with equivalent arguments more than %2 times. Use a materially different strategy or ask the user how to proceed." )
@@ -3203,12 +3222,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       QElapsedTimer toolTimer;
       toolTimer.start();
       result = mToolRegistry->execute( call.name, call.args );
-      QgsMessageLog::logMessage(
-        u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ),
-        u"AI"_s,
-        Qgis::MessageLevel::Info,
-        false
-      );
+      QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
     }
 
     if ( generation != mSessionGeneration )
