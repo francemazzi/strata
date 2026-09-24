@@ -19,7 +19,9 @@
 
 #include <QWidget>
 
+class QgsAiClaudeOAuthClient;
 class QgsAiModelRouter;
+class QLabel;
 class QLineEdit;
 class QComboBox;
 class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
@@ -34,6 +36,11 @@ class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
     void useRequested();
 
   private:
+    void refreshStatus();
+
+    QgsAiModelRouter *mRouter = nullptr;
+    QgsAiClaudeOAuthClient *mLogin = nullptr;
+    QLabel *mStatus = nullptr;
     QLineEdit *mApiKeyEdit = nullptr;
     QComboBox *mModelCombo = nullptr;
 };

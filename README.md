@@ -112,7 +112,7 @@ Provider credential options:
 - **OpenRouter**: [openrouter.ai/keys](https://openrouter.ai/keys)
 - **Anthropic**: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Codex/ChatGPT**: in the settings dialog, choose “Get Codex device code”, open the page shown, and complete sign-in. The Codex model uses `gpt-5.5`.
-- **Claude subscription**: temporarily suspended as of Strata 1.4.13. Existing subscription tokens are no longer used. Choose **Sign in to Strata Cloud** or configure an Anthropic API key under advanced provider settings; API usage is billed separately from a Claude subscription. Strata does not modify your Claude Code installation or sign it out.
+- **Claude subscription**: in the settings dialog, under **Claude** choose **Connect Claude**. Strata opens the browser, receives the approval on this computer, and stores the token in the system keychain. Strata does not launch Claude Code or read its credentials. An Anthropic API key remains available under advanced provider settings; API usage is billed separately from a Claude subscription.
 
 New provider credentials are stored in the operating system keychain. If secure storage is unavailable, choose **Retry** or **Use only for this session**; session credentials are forgotten when Strata closes. Existing credentials are migrated only after the keychain copy has been written and read back successfully. A locked legacy vault is preserved and shown as **Protection incomplete** until migration succeeds. Chat and index encryption keys remain in the existing QGIS vault.
 

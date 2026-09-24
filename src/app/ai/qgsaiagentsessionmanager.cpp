@@ -1740,7 +1740,7 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
   if ( mPendingProviders.isEmpty() || !mRouter )
   {
     const QString noProviderMessage = mRouter && mRouter->requiresProviderSelection()
-                                        ? tr( "Claude subscription connections are temporarily suspended. Open settings to sign in to Strata Cloud or configure an API key, then choose Use in this chat." )
+                                        ? tr( "Choose a provider before sending another message. Open settings to sign in to Strata Cloud, connect Claude, or configure an API key, then choose Use in this chat." )
                                         : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
     const QgsAiChatMessage assistant = buildAssistantMessage( noProviderMessage );
     recordHistoryMessage( assistant );

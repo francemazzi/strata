@@ -30,19 +30,13 @@ using namespace Qt::StringLiterals;
 void QgsAiClaudeMigration::run()
 {
   QgsSettings settings;
-  if ( settings.value( u"ai/provider/claude/credentialMode"_s ).toString() == "oauth"_L1 )
-  {
-    if ( settings.value( u"ai/activeProvider"_s ).toString() == "Claude"_L1 )
-      settings.setValue( u"ai/security/providerSelectionRequired"_s, true );
-    settings.setValue( u"ai/provider/claude/credentialMode"_s, u"apiKey"_s );
-    settings.setValue( u"ai/provider/claude/enabled"_s, false );
-  }
-  // These belong to Strata alone. Never inspect or change Claude Code's credentials.
+  // Retired setup-token leftovers only. The loopback login under
+  // ai/provider/claude/login/ is a different credential and stays in place.
   for ( const QString &key : { u"ai/provider/claude/subscriptionToken"_s, u"ai/provider/claude/oauth/refreshToken"_s } )
   {
     auto *auth = QgsApplication::authManager();
     if ( auth && !auth->isDisabled() && auth->existsAuthSetting( key ) )
-      auth->removeAuthSetting( key ); // No decryption or master password prompt.
+      auth->removeAuthSetting( key );
     settings.remove( key );
     settings.remove( key + u"_inVault"_s );
   }

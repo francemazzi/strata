@@ -3445,6 +3445,7 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
   if ( mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi )
        || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
        || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
+       || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
        || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
        || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan ) )
   {

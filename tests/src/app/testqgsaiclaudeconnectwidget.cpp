@@ -30,25 +30,30 @@ class TestQgsAiClaudeConnectWidget : public QObject
     Q_OBJECT
   private slots:
     void init() { installTestSecretBackend(); }
-    void apiOnlyWidget()
+    void subscriptionAndApiKeyWidget()
     {
       QgsAiModelRouter router;
       QgsAiClaudeConnectWidget widget( &router );
-      QVERIFY( widget.findChild<QLabel *>( u"aiClaudeSuspensionNotice"_s ) );
-      QVERIFY( !widget.findChild<QPushButton *>( u"aiClaudeConnectButton"_s ) );
+      QVERIFY( !widget.findChild<QLabel *>( u"aiClaudeSuspensionNotice"_s ) );
+      QVERIFY( widget.findChild<QLabel *>( u"aiClaudeLoginStatus"_s ) );
+      QVERIFY( widget.findChild<QPushButton *>( u"aiClaudeConnectButton"_s ) );
+      QVERIFY( widget.findChild<QPushButton *>( u"aiClaudeLogoutButton"_s ) );
       QVERIFY( !widget.findChild<QLineEdit *>( u"aiClaudeManualTokenLineEdit"_s ) );
       auto *input = widget.findChild<QLineEdit *>( u"aiClaudeApiKeyLineEdit"_s );
       QVERIFY( input );
       QCOMPARE( input->echoMode(), QLineEdit::Password );
       input->setText( u"sk-ant-api03-test"_s );
       QCOMPARE( widget.pendingApiKey(), u"sk-ant-api03-test"_s );
+      input->setText( u"sk-ant-oat01-pasted"_s );
+      QCOMPARE( widget.pendingApiKey(), u"sk-ant-oat01-pasted"_s );
+      QString error;
+      QVERIFY( !router.storeApiKey( QgsAiModelRouter::Provider::Claude, widget.pendingApiKey(), &error ) );
       QSignalSpy cloud( &widget, &QgsAiClaudeConnectWidget::cloudRequested );
       QSignalSpy use( &widget, &QgsAiClaudeConnectWidget::useRequested );
       widget.findChild<QPushButton *>( u"aiClaudeCloudButton"_s )->click();
       widget.findChild<QPushButton *>( u"aiClaudeUseButton"_s )->click();
       QCOMPARE( cloud.count(), 1 );
       QCOMPARE( use.count(), 1 );
-      QVERIFY( widget.pendingApiKey().contains( "api03"_L1 ) );
     }
 };
 QGSTEST_MAIN( TestQgsAiClaudeConnectWidget )

@@ -422,6 +422,7 @@ void TestQgsAiChatDockWidget::unavailableSelectedProviderIsNotReplacedInModelPil
   QgsSettings settings;
   settings.setValue( u"ai/activeProvider"_s, u"Claude"_s );
   settings.setValue( u"ai/provider/claude/credentialMode"_s, u"oauth"_s );
+  settings.setValue( u"ai/security/providerSelectionRequired"_s, true );
   const auto clearSelection = qScopeGuard( []() { QgsSettings().remove( u"ai/security/providerSelectionRequired"_s ); } );
   QgsAiModelRouter router;
   QVERIFY( router.requiresProviderSelection() );
@@ -1433,11 +1434,11 @@ void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
                                  && maxToolIterations->minimum() == QgsAiAgentBehaviorSettings::MIN_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->maximum() == QgsAiAgentBehaviorSettings::MAX_TOOL_CALL_PAUSE_LIMIT
                                  && maxToolIterations->value() == QgsAiAgentBehaviorSettings::DEFAULT_TOOL_CALL_PAUSE_LIMIT;
-        // Subscription credentials are no longer collected; only the advanced API path remains.
-        claudeControlsFound = settingsDialog->findChild<QLabel *>( u"aiClaudeSuspensionNotice"_s )
+        claudeControlsFound = settingsDialog->findChild<QLabel *>( u"aiClaudeLoginStatus"_s )
+                              && settingsDialog->findChild<QPushButton *>( u"aiClaudeConnectButton"_s )
                               && settingsDialog->findChild<QPushButton *>( u"aiClaudeCloudButton"_s )
                               && settingsDialog->findChild<QLineEdit *>( u"aiClaudeApiKeyLineEdit"_s )
-                              && !settingsDialog->findChild<QPushButton *>( u"aiClaudeConnectButton"_s )
+                              && !settingsDialog->findChild<QLabel *>( u"aiClaudeSuspensionNotice"_s )
                               && !settingsDialog->findChild<QLineEdit *>( u"aiClaudeManualTokenLineEdit"_s );
         settingsDialog->reject();
       }

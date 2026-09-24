@@ -754,7 +754,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   QgsAiSecretStore::loadSecretsAsync( this, updateProtection );
 
   // ---- Claude ----
-  // API-only Claude access; subscription migration is explained in the widget.
+  // Subscription login finishes in the browser. The API key stays an advanced option.
   contentLayout->addWidget( sectionHeader( tr( "Claude" ), page ) );
   mClaudeEndpoint = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::Claude ).endpoint, page );
   mClaudeConnectWidget = new QgsAiClaudeConnectWidget( mModelRouter, page );
@@ -3165,8 +3165,9 @@ bool QgsAiSettingsDialog::applySettings()
   QgsAiModelRouter::ProviderSettings claudeSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Claude );
   claudeSettings.endpoint = mClaudeEndpoint->text().trimmed();
   claudeSettings.model = mClaudeConnectWidget->modelText();
-  claudeSettings.credentialMode = QgsAiModelRouter::CredentialMode::ApiKey;
-  claudeSettings.enabled = !pendingClaudeKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude );
+  const bool claudeSubscription = pendingClaudeKey.isEmpty() && mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude );
+  claudeSettings.credentialMode = claudeSubscription ? QgsAiModelRouter::CredentialMode::OAuth : QgsAiModelRouter::CredentialMode::ApiKey;
+  claudeSettings.enabled = !pendingClaudeKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude ) || claudeSubscription;
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Claude, claudeSettings );
 
   QgsSettings gisSaveSettings;

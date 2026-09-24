@@ -51,7 +51,7 @@ namespace QgsAiCredentialStoreInternal
   bool loaded = false;
   bool loading = false;
   QList<std::function<void()>> waiters;
-  const QStringList keys = { u"ai/provider/openai/apiKey"_s, u"ai/provider/openrouter/apiKey"_s, u"ai/provider/claude/apiKey"_s, u"ai/provider/codex/oauth/refreshToken"_s, u"ai/provider/plan/token"_s };
+  const QStringList keys = { u"ai/provider/openai/apiKey"_s, u"ai/provider/openrouter/apiKey"_s, u"ai/provider/claude/apiKey"_s, u"ai/provider/claude/login/refreshToken"_s, u"ai/provider/claude/login/accessToken"_s, u"ai/provider/claude/login/expiresAt"_s, u"ai/provider/codex/oauth/refreshToken"_s, u"ai/provider/plan/token"_s };
   QString presenceKey( const QString &key )
   {
     return key + u"_inKeychain"_s;
