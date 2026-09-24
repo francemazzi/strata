@@ -109,6 +109,7 @@ Cosa evitare:
 > Rendere Strata provabile senza attrito, stabile per early adopter e misurabile.
 
 - [x] **1.4.13 credential hotfix:** retired Claude subscription-token bridge, migrated credentials to the OS keychain, preserved explicit provider selection; merged in PR #53 and released on 2026-09-21. Automated regressions, all three package builds and Sigstore sealing passed. Evidence: `docs/releases/strata-1.4.13.md`.
+- [x] **1.5.0 local release:** empty Plan Account streams are failures with retry; Processing outputs load into the project; shapefile sidecars are skipped. Built locally (no GitHub Actions). Evidence: `docs/releases/strata-1.5.0.md`.
 - [ ] **1.4.13 field acceptance:** final-package Cloud/API sign-in, first response, restart/disconnect on Windows/macOS; real Linux keychain availability cases; Windows 11 Smart App Control and colleague confirmation remain pending.
 - [x] Pipeline release multi-piattaforma su tag `strata-v`* (`release-strata.yml`) + fix macOS PyQGIS (ignore user site-packages)
 - [ ] Installer firmati

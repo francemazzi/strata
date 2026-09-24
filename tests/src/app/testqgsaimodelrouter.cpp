@@ -148,10 +148,13 @@ namespace
     settings.remove( u"ai/network/maxRetries"_s );
   }
 
-  bool configurePlanForLoopback( QgsAiModelRouter &router, quint16 port, QString *errorMessage = nullptr )
+  bool configurePlanForLoopback( QgsAiModelRouter &router, quint16 port, QString *errorMessage = nullptr, int maxRetries = 0 )
   {
     if ( !router.setPlanSessionToken( u"strata-plan-loopback-token"_s, errorMessage ) )
       return false;
+
+    QgsSettings settings;
+    settings.setValue( u"ai/network/maxRetries"_s, maxRetries );
 
     QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::Plan );
     providerSettings.endpoint = u"http://127.0.0.1:%1/ai/messages"_s.arg( port );
@@ -165,6 +168,7 @@ namespace
   {
     QgsSettings settings;
     settings.remove( u"ai/provider/plan"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
     QgsAiSecretStore::removeSecret( u"ai/provider/plan/token"_s );
   }
 
@@ -270,6 +274,8 @@ class TestQgsAiModelRouter : public QObject
     void planStreamAnthropicStyleDeltas();
     void planStreamAnthropicToolUse();
     void planNonStreamingAnthropicToolUse();
+    void planEmptyStreamIsFailure();
+    void planEmptyStreamRetriesThenSucceeds();
 
     // SSE transport & error hardening (loopback server)
     void openRouterStreamTextDeltas();
@@ -1751,6 +1757,60 @@ void TestQgsAiModelRouter::planNonStreamingAnthropicToolUse()
   QCOMPARE( calls.at( 0 ).id, u"toolu_1"_s );
   QCOMPARE( calls.at( 0 ).name, u"echo"_s );
   QCOMPARE( calls.at( 0 ).args.value( u"text"_s ).toString(), u"hi"_s );
+}
+
+void TestQgsAiModelRouter::planEmptyStreamIsFailure()
+{
+  removePlanTestSettings();
+  const auto cleanup = qScopeGuard( []() { removePlanTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: [DONE]\n\n" ) } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QString error;
+  QVERIFY2( configurePlanForLoopback( router, server.serverPort(), &error, 0 ), qPrintable( error ) );
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Plan, { userMessage( u"ciao"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QCOMPARE( args.at( 1 ).toBool(), false );
+  QVERIFY2( args.at( 4 ).toString().contains( u"without text or tool calls"_s, Qt::CaseInsensitive ), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( server.requestCount, 1 );
+}
+
+void TestQgsAiModelRouter::planEmptyStreamRetriesThenSucceeds()
+{
+  removePlanTestSettings();
+  const auto cleanup = qScopeGuard( []() { removePlanTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: [DONE]\n\n" ) } )
+                   << QgsAiTestLoopbackServer::sseResponse( {
+                        QByteArrayLiteral( "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n" ),
+                        QByteArrayLiteral( "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\ndata: [DONE]\n\n" ),
+                      } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QString error;
+  QVERIFY2( configurePlanForLoopback( router, server.serverPort(), &error, 1 ), qPrintable( error ) );
+
+  QElapsedTimer elapsed;
+  elapsed.start();
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Plan, { userMessage( u"ciao"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 15000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( args.at( 3 ).toString(), u"ok"_s );
+  QCOMPARE( args.at( 6 ).toInt(), 1 );
+  QCOMPARE( server.requestCount, 2 );
+  QVERIFY2( elapsed.elapsed() >= 2000, qPrintable( u"elapsed=%1ms"_s.arg( elapsed.elapsed() ) ) );
 }
 
 void TestQgsAiModelRouter::openRouterStreamTextDeltas()

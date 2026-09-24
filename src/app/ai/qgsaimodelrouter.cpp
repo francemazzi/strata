@@ -1652,6 +1652,7 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   context.toolCalls.clear();
   context.streamItemIndexToToolCall.clear();
   context.midStreamError.clear();
+  context.retryAfterSeconds = -1;
   context.usage = QgsAiUsage();
   context.responseModel.clear();
   const QByteArray payload = buildRequestPayload( context.provider, context.messages, context.stream );
@@ -2180,6 +2181,12 @@ void QgsAiModelRouter::onReplyReadyRead()
           message = u"Provider returned error code %1."_s.arg( errorObj.value( u"code"_s ).toVariant().toString() );
         if ( !message.isEmpty() )
           context->midStreamError = message;
+        if ( errorObj.contains( u"retry_after"_s ) )
+        {
+          const int retryAfter = errorObj.value( u"retry_after"_s ).toInt( -1 );
+          if ( retryAfter >= 0 )
+            context->retryAfterSeconds = retryAfter;
+        }
       }
       else if ( errorValue.isString() && !errorValue.toString().isEmpty() )
       {
@@ -2362,8 +2369,17 @@ void QgsAiModelRouter::onReplyFinished()
       responseText = QString::fromUtf8( responseBody );
   }
 
-  // Providers can deliver errors inside the SSE stream over HTTP 200.
-  const bool success = networkError == QNetworkReply::NoError && ( httpStatus == 0 || ( httpStatus >= 200 && httpStatus < 300 ) ) && context->midStreamError.isEmpty();
+  // Providers can deliver errors inside the SSE stream over HTTP 200. An empty
+  // 200 with neither text nor tool calls is also a failure — Plan Account used
+  // to swallow OpenRouter 402 after writeHead(200) and the desktop treated it as success.
+  const bool httpOk = networkError == QNetworkReply::NoError && ( httpStatus == 0 || ( httpStatus >= 200 && httpStatus < 300 ) );
+  const bool noCompletion = responseText.trimmed().isEmpty() && context->toolCalls.isEmpty();
+  bool success = httpOk && context->midStreamError.isEmpty() && !noCompletion;
+  if ( httpOk && noCompletion && context->midStreamError.isEmpty() )
+  {
+    context->midStreamError = tr( "The managed model provider closed the stream without text or tool calls. This is often a temporary upstream limit — wait a minute and send the request again." );
+  }
+  const bool emptyCompletion = httpOk && noCompletion;
 
   // Safety net: a stream can end without its finish chunk (connection cut, or a
   // malformed final SSE line). Parse any pending tool-call arguments now, and
@@ -2381,7 +2397,7 @@ void QgsAiModelRouter::onReplyFinished()
   }
 
   const bool wantsToolUse = success && !context->toolCalls.isEmpty() && !hasUnparsedToolArguments;
-  const bool retriable = !success && shouldRetry( httpStatus, networkError, context->attempt, context->maxRetries );
+  const bool retriable = !success && ( shouldRetry( httpStatus, networkError, context->attempt, context->maxRetries ) || ( emptyCompletion && context->attempt <= context->maxRetries ) );
   QgsMessageLog::logMessage(
     u"Reply id=%1 provider=%2 httpStatus=%3 networkError=%4 latencyMs=%5 textLen=%6 bodyBytes=%7 success=%8 toolCalls=%9 stopReason=%10"_s.arg( requestId, providerName )
       .arg( httpStatus )
@@ -2450,15 +2466,15 @@ void QgsAiModelRouter::onReplyFinished()
   {
     // Honor the server's Retry-After header (seconds form, clamped) when present;
     // otherwise back off linearly with the attempt count.
-    int retryAfterSeconds = -1;
-    if ( reply->hasRawHeader( "Retry-After" ) )
+    int retryAfterSeconds = context->retryAfterSeconds;
+    if ( retryAfterSeconds < 0 && reply->hasRawHeader( "Retry-After" ) )
     {
       bool parsedOk = false;
       const int parsed = QString::fromLatin1( reply->rawHeader( "Retry-After" ) ).trimmed().toInt( &parsedOk );
       if ( parsedOk && parsed >= 0 )
         retryAfterSeconds = parsed;
     }
-    const int backoffMs = retryAfterSeconds >= 0 ? std::min( retryAfterSeconds, 30 ) * 1000 : 1000 * context->attempt;
+    const int backoffMs = retryAfterSeconds >= 0 ? std::min( retryAfterSeconds, 30 ) * 1000 : ( emptyCompletion ? 2000 * context->attempt : 1000 * context->attempt );
 
     clearRequestTransport( *context );
     QgsMessageLog::
