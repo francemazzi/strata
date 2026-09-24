@@ -424,7 +424,11 @@ void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
 void TestQgsAiToolRegistry::runPythonFeatureLoopHintDoesNotChangeDiagnosis()
 {
   QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"print('ok')"_s ), QStringList() );
-  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList { u"slow_feature_loop"_s } );
+  // Reading features in a loop is fine; editing them one by one is what blocks Strata.
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList() );
+  const QString editingLoop = u"with edit(layer):\n    for f in layer.getFeatures():\n        layer.changeAttributeValue(f.id(), 0, 1)"_s;
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( editingLoop ), QStringList { u"slow_feature_loop"_s } );
+  QVERIFY( QgsAiRunPythonTool::hintMessage( u"slow_feature_loop"_s ).contains( u"calculate_field"_s ) );
 
   QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"ok"_s, QString(), QString() );
   QCOMPARE( diagnosis.value( u"status"_s ).toString(), u"ok"_s );
