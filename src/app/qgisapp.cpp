@@ -2619,18 +2619,25 @@ void QgisApp::dropEvent( QDropEvent *event )
     mBlockAutoSelectAddedLayer = true;
 
     // Strata: when many plain data files are dropped at once, scan them in a background
-    // task and add them in batches instead of opening each synchronously in this loop
+    // task and add them in batches instead of opening each synchronously in this loop.
+    // Sidecars (.prj, .qmd, .qml, …) are never opened as layers, but custom drop handlers
+    // (e.g. plugins) still get a chance to claim them in the loop below.
     QStringList filesToProcess = files;
-    filesToProcess.removeIf( []( const QString &file ) { return QgsFileUtils::pathIsSidecarFile( file ); } );
+    QSet<QString> sidecarFiles;
+    for ( const QString &file : std::as_const( files ) )
+    {
+      if ( QgsFileUtils::pathIsSidecarFile( file ) )
+        sidecarFiles.insert( file );
+    }
     const int bulkThreshold = QgsBatchedLayerAddController::settingsBatchThreshold->value();
-    if ( bulkThreshold > 0 && filesToProcess.size() >= bulkThreshold )
+    if ( bulkThreshold > 0 && filesToProcess.size() - sidecarFiles.size() >= bulkThreshold )
     {
       const QSet<QString> specialSuffixes { u"qgs"_s, u"qgz"_s, u"qlr"_s, u"qpt"_s, u"py"_s };
       QStringList bulkDataFiles;
       for ( const QString &file : std::as_const( filesToProcess ) )
       {
         const QFileInfo fileInfo( file );
-        if ( fileInfo.isFile() && !specialSuffixes.contains( fileInfo.suffix().toLower() ) )
+        if ( fileInfo.isFile() && !sidecarFiles.contains( file ) && !specialSuffixes.contains( fileInfo.suffix().toLower() ) )
           bulkDataFiles.append( file );
       }
 
@@ -2657,6 +2664,7 @@ void QgisApp::dropEvent( QDropEvent *event )
     // project) can destroy earlier layers before we select them — that is the Brescia
     // SIGSEGV in autoSelectAddedLayer().
     QgsWeakMapLayerPointerList addedLayerPtrs;
+    QStringList skippedSidecars;
     for ( const QString &file : std::as_const( filesToProcess ) )
     {
       bool handled = false;
@@ -2674,10 +2682,21 @@ void QgisApp::dropEvent( QDropEvent *event )
 
       if ( !handled )
       {
+        if ( sidecarFiles.contains( file ) )
+        {
+          skippedSidecars << QFileInfo( file ).fileName();
+          continue;
+        }
         const QList<QgsMapLayer *> opened = openFile( file, QString(), true, false );
         for ( QgsMapLayer *layer : opened )
           addedLayerPtrs.append( layer );
       }
+    }
+
+    // Dropping only sidecars (e.g. a lone .qmd) would otherwise do nothing, silently.
+    if ( !skippedSidecars.isEmpty() && skippedSidecars.size() == files.size() && lst.isEmpty() )
+    {
+      visibleMessageBar()->pushInfo( tr( "Layer import" ), tr( "%1: sidecar files (metadata, style or shapefile parts) are not layers. Drop the dataset itself instead." ).arg( skippedSidecars.join( ", "_L1 ) ) );
     }
 
     if ( !lst.isEmpty() )

@@ -581,6 +581,20 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
   QVERIFY( qmlResult.errorMessage.contains( u"style"_s ) );
   QVERIFY( qmlResult.errorMessage.contains( u"layer.geojson"_s ) );
   QCOMPARE( project.mapLayers().size(), 0 );
+
+  // The suggestion prefers the primary dataset over a same-named .csv export.
+  for ( const QString &name : { u"roads.csv"_s, u"roads.shp"_s, u"roads.qmd"_s } )
+  {
+    QFile file( tempDir.filePath( name ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    QVERIFY( file.write( "x" ) > 0 );
+  }
+  QJsonObject roadsArgs;
+  roadsArgs.insert( u"path"_s, u"roads.qmd"_s );
+  const QgsAiToolResult roadsResult = tool.execute( roadsArgs );
+  QVERIFY( !roadsResult.success );
+  QVERIFY2( roadsResult.errorMessage.contains( u"Open 'roads.shp' instead"_s ), qPrintable( roadsResult.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
 }
 
 void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceResponsive()

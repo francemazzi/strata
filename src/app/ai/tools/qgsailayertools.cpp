@@ -20,20 +20,20 @@
 #include <memory>
 #include <optional>
 
-#include "qgsaifilecontextprovider.h"
 #include "qgis.h"
+#include "qgsaifilecontextprovider.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
-#include "qgsfileutils.h"
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
 #include "qgsfeedback.h"
 #include "qgsfields.h"
+#include "qgsfileutils.h"
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
 #include "qgslayertreelayer.h"
@@ -188,7 +188,23 @@ namespace
     for ( const QString &ext : rasterExts() )
       suffixes << ext;
     suffixes.removeDuplicates();
-    suffixes.sort();
+
+    // Suggest the most likely primary dataset: a .shp or .gpkg rather than a same-named
+    // .csv export or .png preview.
+    static const QStringList preferredSuffixes { u"shp"_s, u"gpkg"_s, u"geojson"_s, u"fgb"_s, u"tif"_s, u"tiff"_s, u"vrt"_s };
+    static const QStringList sideProductSuffixes { u"csv"_s, u"png"_s, u"jpg"_s, u"jpeg"_s };
+    const auto rank = []( const QString &suffix ) -> qsizetype {
+      if ( preferredSuffixes.contains( suffix ) )
+        return preferredSuffixes.indexOf( suffix );
+      if ( sideProductSuffixes.contains( suffix ) )
+        return 1000 + sideProductSuffixes.indexOf( suffix );
+      return 100;
+    };
+    std::sort( suffixes.begin(), suffixes.end(), [&rank]( const QString &a, const QString &b ) {
+      const qsizetype rankA = rank( a );
+      const qsizetype rankB = rank( b );
+      return rankA != rankB ? rankA < rankB : a < b;
+    } );
 
     for ( const QString &base : std::as_const( bases ) )
     {
