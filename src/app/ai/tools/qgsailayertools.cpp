@@ -21,6 +21,7 @@
 #include <optional>
 
 #include "qgsaifilecontextprovider.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
@@ -99,28 +100,6 @@
 #include <QVariant>
 
 using namespace Qt::StringLiterals;
-
-namespace
-{
-  QPointer<QgsProcessingFeedback> sActiveProcessingFeedback;
-  std::function<void( double progress )> sProcessingProgressHandler;
-} // namespace
-
-void qgsAiSetProcessingProgressHandler( const std::function<void( double progress )> &handler )
-{
-  sProcessingProgressHandler = handler;
-}
-
-bool qgsAiHasActiveProcessingAlgorithm()
-{
-  return !sActiveProcessingFeedback.isNull();
-}
-
-void qgsAiCancelActiveProcessingAlgorithm()
-{
-  if ( sActiveProcessingFeedback )
-    sActiveProcessingFeedback->cancel();
-}
 
 namespace
 {
@@ -1628,49 +1607,53 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   if ( !QgsApplication::taskManager() )
     return QgsAiToolResult::error( u"Processing task manager is not available."_s );
 
-  struct ActiveFeedbackGuard
+  if ( algorithm->flags() & Qgis::ProcessingAlgorithmFlag::NoThreading )
   {
-      explicit ActiveFeedbackGuard( QgsProcessingFeedback *active ) { sActiveProcessingFeedback = active; }
-      ~ActiveFeedbackGuard() { sActiveProcessingFeedback = nullptr; }
-  };
-  const ActiveFeedbackGuard activeFeedback( feedback.get() );
+    QgsAiActiveFeedbackScope activeFeedback( feedback.get() );
+    bool ok = false;
+    QVariantMap results;
+    try
+    {
+      results = algorithm->run( parameters, context, feedback.get(), &ok, configuration );
+    }
+    catch ( QgsProcessingException &e )
+    {
+      QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
+      return QgsAiToolResult::error( e.what() );
+    }
+    if ( feedback->isCanceled() )
+      return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
+    if ( !ok )
+    {
+      const QString log = feedback->textLog().trimmed();
+      return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
+    }
+
+    QJsonObject output = processingAlgorithmMetadataJson( algorithm );
+    const QJsonArray loadedLayers = loadProcessingResultsIntoProject( context, project );
+    QJsonObject diff;
+    diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
+    diff.insert( u"algorithm_id"_s, algorithm->id() );
+    diff.insert( u"rollback_supported"_s, false );
+    output.insert( u"dry_run"_s, false );
+    output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
+    output.insert( u"loaded_layers"_s, loadedLayers );
+    output.insert( u"log"_s, feedback->textLog() );
+    output.insert( u"diff"_s, diff );
+    return QgsAiToolResult::ok( output );
+  }
 
   // prepare() runs on this thread; runPrepared() runs on the task thread.
   // The nested event loop keeps the window painting and lets Stop cancel the feedback.
   auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback.get() );
-  if ( task->status() == QgsTask::Terminated )
-  {
-    const QString log = feedback->textLog().trimmed();
-    delete task;
-    return QgsAiToolResult::error( log.isEmpty() ? u"Processing algorithm failed."_s : u"Processing algorithm failed: %1"_s.arg( log ) );
-  }
-
-  QEventLoop loop;
   bool successful = false;
   QVariantMap taskResults;
-  const auto finishRun = [&successful, &taskResults, &loop, task]() {
+  const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, feedback.get(), algorithm->displayName(), [task, &successful, &taskResults]() {
     successful = task->succeeded();
     taskResults = task->results();
-    loop.quit();
-  };
-  QObject::connect( task, &QgsTask::taskCompleted, &loop, finishRun );
-  QObject::connect( task, &QgsTask::taskTerminated, &loop, finishRun );
-  QObject::connect(
-    task,
-    &QgsTask::progressChanged,
-    &loop,
-    []( double progress ) {
-      if ( sProcessingProgressHandler )
-        sProcessingProgressHandler( progress );
-    },
-    Qt::QueuedConnection
-  );
-
-  QgsApplication::taskManager()->addTask( task );
-  loop.exec();
-
-  if ( feedback->isCanceled() )
-    return QgsAiToolResult::error( u"Processing algorithm was canceled."_s );
+  } );
+  if ( wait.canceled || feedback->isCanceled() )
+    return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
   if ( !successful )
   {
     const QString log = feedback->textLog().trimmed();

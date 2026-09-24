@@ -58,6 +58,7 @@ inline QString QgsAiToolRiskLevelName( QgsAiToolRiskLevel level )
 struct APP_EXPORT QgsAiToolResult
 {
     bool success = false;
+    bool canceled = false;
     QJsonValue output;
     QString errorMessage;
 
@@ -73,6 +74,15 @@ struct APP_EXPORT QgsAiToolResult
     {
       QgsAiToolResult result;
       result.success = false;
+      result.errorMessage = message;
+      return result;
+    }
+
+    static QgsAiToolResult canceledResult( const QString &message )
+    {
+      QgsAiToolResult result;
+      result.success = false;
+      result.canceled = true;
       result.errorMessage = message;
       return result;
     }

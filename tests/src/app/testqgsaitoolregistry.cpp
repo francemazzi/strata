@@ -148,6 +148,7 @@ class TestQgsAiToolRegistry : public QObject
     void createPrintLayoutAndExportMap();
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
+    void processingToolRunsNoThreadingOnMainThread();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -973,6 +974,42 @@ void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
   QCOMPARE( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().size(), 1 );
   QVERIFY( project.mapLayer( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().at( 0 ).toObject().value( u"id"_s ).toString() ) );
   QCOMPARE( project.mapLayers().size(), 5 );
+}
+
+void TestQgsAiToolRegistry::processingToolRunsNoThreadingOnMainThread()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  QgsProject project;
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"points"_s, u"memory"_s );
+  QVERIFY( points->isValid() );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project.addMapLayer( points );
+
+  auto *poly = new QgsVectorLayer( u"Polygon?crs=EPSG:4326"_s, u"poly"_s, u"memory"_s );
+  QVERIFY( poly->isValid() );
+  QgsFeature polygon( poly->fields() );
+  polygon.setGeometry( QgsGeometry::fromWkt( u"Polygon ((-1 -1, 1 -1, 1 1, -1 1, -1 -1))"_s ) );
+  QVERIFY( poly->dataProvider()->addFeature( polygon ) );
+  project.addMapLayer( poly );
+
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonArray predicates;
+  predicates.append( 0 );
+  QJsonObject parameters;
+  parameters.insert( u"INPUT"_s, points->id() );
+  parameters.insert( u"INTERSECT"_s, poly->id() );
+  parameters.insert( u"PREDICATE"_s, predicates );
+  parameters.insert( u"METHOD"_s, 0 );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:selectbylocation"_s );
+  args.insert( u"parameters"_s, parameters );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( points->selectedFeatureCount(), 1 );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

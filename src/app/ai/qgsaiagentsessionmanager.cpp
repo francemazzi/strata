@@ -58,6 +58,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -563,7 +564,9 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   if ( QCoreApplication::instance() )
     connect( QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &QgsAiAgentSessionManager::closeDesktopAgentSession );
 
-  qgsAiSetProcessingProgressHandler( [this]( double progress ) { emit requestStateChanged( u"tool_use"_s, tr( "Processing… %1%" ).arg( static_cast<int>( std::round( progress ) ) ) ); } );
+  qgsAiSetBackgroundToolProgressHandler( [this]( const QString &label, double progress ) {
+    emit requestStateChanged( u"tool_use"_s, tr( "%1… %2%" ).arg( label, QString::number( static_cast<int>( std::round( progress ) ) ) ) );
+  } );
 
   if ( mRouter )
   {
@@ -693,9 +696,9 @@ void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
 
 QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 {
-  qgsAiSetProcessingProgressHandler( {} );
-  if ( qgsAiHasActiveProcessingAlgorithm() )
-    qgsAiCancelActiveProcessingAlgorithm();
+  qgsAiSetBackgroundToolProgressHandler( {} );
+  if ( qgsAiHasActiveBackgroundTool() )
+    qgsAiCancelActiveBackgroundTool();
 
   // Detach before canceling: canceling a still-queued task emits taskTerminated
   // synchronously, and the finish lambda must not dispatch a request from here.
@@ -980,6 +983,7 @@ QStringList QgsAiAgentSessionManager::unresolvedPlanTools( const QStringList &re
 
 void QgsAiAgentSessionManager::resetCurrentSessionState( bool emitHistorySignal )
 {
+  ++mSessionGeneration;
   mHistory.clear();
   mActiveSessionId.clear();
   mNextMessageOrdering = 0;
@@ -1117,6 +1121,7 @@ void QgsAiAgentSessionManager::loadSession( const QString &sessionId )
   if ( hasActiveRequest() )
     cancelActiveRequest();
 
+  ++mSessionGeneration;
   mHistory = mHistoryStore->loadMessages( sessionId );
   mActiveSessionId = sessionId;
   mNextMessageOrdering = mHistoryStore->lastOrdering( sessionId ) + 1;
@@ -1164,10 +1169,11 @@ void QgsAiAgentSessionManager::deleteSession( const QString &sessionId )
 
 void QgsAiAgentSessionManager::cancelActiveRequest()
 {
-  if ( qgsAiHasActiveProcessingAlgorithm() )
+  if ( mExecutingToolCalls || qgsAiHasActiveBackgroundTool() )
   {
-    mProcessingRunCanceled = true;
-    qgsAiCancelActiveProcessingAlgorithm();
+    mToolRunCanceled = true;
+    qgsAiCancelActiveBackgroundTool();
+    emit requestStateChanged( u"cancelling"_s, tr( "Stopping…" ) );
     return;
   }
 
@@ -3165,10 +3171,16 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   bool roundHadError = false;
   bool roundHadNonRetryableError = false;
   QString nonRetryableToolName;
+  const quint64 generation = mSessionGeneration;
+  mExecutingToolCalls = true;
+  const auto executingGuard = qScopeGuard( [this]() { mExecutingToolCalls = false; } );
 
   // Execute every requested, mode-allowed tool synchronously and add its result to history.
   for ( const QgsAiToolCall &call : calls )
   {
+    if ( generation != mSessionGeneration )
+      return;
+
     QgsMessageLog::
       logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
 
@@ -3198,6 +3210,10 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         false
       );
     }
+
+    if ( generation != mSessionGeneration )
+      return;
+
     QVariantMap memory;
     memory.insert( u"tool_name"_s, call.name );
     memory.insert( u"success"_s, result.success );
@@ -3222,10 +3238,10 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
       roundHadError = true;
     recordHistoryMessage( resultMessage );
-    if ( mProcessingRunCanceled )
+    if ( result.canceled || mToolRunCanceled )
     {
-      mProcessingRunCanceled = false;
-      const QString message = tr( "Stopped because the Processing algorithm was canceled." );
+      mToolRunCanceled = false;
+      const QString message = tr( "Stopped because the running tool was canceled." );
       recordHistoryMessage( buildAssistantMessage( message ) );
       mActiveRequestId.clear();
       if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
