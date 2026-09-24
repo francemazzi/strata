@@ -21,14 +21,18 @@
 #include <optional>
 
 #include "qgsaifilecontextprovider.h"
+#include "qgis.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
+#include "qgsfileutils.h"
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
+#include "qgsfeedback.h"
 #include "qgsfields.h"
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
@@ -74,12 +78,13 @@
 #include "qgssymbol.h"
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
+#include "qgsvectorlayerfeatureiterator.h"
 #include "qgsvectorlayerlabeling.h"
-#include "qgswkbtypes.h"
 
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -98,28 +103,6 @@
 #include <QVariant>
 
 using namespace Qt::StringLiterals;
-
-namespace
-{
-  QPointer<QgsProcessingFeedback> sActiveProcessingFeedback;
-  std::function<void( double progress )> sProcessingProgressHandler;
-} // namespace
-
-void qgsAiSetProcessingProgressHandler( const std::function<void( double progress )> &handler )
-{
-  sProcessingProgressHandler = handler;
-}
-
-bool qgsAiHasActiveProcessingAlgorithm()
-{
-  return !sActiveProcessingFeedback.isNull();
-}
-
-void qgsAiCancelActiveProcessingAlgorithm()
-{
-  if ( sActiveProcessingFeedback )
-    sActiveProcessingFeedback->cancel();
-}
 
 namespace
 {
@@ -188,6 +171,53 @@ namespace
     if ( rasterExts().contains( ext ) )
       return u"raster"_s;
     return QString();
+  }
+
+  QString siblingDatasetPath( const QString &sidecarPath )
+  {
+    const QFileInfo info( sidecarPath );
+    const QDir dir = info.absoluteDir();
+    QStringList bases { info.completeBaseName() };
+    if ( info.baseName() != info.completeBaseName() )
+      bases << info.baseName();
+
+    QStringList suffixes;
+    suffixes.reserve( vectorExts().size() + rasterExts().size() );
+    for ( const QString &ext : vectorExts() )
+      suffixes << ext;
+    for ( const QString &ext : rasterExts() )
+      suffixes << ext;
+    suffixes.removeDuplicates();
+    suffixes.sort();
+
+    for ( const QString &base : std::as_const( bases ) )
+    {
+      for ( const QString &suffix : std::as_const( suffixes ) )
+      {
+        const QString candidate = dir.filePath( base + '.' + suffix );
+        if ( QFileInfo::exists( candidate ) )
+          return candidate;
+      }
+    }
+    return QString();
+  }
+
+  QString sidecarRefusalMessage( const QString &path )
+  {
+    const QString suffix = QFileInfo( path ).suffix().toLower();
+    QString message;
+    if ( suffix == "qml"_L1 )
+    {
+      message = u"Refusing to open style file '%1' as a map layer. A .qml file is a QGIS style, not a dataset."_s.arg( path );
+    }
+    else
+    {
+      message = u"Refusing to open sidecar file '%1' as a map layer. Use the dataset file instead of metadata or style sidecars (.qmd, .qml, .prj, .cpg)."_s.arg( path );
+    }
+    const QString sibling = siblingDatasetPath( path );
+    if ( !sibling.isEmpty() )
+      message += u" Open '%1' instead."_s.arg( QFileInfo( sibling ).fileName() );
+    return message;
   }
 
   // Resolve a user-supplied layer path inside the AI workspace only.
@@ -277,6 +307,11 @@ namespace
     return e;
   }
 
+  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
+  {
+    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+  }
+
   QJsonObject layerQualityChecks( QgsMapLayer *layer, QgsProject *project )
   {
     const bool layerInProject = layer && project && project->mapLayer( layer->id() ) == layer;
@@ -299,18 +334,43 @@ namespace
         if ( contextIdx >= 0 )
         {
           contextValuesValid = true;
-          QgsFeatureIterator it = vector->getFeatures();
-          QgsFeature feature;
-          const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
-          while ( it.nextFeature( feature ) )
-          {
-            const QString context = feature.attribute( contextIdx ).toString().trimmed();
-            if ( !context.isEmpty() && !allowed.contains( context ) )
-            {
-              contextValuesValid = false;
-              break;
-            }
-          }
+          QgsFeatureRequest request;
+          request.setSubsetOfAttributes( QList<int> { contextIdx } );
+          request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
+          auto source = std::make_shared<QgsVectorLayerFeatureSource>( vector );
+          auto feedback = std::make_unique<QgsFeedback>();
+          const long long total = std::max( 0LL, vector->featureCount() );
+          bool contextValuesInvalid = false;
+          QElapsedTimer contextTimer;
+          contextTimer.start();
+          qgsAiRunFunction(
+            u"Checking layer context values"_s,
+            feedback.get(),
+            [&]( QgsFeedback *workerFeedback ) {
+              QgsFeatureIterator it = source->getFeatures( request );
+              QgsFeature feature;
+              int n = 0;
+              const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
+              while ( it.nextFeature( feature ) )
+              {
+                if ( workerFeedback->isCanceled() )
+                  return false;
+                const QString context = feature.attribute( contextIdx ).toString().trimmed();
+                if ( !context.isEmpty() && !allowed.contains( context ) )
+                {
+                  contextValuesInvalid = true;
+                  return true;
+                }
+                ++n;
+                if ( total > 0 )
+                  workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+              }
+              return true;
+            },
+            vector->dataProvider() && vector->dataProvider()->transaction()
+          );
+          logAiPerf( u"layer_quality_checks"_s, u"context_scan"_s, contextTimer.elapsed() );
+          contextValuesValid = !contextValuesInvalid;
         }
         checks.insert( u"estimate_fields_present"_s, estimateFieldsPresent );
         checks.insert( u"context_values_valid"_s, contextValuesValid );
@@ -1003,6 +1063,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   if ( path.isEmpty() )
     return QgsAiToolResult::error( u"Cannot resolve path to an existing file: %1"_s.arg( rawPath ) );
 
+  if ( QgsFileUtils::pathIsSidecarFile( path ) )
+    return QgsAiToolResult::error( sidecarRefusalMessage( path ) );
+
   const int beforeLayerCount = project->mapLayers().size();
 
   QString kind = args.value( u"kind"_s ).toString().toLower().trimmed();
@@ -1017,13 +1080,18 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   QJsonObject output;
   output.insert( u"kind"_s, kind );
 
+  QElapsedTimer phaseTimer;
   if ( kind == "vector"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( path, name, u"ogr"_s );
+    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Vector layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
+    phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), fileMayBeNonSpatialTable( path ) );
+    logAiPerf( u"add_layer_from_file"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
       return QgsAiToolResult::error( u"Refusing to add unusable vector layer '%1': %2 No project layer was added."_s.arg( name, validationError ) );
 
@@ -1033,7 +1101,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   }
   else if ( kind == "raster"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( path, name, u"gdal"_s );
+    logAiPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Raster layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
 
@@ -1047,7 +1117,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Unknown 'kind': %1 (expected 'vector' or 'raster')."_s.arg( kind ) );
   }
 
+  phaseTimer.restart();
   project->addMapLayer( added );
+  logAiPerf( u"add_layer_from_file"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1070,7 +1142,9 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
+  phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  logAiPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1154,9 +1228,12 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"provider_key"_s, providerKey );
   output.insert( u"layer_type"_s, layerType );
 
+  QElapsedTimer phaseTimer;
   if ( layerType == "raster"_L1 )
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
+    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
       return QgsAiToolResult::error( u"Service raster layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() ) );
     output.insert( u"width"_s, layer->width() );
@@ -1166,7 +1243,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   }
   else
   {
+    phaseTimer.start();
     auto layer = std::make_unique<QgsVectorLayer>( uri, name, providerKey );
+    logAiPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
     if ( !layer->isValid() )
     {
       if ( provider == "wfs"_L1 )
@@ -1180,7 +1259,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     }
 
     const bool allowNonSpatialTable = provider == "postgres"_L1 || provider == "postgis"_L1;
+    phaseTimer.restart();
     const QString validationError = validateUsableVectorLayer( layer.get(), allowNonSpatialTable );
+    logAiPerf( u"add_layer_from_service"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
     if ( !validationError.isEmpty() )
     {
       const QString guidance = provider == "wfs"_L1 ? u" Verify the WFS typename, filters, server capabilities, and response payload."_s : QString();
@@ -1191,7 +1272,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     added = layer.release();
   }
 
+  phaseTimer.restart();
   project->addMapLayer( added );
+  logAiPerf( u"add_layer_from_service"_s, u"addMapLayer"_s, phaseTimer.elapsed() );
 
   RollbackEntry rollback;
   rollback.type = RollbackType::RemoveLayer;
@@ -1214,7 +1297,9 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
+  phaseTimer.restart();
   output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  logAiPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1550,49 +1635,53 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   if ( !QgsApplication::taskManager() )
     return QgsAiToolResult::error( u"Processing task manager is not available."_s );
 
-  struct ActiveFeedbackGuard
+  if ( algorithm->flags() & Qgis::ProcessingAlgorithmFlag::NoThreading )
   {
-      explicit ActiveFeedbackGuard( QgsProcessingFeedback *active ) { sActiveProcessingFeedback = active; }
-      ~ActiveFeedbackGuard() { sActiveProcessingFeedback = nullptr; }
-  };
-  const ActiveFeedbackGuard activeFeedback( feedback.get() );
+    QgsAiActiveFeedbackScope activeFeedback( feedback.get() );
+    bool ok = false;
+    QVariantMap results;
+    try
+    {
+      results = algorithm->run( parameters, context, feedback.get(), &ok, configuration );
+    }
+    catch ( QgsProcessingException &e )
+    {
+      QgsMessageLog::logMessage( e.what(), QObject::tr( "Processing" ), Qgis::MessageLevel::Critical );
+      return QgsAiToolResult::error( e.what() );
+    }
+    if ( feedback->isCanceled() )
+      return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
+    if ( !ok )
+    {
+      const QString log = feedback->textLog().trimmed();
+      return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
+    }
+
+    QJsonObject output = processingAlgorithmMetadataJson( algorithm );
+    const QJsonArray loadedLayers = loadProcessingResultsIntoProject( context, project );
+    QJsonObject diff;
+    diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
+    diff.insert( u"algorithm_id"_s, algorithm->id() );
+    diff.insert( u"rollback_supported"_s, false );
+    output.insert( u"dry_run"_s, false );
+    output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
+    output.insert( u"loaded_layers"_s, loadedLayers );
+    output.insert( u"log"_s, feedback->textLog() );
+    output.insert( u"diff"_s, diff );
+    return QgsAiToolResult::ok( output );
+  }
 
   // prepare() runs on this thread; runPrepared() runs on the task thread.
   // The nested event loop keeps the window painting and lets Stop cancel the feedback.
   auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback.get() );
-  if ( task->status() == QgsTask::Terminated )
-  {
-    const QString log = feedback->textLog().trimmed();
-    delete task;
-    return QgsAiToolResult::error( log.isEmpty() ? u"Processing algorithm failed."_s : u"Processing algorithm failed: %1"_s.arg( log ) );
-  }
-
-  QEventLoop loop;
   bool successful = false;
   QVariantMap taskResults;
-  const auto finishRun = [&successful, &taskResults, &loop, task]() {
+  const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, feedback.get(), algorithm->displayName(), [task, &successful, &taskResults]() {
     successful = task->succeeded();
     taskResults = task->results();
-    loop.quit();
-  };
-  QObject::connect( task, &QgsTask::taskCompleted, &loop, finishRun );
-  QObject::connect( task, &QgsTask::taskTerminated, &loop, finishRun );
-  QObject::connect(
-    task,
-    &QgsTask::progressChanged,
-    &loop,
-    []( double progress ) {
-      if ( sProcessingProgressHandler )
-        sProcessingProgressHandler( progress );
-    },
-    Qt::QueuedConnection
-  );
-
-  QgsApplication::taskManager()->addTask( task );
-  loop.exec();
-
-  if ( feedback->isCanceled() )
-    return QgsAiToolResult::error( u"Processing algorithm was canceled."_s );
+  } );
+  if ( wait.canceled || feedback->isCanceled() )
+    return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
   if ( !successful )
   {
     const QString log = feedback->textLog().trimmed();

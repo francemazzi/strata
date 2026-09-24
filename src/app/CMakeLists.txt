@@ -374,6 +374,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/tools/qgsaiprojecttools.cpp
     ai/tools/qgsaireadtools.cpp
     ai/tools/qgsairunpythontool.cpp
+    ai/tools/qgsaitaskrunner.cpp
     ai/tools/qgsaitoolregistry.cpp
     ai/tools/qgsaiwebfetchtool.cpp
     ai/tools/qgsaiwebsearchtool.cpp

@@ -138,15 +138,19 @@ class TestQgsAiToolRegistry : public QObject
     void captureMapCanvasRequiresConsent();
     void captureMapCanvasCreatesCappedPng();
     void runPythonDiagnosticsAreConservative();
+    void runPythonFeatureLoopHintDoesNotChangeDiagnosis();
     void setCanvasExtentSetsZoomsAndRollsBack();
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
+    void addLayerFromFileRejectsSidecarFiles();
+    void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
     void createPrintLayoutAndExportMap();
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
+    void processingToolRunsNoThreadingOnMainThread();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -386,6 +390,16 @@ void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
   QCOMPARE( diagnosis.value( u"failure_message"_s ).toString(), u"No output layer was created"_s );
 }
 
+void TestQgsAiToolRegistry::runPythonFeatureLoopHintDoesNotChangeDiagnosis()
+{
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"print('ok')"_s ), QStringList() );
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList { u"slow_feature_loop"_s } );
+
+  QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"ok"_s, QString(), QString() );
+  QCOMPARE( diagnosis.value( u"status"_s ).toString(), u"ok"_s );
+  QVERIFY( !diagnosis.contains( u"hints"_s ) );
+}
+
 void TestQgsAiToolRegistry::setCanvasExtentSetsZoomsAndRollsBack()
 {
   QgsProject project;
@@ -527,6 +541,82 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsUnusableVectors()
   QCOMPARE( output.value( u"feature_count"_s ).toVariant().toLongLong(), 1 );
   QCOMPARE( output.value( u"spatial"_s ).toBool(), false );
   QVERIFY( output.value( u"extent"_s ).isNull() );
+  QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+
+  QFile geojson( tempDir.filePath( u"layer.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly ) );
+  QVERIFY( geojson.write( R"({"type":"FeatureCollection","features":[]})" ) > 0 );
+  geojson.close();
+  QFile qmd( tempDir.filePath( u"layer.qmd"_s ) );
+  QVERIFY( qmd.open( QIODevice::WriteOnly ) );
+  QVERIFY( qmd.write( "<qgis/>" ) > 0 );
+  qmd.close();
+  QFile qml( tempDir.filePath( u"layer.qml"_s ) );
+  QVERIFY( qml.open( QIODevice::WriteOnly ) );
+  QVERIFY( qml.write( "<qgis/>" ) > 0 );
+  qml.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+
+  QJsonObject qmdArgs;
+  qmdArgs.insert( u"path"_s, u"layer.qmd"_s );
+  const QgsAiToolResult qmdResult = tool.execute( qmdArgs );
+  QVERIFY( !qmdResult.success );
+  QVERIFY( qmdResult.errorMessage.contains( u"sidecar"_s ) );
+  QVERIFY( qmdResult.errorMessage.contains( u"layer.geojson"_s ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
+
+  QJsonObject qmlArgs;
+  qmlArgs.insert( u"path"_s, u"layer.qml"_s );
+  const QgsAiToolResult qmlResult = tool.execute( qmlArgs );
+  QVERIFY( !qmlResult.success );
+  QVERIFY( qmlResult.errorMessage.contains( u"style"_s ) );
+  QVERIFY( qmlResult.errorMessage.contains( u"layer.geojson"_s ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceResponsive()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+
+  QFile geojson( tempDir.filePath( u"trees.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly | QIODevice::Text ) );
+  QByteArray body = R"({"type":"FeatureCollection","features":[)";
+  for ( int i = 0; i < 2500; ++i )
+  {
+    if ( i > 0 )
+      body += ',';
+    body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":"park"},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
+  }
+  body += "]}";
+  QVERIFY( geojson.write( body ) > 0 );
+  geojson.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+
+  bool interfaceEventsRan = false;
+  QTimer interfaceTimer;
+  interfaceTimer.setSingleShot( true );
+  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
+  interfaceTimer.start( 0 );
+
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY2( interfaceEventsRan, "add_layer quality check blocked the interface thread" );
+  QCOMPARE( result.output.toObject().value( u"quality_checks"_s ).toObject().value( u"context_values_valid"_s ).toBool(), true );
   QCOMPARE( project.mapLayers().size(), 1 );
 }
 
@@ -933,6 +1023,42 @@ void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()
   QCOMPARE( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().size(), 1 );
   QVERIFY( project.mapLayer( buffer.output.toObject().value( u"loaded_layers"_s ).toArray().at( 0 ).toObject().value( u"id"_s ).toString() ) );
   QCOMPARE( project.mapLayers().size(), 5 );
+}
+
+void TestQgsAiToolRegistry::processingToolRunsNoThreadingOnMainThread()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  QgsProject project;
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"points"_s, u"memory"_s );
+  QVERIFY( points->isValid() );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project.addMapLayer( points );
+
+  auto *poly = new QgsVectorLayer( u"Polygon?crs=EPSG:4326"_s, u"poly"_s, u"memory"_s );
+  QVERIFY( poly->isValid() );
+  QgsFeature polygon( poly->fields() );
+  polygon.setGeometry( QgsGeometry::fromWkt( u"Polygon ((-1 -1, 1 -1, 1 1, -1 1, -1 -1))"_s ) );
+  QVERIFY( poly->dataProvider()->addFeature( polygon ) );
+  project.addMapLayer( poly );
+
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonArray predicates;
+  predicates.append( 0 );
+  QJsonObject parameters;
+  parameters.insert( u"INPUT"_s, points->id() );
+  parameters.insert( u"INTERSECT"_s, poly->id() );
+  parameters.insert( u"PREDICATE"_s, predicates );
+  parameters.insert( u"METHOD"_s, 0 );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:selectbylocation"_s );
+  args.insert( u"parameters"_s, parameters );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( points->selectedFeatureCount(), 1 );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

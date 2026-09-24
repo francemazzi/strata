@@ -18,9 +18,12 @@
 #include "qgsaiauditlog.h"
 #include "qgsaipythonruntime.h"
 #include "qgsaipythonapprovaldialog.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaiworkspacetrust.h"
+#include "qgsfeedback.h"
 #include "qgsmessagelog.h"
+#include "qgsprocessingfeedback.h"
 #include "qgspythonrunner.h"
 
 #include <QDateTime>
@@ -35,6 +38,7 @@
 #include <QStringList>
 #include <QTemporaryFile>
 #include <QUuid>
+#include <algorithm>
 
 using namespace Qt::StringLiterals;
 
@@ -64,8 +68,22 @@ __qgsai_error = ""
 __qgsai_exception_type = ""
 __qgsai_exception_message = ""
 try:
+    from strata_ai.run_python import session as __qgsai_session
+except Exception as __qgsai_import_error:
+    import warnings as __qgsai_warnings
+    __qgsai_warnings.warn("strata_ai.run_python is unavailable: %s" % __qgsai_import_error)
+    class __qgsai_session:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+try:
 %3
-    exec(compile(__qgsai_code, "<ai_run_python>", "exec"), globals())
+    with __qgsai_session(%4, %5):
+        exec(compile(__qgsai_code, "<ai_run_python>", "exec"), globals())
 except SystemExit as __qgsai_ex:
     if __qgsai_ex.code not in (None, 0):
         __qgsai_exception_type = type(__qgsai_ex).__name__
@@ -139,8 +157,7 @@ except BaseException:
     const QJsonObject object = document.object();
     const QString status = object.value( u"status"_s ).toString().trimmed().toLower();
     const bool failedStatus = status == "error"_L1 || status == "failed"_L1 || status == "failure"_L1;
-    const bool failedBoolean = ( object.value( u"success"_s ).isBool() && !object.value( u"success"_s ).toBool() )
-                               || ( object.value( u"ok"_s ).isBool() && !object.value( u"ok"_s ).toBool() );
+    const bool failedBoolean = ( object.value( u"success"_s ).isBool() && !object.value( u"success"_s ).toBool() ) || ( object.value( u"ok"_s ).isBool() && !object.value( u"ok"_s ).toBool() );
     if ( !failedStatus && !failedBoolean )
       return;
 
@@ -165,6 +182,11 @@ void QgsAiRunPythonTool::setRememberApprovalsForSession( bool enabled )
   mRememberApprovalsForSession = enabled;
   if ( !enabled )
     mLowRiskApprovalGrantedForSession = false;
+}
+
+void QgsAiRunPythonTool::setTimeoutSeconds( int seconds )
+{
+  mTimeoutSeconds = std::clamp( seconds, 10, 3600 );
 }
 
 bool QgsAiRunPythonTool::isAvailable() const
@@ -194,7 +216,9 @@ QString QgsAiRunPythonTool::description() const
     "(qgis.PyQt), and includes AI-installed profile packages on sys.path. "
     "Use this tool ONLY when the action genuinely requires Python (e.g. driving "
     "the QGIS API to add a runtime layer). Prefer propose_edit/propose_create_file "
-    "for static file changes."
+    "for static file changes. Prefer calculate_field, batch_update_attributes or "
+    "run_processing_algorithm instead of Python feature loops. Execution stops after "
+    "a configurable timeout if the snippet does not return."
   );
 }
 
@@ -220,10 +244,8 @@ QJsonObject QgsAiRunPythonTool::diagnoseCapturedOutput( const QString &stdoutTex
     { u"stderr"_s, stderrText },
   };
   const QRegularExpression serviceExceptionExpression( u"(?:<\\s*(?:\\w+:)?ServiceException(?:Report)?\\b|\\bServiceException(?:Report)?\\b)"_s, QRegularExpression::CaseInsensitiveOption );
-  const QRegularExpression invalidProviderExpression(
-    u"\\b(?:provider\\s+(?:is\\s+)?(?:invalid|not\\s+valid|unavailable)|invalid\\s+provider|layer\\s+(?:is\\s+)?not\\s+valid)\\b"_s,
-    QRegularExpression::CaseInsensitiveOption
-  );
+  const QRegularExpression
+    invalidProviderExpression( u"\\b(?:provider\\s+(?:is\\s+)?(?:invalid|not\\s+valid|unavailable)|invalid\\s+provider|layer\\s+(?:is\\s+)?not\\s+valid)\\b"_s, QRegularExpression::CaseInsensitiveOption );
   const QRegularExpression explicitFailureExpression( u"^\\s*(?:FAILED|FAILURE)\\s*:\\s*(.+)$"_s, QRegularExpression::CaseInsensitiveOption | QRegularExpression::MultilineOption );
 
   for ( const auto &stream : streams )
@@ -257,6 +279,14 @@ QJsonObject QgsAiRunPythonTool::diagnoseCapturedOutput( const QString &stdoutTex
   if ( !exceptionType.trimmed().isEmpty() )
     result.insert( u"exception_type"_s, exceptionType.trimmed() );
   return result;
+}
+
+QStringList QgsAiRunPythonTool::featureLoopHints( const QString &code )
+{
+  const QRegularExpression loopExpression( uR"(\bgetFeatures\s*\()"_s );
+  if ( !loopExpression.match( code ).hasMatch() )
+    return {};
+  return { u"slow_feature_loop"_s };
 }
 
 QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
@@ -311,9 +341,13 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   QgsMessageLog::logMessage( u"run_python: executing approved code (codeChars=%1)"_s.arg( code.size() ), u"AI/Python"_s, Qgis::MessageLevel::Info, false );
   QgsAiAuditLog::append( u"run_python"_s, code );
 
+  QgsProcessingFeedback feedback;
+  QgsAiActiveFeedbackScope activeFeedback( &feedback, u"run_python"_s );
+
   // Build the wrapper with safely-quoted paths.
   const QString wrapper = QString::fromUtf8( PY_WRAPPER_TEMPLATE )
-                            .arg( escapeRunPythonPath( codePath ), escapeRunPythonPath( outPath ), QgsAiPythonRuntime::bootstrapSource( QgsAiPythonRuntime::packageTargetPath() ) );
+                            .arg( escapeRunPythonPath( codePath ), escapeRunPythonPath( outPath ), QgsAiPythonRuntime::bootstrapSource( QgsAiPythonRuntime::packageTargetPath() ) )
+                            .arg( QString::number( static_cast<qulonglong>( reinterpret_cast<quintptr>( &feedback ) ) ), QString::number( mTimeoutSeconds ) );
 
   {
     QFile wrapperFile( wrapperPath );
@@ -357,8 +391,17 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   if ( !ranOk )
   {
     QgsMessageLog::logMessage( u"run_python: QgsPythonRunner::runFileCaptureError() returned false (wrapper failed)."_s, u"AI/Python"_s, Qgis::MessageLevel::Warning, false );
+    if ( feedback.isCanceled() )
+      return QgsAiToolResult::canceledResult( u"Python execution was canceled."_s );
     const QString detail = !runnerError.isEmpty() ? runnerError : tracebackText;
     return QgsAiToolResult::error( u"Python wrapper failed to execute. %1"_s.arg( detail ) );
+  }
+
+  if ( feedback.isCanceled() || ( exceptionType == "RunPythonTimeout"_L1 && exceptionMessage.contains( u"Canceled."_s ) ) )
+    return QgsAiToolResult::canceledResult( u"Python execution was canceled."_s );
+  if ( exceptionType == "RunPythonTimeout"_L1 )
+  {
+    return QgsAiToolResult::error( u"stopped after %1 s of Python. Use calculate_field, batch_update_attributes or run_processing_algorithm for long GIS work."_s.arg( mTimeoutSeconds ) );
   }
 
   const QJsonObject diagnosis = diagnoseCapturedOutput( stdoutText, stderrText, tracebackText, exceptionType, exceptionMessage );
@@ -371,5 +414,13 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   output.insert( u"stderr"_s, truncateRunPythonOutput( stderrText, MAX_CAPTURE_BYTES ) );
   if ( !tracebackText.isEmpty() )
     output.insert( u"traceback"_s, truncateRunPythonOutput( tracebackText, MAX_CAPTURE_BYTES ) );
+  const QStringList hints = featureLoopHints( code );
+  if ( !hints.isEmpty() )
+  {
+    QJsonArray hintArray;
+    for ( const QString &hint : hints )
+      hintArray.push_back( hint );
+    output.insert( u"hints"_s, hintArray );
+  }
   return QgsAiToolResult::ok( output );
 }

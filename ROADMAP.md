@@ -110,6 +110,7 @@ Cosa evitare:
 
 - [x] **1.4.13 credential hotfix:** retired Claude subscription-token bridge, migrated credentials to the OS keychain, preserved explicit provider selection; merged in PR #53 and released on 2026-09-21. Automated regressions, all three package builds and Sigstore sealing passed. Evidence: `docs/releases/strata-1.4.13.md`.
 - [x] **1.5.0:** empty Plan Account streams are failures with retry; Processing outputs load into the project; shapefile sidecars are skipped. Tag `strata-v1.5.0` uses the 1.4.13 Actions packaging pipeline. Evidence: `docs/releases/strata-1.5.0.md`.
+- [x] **1.5.1:** AI tools keep the GUI responsive (edits, add_layer context scan, run_python Stop/timeout); `.qmd`/`.qml` sidecars are refused as layers. Tag `strata-v1.5.1` uses the same packaging pipeline. Evidence: `docs/releases/strata-1.5.1.md`.
 - [ ] **1.4.13 field acceptance:** final-package Cloud/API sign-in, first response, restart/disconnect on Windows/macOS; real Linux keychain availability cases; Windows 11 Smart App Control and colleague confirmation remain pending.
 - [x] Pipeline release multi-piattaforma su tag `strata-v`* (`release-strata.yml`) + fix macOS PyQGIS (ignore user site-packages)
 - [ ] Installer firmati

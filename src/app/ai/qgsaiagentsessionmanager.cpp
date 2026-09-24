@@ -46,6 +46,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
@@ -57,6 +58,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -219,6 +221,15 @@ namespace
     const int parsed = value.toInt( &ok );
     if ( !ok || parsed < QgsAiAgentBehaviorSettings::MIN_TOTAL_TOOL_CALL_LIMIT || parsed > QgsAiAgentBehaviorSettings::MAX_TOTAL_TOOL_CALL_LIMIT )
       return QgsAiAgentBehaviorSettings::DEFAULT_TOTAL_TOOL_CALL_LIMIT;
+    return parsed;
+  }
+
+  int normalizedRunPythonTimeoutSeconds( const QVariant &value )
+  {
+    bool ok = false;
+    const int parsed = value.toInt( &ok );
+    if ( !ok || parsed < QgsAiAgentBehaviorSettings::MIN_RUN_PYTHON_TIMEOUT_SECONDS || parsed > QgsAiAgentBehaviorSettings::MAX_RUN_PYTHON_TIMEOUT_SECONDS )
+      return QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS;
     return parsed;
   }
 
@@ -562,7 +573,9 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   if ( QCoreApplication::instance() )
     connect( QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &QgsAiAgentSessionManager::closeDesktopAgentSession );
 
-  qgsAiSetProcessingProgressHandler( [this]( double progress ) { emit requestStateChanged( u"tool_use"_s, tr( "Processing… %1%" ).arg( static_cast<int>( std::round( progress ) ) ) ); } );
+  qgsAiSetBackgroundToolProgressHandler( [this]( const QString &label, double progress ) {
+    emit requestStateChanged( u"tool_use"_s, tr( "%1… %2%" ).arg( label, QString::number( static_cast<int>( std::round( progress ) ) ) ) );
+  } );
 
   if ( mRouter )
   {
@@ -589,7 +602,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       Q_UNUSED( retryCount )
       Q_UNUSED( retriable )
 
-      if ( success )
+      const bool emptyHttpCompletion = httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
+      if ( success || emptyHttpCompletion )
       {
         QString finalText = !responseText.isEmpty() ? responseText : mStreamedText;
         if ( finalText.trimmed().isEmpty() && mLastToolRoundHadError && !mEmptyErrorRecoveryAttempted )
@@ -692,9 +706,9 @@ void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
 
 QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 {
-  qgsAiSetProcessingProgressHandler( {} );
-  if ( qgsAiHasActiveProcessingAlgorithm() )
-    qgsAiCancelActiveProcessingAlgorithm();
+  qgsAiSetBackgroundToolProgressHandler( {} );
+  if ( qgsAiHasActiveBackgroundTool() )
+    qgsAiCancelActiveBackgroundTool();
 
   // Detach before canceling: canceling a still-queued task emits taskTerminated
   // synchronously, and the finish lambda must not dispatch a request from here.
@@ -979,6 +993,7 @@ QStringList QgsAiAgentSessionManager::unresolvedPlanTools( const QStringList &re
 
 void QgsAiAgentSessionManager::resetCurrentSessionState( bool emitHistorySignal )
 {
+  ++mSessionGeneration;
   mHistory.clear();
   mActiveSessionId.clear();
   mNextMessageOrdering = 0;
@@ -1116,6 +1131,7 @@ void QgsAiAgentSessionManager::loadSession( const QString &sessionId )
   if ( hasActiveRequest() )
     cancelActiveRequest();
 
+  ++mSessionGeneration;
   mHistory = mHistoryStore->loadMessages( sessionId );
   mActiveSessionId = sessionId;
   mNextMessageOrdering = mHistoryStore->lastOrdering( sessionId ) + 1;
@@ -1163,10 +1179,11 @@ void QgsAiAgentSessionManager::deleteSession( const QString &sessionId )
 
 void QgsAiAgentSessionManager::cancelActiveRequest()
 {
-  if ( qgsAiHasActiveProcessingAlgorithm() )
+  if ( mExecutingToolCalls || qgsAiHasActiveBackgroundTool() )
   {
-    mProcessingRunCanceled = true;
-    qgsAiCancelActiveProcessingAlgorithm();
+    mToolRunCanceled = true;
+    qgsAiCancelActiveBackgroundTool();
+    emit requestStateChanged( u"cancelling"_s, tr( "Stopping…" ) );
     return;
   }
 
@@ -1739,9 +1756,10 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
   mPendingProviders = providerFallbackOrder();
   if ( mPendingProviders.isEmpty() || !mRouter )
   {
-    const QString noProviderMessage = mRouter && mRouter->requiresProviderSelection()
-                                        ? tr( "Choose a provider before sending another message. Open settings to sign in to Strata Cloud, connect Claude, or configure an API key, then choose Use in this chat." )
-                                        : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
+    const QString noProviderMessage
+      = mRouter && mRouter->requiresProviderSelection()
+          ? tr( "Choose a provider before sending another message. Open settings to sign in to Strata Cloud, connect Claude, or configure an API key, then choose Use in this chat." )
+          : tr( "The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat." );
     const QgsAiChatMessage assistant = buildAssistantMessage( noProviderMessage );
     recordHistoryMessage( assistant );
     emit requestStateChanged( u"failed"_s, noProviderMessage );
@@ -1777,6 +1795,7 @@ void QgsAiAgentSessionManager::setAgentBehaviorSettings( const QgsAiAgentBehavio
   mBehaviorSettings.maxToolIterationsPerTurn = normalizedToolCallPauseLimit( mBehaviorSettings.maxToolIterationsPerTurn );
   mBehaviorSettings.maxTotalToolIterationsPerTurn = normalizedTotalToolCallLimit( mBehaviorSettings.maxTotalToolIterationsPerTurn );
   mBehaviorSettings.maxTotalToolIterationsPerTurn = std::max( mBehaviorSettings.maxTotalToolIterationsPerTurn, mBehaviorSettings.maxToolIterationsPerTurn );
+  mBehaviorSettings.runPythonTimeoutSeconds = normalizedRunPythonTimeoutSeconds( mBehaviorSettings.runPythonTimeoutSeconds );
 
   syncRunPythonApprovalSettings();
   persistBehaviorSettings();
@@ -1882,6 +1901,7 @@ void QgsAiAgentSessionManager::syncRunPythonApprovalSettings()
     return;
 
   runPythonTool->setRememberApprovalsForSession( mBehaviorSettings.rememberPythonApprovalsForSession );
+  runPythonTool->setTimeoutSeconds( mBehaviorSettings.runPythonTimeoutSeconds );
 }
 
 void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
@@ -1905,6 +1925,9 @@ void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
   mBehaviorSettings.maxTotalToolIterationsPerTurn = std::max( mBehaviorSettings.maxTotalToolIterationsPerTurn, mBehaviorSettings.maxToolIterationsPerTurn );
   mBehaviorSettings.autoContinueToolBlocks = settings.value( u"strata/agent/auto_continue_tool_blocks"_s, false ).toBool();
   mBehaviorSettings.rememberPythonApprovalsForSession = settings.value( u"strata/agent/remember_python_approvals_for_session"_s, false ).toBool();
+  mBehaviorSettings.runPythonTimeoutSeconds = normalizedRunPythonTimeoutSeconds(
+    settings.value( u"strata/agent/run_python_timeout_seconds"_s, QgsAiAgentBehaviorSettings::DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS )
+  );
 }
 
 void QgsAiAgentSessionManager::persistBehaviorSettings() const
@@ -1921,6 +1944,7 @@ void QgsAiAgentSessionManager::persistBehaviorSettings() const
   settings.setValue( u"strata/agent/max_total_tool_iterations_per_turn"_s, mBehaviorSettings.maxTotalToolIterationsPerTurn );
   settings.setValue( u"strata/agent/auto_continue_tool_blocks"_s, mBehaviorSettings.autoContinueToolBlocks );
   settings.setValue( u"strata/agent/remember_python_approvals_for_session"_s, mBehaviorSettings.rememberPythonApprovalsForSession );
+  settings.setValue( u"strata/agent/run_python_timeout_seconds"_s, mBehaviorSettings.runPythonTimeoutSeconds );
   settings.remove( u"geoai/agent"_s );
   settings.remove( u"qgis_ai/agent"_s );
 }
@@ -3131,9 +3155,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     const QString fingerprint = toolCallFingerprint( call );
     const int equivalentCount = mToolCallFingerprints.value( fingerprint ) + 1;
     const int toolCount = mToolCallCounts.value( call.name ) + 1;
-    if ( equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
-         || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
-         || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN ) )
+    if (
+      equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
+      || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
+      || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN )
+    )
     {
       const QString message = equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
                                 ? tr( "Stopped a repeated tool loop: '%1' was requested with equivalent arguments more than %2 times. Use a materially different strategy or ask the user how to proceed." )
@@ -3164,10 +3190,16 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   bool roundHadError = false;
   bool roundHadNonRetryableError = false;
   QString nonRetryableToolName;
+  const quint64 generation = mSessionGeneration;
+  mExecutingToolCalls = true;
+  const auto executingGuard = qScopeGuard( [this]() { mExecutingToolCalls = false; } );
 
   // Execute every requested, mode-allowed tool synchronously and add its result to history.
   for ( const QgsAiToolCall &call : calls )
   {
+    if ( generation != mSessionGeneration )
+      return;
+
     QgsMessageLog::
       logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
 
@@ -3187,8 +3219,15 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     }
     else
     {
+      QElapsedTimer toolTimer;
+      toolTimer.start();
       result = mToolRegistry->execute( call.name, call.args );
+      QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
     }
+
+    if ( generation != mSessionGeneration )
+      return;
+
     QVariantMap memory;
     memory.insert( u"tool_name"_s, call.name );
     memory.insert( u"success"_s, result.success );
@@ -3213,10 +3252,10 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
       roundHadError = true;
     recordHistoryMessage( resultMessage );
-    if ( mProcessingRunCanceled )
+    if ( result.canceled || mToolRunCanceled )
     {
-      mProcessingRunCanceled = false;
-      const QString message = tr( "Stopped because the Processing algorithm was canceled." );
+      mToolRunCanceled = false;
+      const QString message = tr( "Stopped because the running tool was canceled." );
       recordHistoryMessage( buildAssistantMessage( message ) );
       mActiveRequestId.clear();
       if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )

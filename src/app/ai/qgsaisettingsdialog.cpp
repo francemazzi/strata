@@ -1005,6 +1005,14 @@ QWidget *QgsAiSettingsDialog::buildAgentPage()
     settingRow( tr( "Remember Python approvals for this session" ), tr( "After you approve one safe Python execution, Strata can run subsequent low-risk Python snippets in this app session without asking again. High-risk code still asks." ), mRememberPythonApprovalsForSession, page )
   );
 
+  mRunPythonTimeoutSeconds = new QSpinBox( page );
+  mRunPythonTimeoutSeconds->setObjectName( u"aiRunPythonTimeoutSecondsSpinBox"_s );
+  mRunPythonTimeoutSeconds->setRange( QgsAiAgentBehaviorSettings::MIN_RUN_PYTHON_TIMEOUT_SECONDS, QgsAiAgentBehaviorSettings::MAX_RUN_PYTHON_TIMEOUT_SECONDS );
+  mRunPythonTimeoutSeconds->setValue( currentBehavior.runPythonTimeoutSeconds );
+  contentLayout->addWidget(
+    settingRow( tr( "Python timeout (s)" ), tr( "Stop run_python after this many seconds of Python. Time spent inside Processing algorithms is excluded." ), mRunPythonTimeoutSeconds, page )
+  );
+
   mMaxToolIterationsPerTurn = new QSpinBox( page );
   mMaxToolIterationsPerTurn->setObjectName( u"aiMaxToolIterationsPerTurnSpinBox"_s );
   mMaxToolIterationsPerTurn->setRange( QgsAiAgentBehaviorSettings::MIN_TOOL_CALL_PAUSE_LIMIT, QgsAiAgentBehaviorSettings::MAX_TOOL_CALL_PAUSE_LIMIT );
@@ -1602,9 +1610,7 @@ void QgsAiSettingsDialog::setSkillDocumentInEditor( const QgsAiMarkdownDocument 
 
   for ( const QgsAiFrontmatterProperty &property : document.properties )
   {
-    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0
-         || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0
-         || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
+    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
       continue;
     addSkillPropertyRow( property.key, property.values, property.isList, false );
   }
@@ -3179,6 +3185,7 @@ bool QgsAiSettingsDialog::applySettings()
     QgsAiAgentBehaviorSettings behaviorSettings = mSessionManager->agentBehaviorSettings();
     behaviorSettings.allowCustomActions = mAllowCustomActions->isChecked();
     behaviorSettings.rememberPythonApprovalsForSession = mRememberPythonApprovalsForSession->isChecked();
+    behaviorSettings.runPythonTimeoutSeconds = mRunPythonTimeoutSeconds->value();
     behaviorSettings.maxToolIterationsPerTurn = mMaxToolIterationsPerTurn->value();
     behaviorSettings.maxTotalToolIterationsPerTurn = mMaxTotalToolIterationsPerTurn->value();
     behaviorSettings.autoContinueToolBlocks = mAutoContinueToolBlocks->isChecked();
