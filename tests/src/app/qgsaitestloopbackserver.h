@@ -36,6 +36,7 @@ class QgsAiTestLoopbackServer : public QTcpServer // clazy:exclude=missing-qobje
         QByteArray body;             //!< Plain body; Content-Length is added automatically
         QList<QByteArray> sseChunks; //!< When non-empty, streamed as text/event-stream instead of \a body
         int interChunkDelayMs = 0;
+        int responseDelayMs = 0; //!< Holds the whole response back, e.g. to simulate a request still pending when the user presses Stop
     };
 
     static ScriptedResponse jsonResponse( int statusCode, const QByteArray &reasonPhrase, const QByteArray &body, const QList<QPair<QByteArray, QByteArray>> &extraHeaders = {} )
@@ -116,6 +117,17 @@ class QgsAiTestLoopbackServer : public QTcpServer // clazy:exclude=missing-qobje
 
     void writeResponse( QTcpSocket *socket, const ScriptedResponse &response )
     {
+      if ( response.responseDelayMs > 0 )
+      {
+        ScriptedResponse delayed = response;
+        delayed.responseDelayMs = 0;
+        QTimer::singleShot( response.responseDelayMs, socket, [this, socket, delayed]() {
+          if ( socket->state() == QAbstractSocket::ConnectedState )
+            writeResponse( socket, delayed );
+        } );
+        return;
+      }
+
       QByteArray head = response.statusLine + "\r\n";
       for ( const QPair<QByteArray, QByteArray> &header : response.headers )
         head += header.first + ": " + header.second + "\r\n";

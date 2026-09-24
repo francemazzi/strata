@@ -7,15 +7,18 @@
 #include "qgsaimodelrouter.h"
 #include "qgsaisecretstore.h"
 #include "qgsaisecretstoretestutils.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgsaitreesdetecttool.h"
 #include "qgssettings.h"
 #include "qgstest.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -71,6 +74,8 @@ class TestQgsAiTreesDetectTool : public QObject
     void includesAgentContextWhenSetOnRouter();
     void rejectsMalformedArtifact();
     void stopsAfterBoundedPolls();
+    void stopDuringPendingRequestReturnsCanceled();
+    void stopDuringPollWaitReturnsCanceled();
 };
 
 void TestQgsAiTreesDetectTool::init()
@@ -224,6 +229,50 @@ void TestQgsAiTreesDetectTool::stopsAfterBoundedPolls()
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"2 polling attempts"_s ) );
   QCOMPARE( server.requestCount, 3 );
+}
+
+void TestQgsAiTreesDetectTool::stopDuringPendingRequestReturnsCanceled()
+{
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse pending = QgsAiTestLoopbackServer::jsonResponse( 202, "Accepted", QByteArrayLiteral( R"({"id":"trees-pending","status":"QUEUED"})" ) );
+  pending.responseDelayMs = 60000;
+  server.responses << pending;
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QVERIFY( configurePlanForLoopback( router, server.serverPort() ) );
+  QgsAiTreesDetectTool tool( &router, 0, 4 );
+  QTimer::singleShot( 200, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer elapsed;
+  elapsed.start();
+  const QgsAiToolResult result = tool.execute( validArgs() );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  // Well under the 20 s request timeout: Stop aborted the pending request.
+  QVERIFY2( elapsed.elapsed() < 10000, "Stop did not interrupt the pending request" );
+  QVERIFY( !qgsAiHasActiveBackgroundTool() );
+}
+
+void TestQgsAiTreesDetectTool::stopDuringPollWaitReturnsCanceled()
+{
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 202, "Accepted", QByteArrayLiteral( R"({"id":"trees-wait","status":"QUEUED"})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"status":"running"})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QVERIFY( configurePlanForLoopback( router, server.serverPort() ) );
+  // A minute between polls: only Stop can end the wait early.
+  QgsAiTreesDetectTool tool( &router, 60000, 4 );
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer elapsed;
+  elapsed.start();
+  const QgsAiToolResult result = tool.execute( validArgs() );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QVERIFY2( elapsed.elapsed() < 10000, "Stop did not interrupt the polling wait" );
+  QVERIFY( server.requestCount <= 2 );
 }
 
 QGSTEST_MAIN( TestQgsAiTreesDetectTool )
