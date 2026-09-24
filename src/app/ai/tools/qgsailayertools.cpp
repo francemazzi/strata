@@ -324,7 +324,11 @@ namespace
     return e;
   }
 
-  QJsonObject layerQualityChecks( QgsMapLayer *layer, QgsProject *project )
+  /**
+   * Summarizes whether a freshly added layer looks usable.
+   * \a canceled is set when the user pressed Stop during the checks that scan the layer.
+   */
+  QJsonObject layerQualityChecks( QgsMapLayer *layer, QgsProject *project, bool *canceled = nullptr )
   {
     const bool layerInProject = layer && project && project->mapLayer( layer->id() ) == layer;
     const bool extentValid = layer && ( !layer->isSpatial() || ( layer->extent().isFinite() && !layer->extent().isEmpty() ) );
@@ -343,6 +347,7 @@ namespace
       {
         const bool estimateFieldsPresent = estimateIdx >= 0;
         bool contextValuesValid = contextIdx < 0;
+        bool contextValuesChecked = true;
         if ( contextIdx >= 0 )
         {
           // Shared with the worker, which may outlive this call if Strata quits mid-run.
@@ -362,12 +367,15 @@ namespace
           job->total = std::max( 0LL, vector->featureCount() );
           QgsAiBackgroundRunOptions options;
           options.forceGuiThread = qgsAiProviderUsesTransaction( vector );
+          options.dependentLayers = { vector };
           QElapsedTimer contextTimer;
           contextTimer.start();
-          qgsAiRunFunction(
+          const QgsAiTaskWaitResult wait = qgsAiRunFunction(
             u"Checking layer context values"_s,
             [job]( QgsFeedback *feedback ) {
-              QgsFeatureIterator it = job->source->getFeatures( job->request );
+              QgsFeatureRequest request = job->request;
+              request.setFeedback( feedback );
+              QgsFeatureIterator it = job->source->getFeatures( request );
               QgsFeature feature;
               int n = 0;
               const QStringList allowed { u"street_row"_s, u"park"_s, u"public"_s };
@@ -390,11 +398,21 @@ namespace
             options
           );
           qgsAiLogPerf( u"layer_quality_checks"_s, u"context_scan"_s, contextTimer.elapsed() );
-          contextValuesValid = !job->invalid;
+          if ( wait.succeeded )
+          {
+            contextValuesValid = !job->invalid;
+          }
+          else
+          {
+            // Unknown, not valid: the scan was stopped or failed before it could decide.
+            contextValuesChecked = false;
+            if ( wait.canceled && canceled )
+              *canceled = true;
+          }
         }
         checks.insert( u"estimate_fields_present"_s, estimateFieldsPresent );
-        checks.insert( u"context_values_valid"_s, contextValuesValid );
-        treesSemanticsPassed = estimateFieldsPresent && contextValuesValid;
+        checks.insert( u"context_values_valid"_s, contextValuesChecked ? QJsonValue( contextValuesValid ) : QJsonValue( QJsonValue::Null ) );
+        treesSemanticsPassed = estimateFieldsPresent && contextValuesChecked && contextValuesValid;
       }
     }
 
@@ -1163,8 +1181,19 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
   phaseTimer.restart();
-  output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  const QPointer<QgsMapLayer> addedGuard( added );
+  bool qualityChecksCanceled = false;
+  const QJsonObject qualityChecks = layerQualityChecks( added, project, &qualityChecksCanceled );
   qgsAiLogPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
+  if ( qualityChecksCanceled )
+  {
+    // Stop pressed while checking the new layer: undo the addition so the canceled call leaves no trace.
+    rollbackStore().remove( token );
+    if ( addedGuard )
+      project->removeMapLayer( addedGuard->id() );
+    return QgsAiToolResult::canceledResult( u"Adding the layer was canceled."_s );
+  }
+  output.insert( u"quality_checks"_s, qualityChecks );
   return QgsAiToolResult::ok( output );
 }
 
@@ -1318,8 +1347,19 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
   phaseTimer.restart();
-  output.insert( u"quality_checks"_s, layerQualityChecks( added, project ) );
+  const QPointer<QgsMapLayer> addedGuard( added );
+  bool qualityChecksCanceled = false;
+  const QJsonObject qualityChecks = layerQualityChecks( added, project, &qualityChecksCanceled );
   qgsAiLogPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
+  if ( qualityChecksCanceled )
+  {
+    // Stop pressed while checking the new layer: undo the addition so the canceled call leaves no trace.
+    rollbackStore().remove( token );
+    if ( addedGuard )
+      project->removeMapLayer( addedGuard->id() );
+    return QgsAiToolResult::canceledResult( u"Adding the layer was canceled."_s );
+  }
+  output.insert( u"quality_checks"_s, qualityChecks );
   return QgsAiToolResult::ok( output );
 }
 

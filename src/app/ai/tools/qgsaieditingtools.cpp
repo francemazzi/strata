@@ -814,9 +814,10 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   if ( expression.hasParserError() )
     return QgsAiToolResult::error( u"Expression parser error: %1"_s.arg( expression.parserErrorString() ) );
 
+  // Only parse here: prepare() can already evaluate constant parts, such as an aggregate
+  // over another layer, so it runs in the worker with the rest of the evaluation.
   QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
   context.setFields( layer->fields() );
-  expression.prepare( &context );
 
   QgsFeatureRequest request;
   QSet<int> attributeIndexes = expression.referencedAttributeIndexes( layer->fields() );
@@ -827,7 +828,6 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     QgsExpression filter( filterExpression );
     if ( filter.hasParserError() )
       return QgsAiToolResult::error( u"Filter expression parser error: %1"_s.arg( filter.parserErrorString() ) );
-    filter.prepare( &context );
     attributeIndexes.unite( filter.referencedAttributeIndexes( layer->fields() ) );
     needsGeometry = needsGeometry || filter.needsGeometry();
     request.setFilterExpression( filterExpression );
@@ -838,6 +838,8 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     attributeIndexes.insert( existingFieldIndex );
   if ( !attributeIndexes.isEmpty() )
     request.setSubsetOfAttributes( qgis::setToList( attributeIndexes ) );
+  else
+    request.setNoAttributes();
   if ( !needsGeometry )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
@@ -853,7 +855,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
       std::unique_ptr<QgsVectorLayerFeatureSource> source;
       QgsFeatureRequest request;
       QgsExpressionContext context;
-      QgsExpression expression;
+      QString expressionText;
       QgsField targetField;
       QString fieldName;
       int existingFieldIndex = -1;
@@ -865,7 +867,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   job->source = std::make_unique<QgsVectorLayerFeatureSource>( layer );
   job->request = request;
   job->context = context;
-  job->expression = expression;
+  job->expressionText = expressionText;
   job->targetField = targetField;
   job->fieldName = fieldName;
   job->existingFieldIndex = existingFieldIndex;
@@ -880,12 +882,19 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
     options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Calculating field values"_s,
       [job]( QgsFeedback *feedback ) {
         QgsExpressionContext workerContext = job->context;
-        QgsExpression prepared( job->expression );
-        QgsFeatureIterator it = job->source->getFeatures( job->request );
+        workerContext.setFeedback( feedback );
+        QgsExpression prepared( job->expressionText );
+        prepared.prepare( &workerContext );
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
@@ -927,11 +936,14 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
 
   if ( wait.abandoned )
     return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Field calculation was canceled."_s );
   if ( !wait.succeeded )
     return QgsAiToolResult::error( job->error.isEmpty() ? wait.error : job->error );
-  if ( layerGuard.isNull() || layerChanged )
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
   const QList<PendingValue> &pendingValues = job->pendingValues;
 

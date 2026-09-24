@@ -17,6 +17,7 @@
 #include "ai/tools/qgsaireadtools.h"
 #include "ai/tools/qgsairunpythontool.h"
 #include "ai/tools/qgsaitoolregistry.h"
+#include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
@@ -171,6 +172,8 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
     void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
+    void addLayerFromFileContextQualityCheckFindsInvalidValue();
+    void addLayerFromFileStopDuringQualityCheckRemovesLayer();
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
@@ -625,23 +628,32 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
   QCOMPARE( project.mapLayers().size(), 0 );
 }
 
+namespace
+{
+  //! Writes a trees GeoJSON with \a count points; the feature at \a invalidIndex gets an unknown context value.
+  bool writeTreesGeoJson( const QString &path, int count, int invalidIndex = -1 )
+  {
+    QFile geojson( path );
+    if ( !geojson.open( QIODevice::WriteOnly | QIODevice::Text ) )
+      return false;
+    QByteArray body = R"({"type":"FeatureCollection","features":[)";
+    for ( int i = 0; i < count; ++i )
+    {
+      if ( i > 0 )
+        body += ',';
+      const QByteArray context = i == invalidIndex ? QByteArrayLiteral( "forest" ) : QByteArrayLiteral( "park" );
+      body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":")" ) + context + QByteArray( R"("},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
+    }
+    body += "]}";
+    return geojson.write( body ) > 0;
+  }
+} // namespace
+
 void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceResponsive()
 {
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
-
-  QFile geojson( tempDir.filePath( u"trees.geojson"_s ) );
-  QVERIFY( geojson.open( QIODevice::WriteOnly | QIODevice::Text ) );
-  QByteArray body = R"({"type":"FeatureCollection","features":[)";
-  for ( int i = 0; i < 2500; ++i )
-  {
-    if ( i > 0 )
-      body += ',';
-    body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":"park"},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
-  }
-  body += "]}";
-  QVERIFY( geojson.write( body ) > 0 );
-  geojson.close();
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 2500 ) );
 
   QgsAiFileContextProvider contextProvider( tempDir.path() );
   QgsProject project;
@@ -649,17 +661,50 @@ void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceRes
   QJsonObject args;
   args.insert( u"path"_s, u"trees.geojson"_s );
 
-  bool interfaceEventsRan = false;
-  QTimer interfaceTimer;
-  interfaceTimer.setSingleShot( true );
-  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
-  interfaceTimer.start( 0 );
-
+  const QgsAiTestBackgroundProbe probe;
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
-  QVERIFY2( interfaceEventsRan, "add_layer quality check blocked the interface thread" );
+  QVERIFY2( probe.maxLoopLevel() >= 1, "add_layer quality check blocked the interface thread" );
   QCOMPARE( result.output.toObject().value( u"quality_checks"_s ).toObject().value( u"context_values_valid"_s ).toBool(), true );
   QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckFindsInvalidValue()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 50, 10 ) );
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  const QJsonObject checks = result.output.toObject().value( u"quality_checks"_s ).toObject();
+  QCOMPARE( checks.value( u"context_values_valid"_s ).toBool( true ), false );
+  QCOMPARE( checks.value( u"passed"_s ).toBool( true ), false );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileStopDuringQualityCheckRemovesLayer()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 2500 ) );
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+
+  // Stop while the new layer is being checked: the canceled call must leave no layer behind.
+  const QgsAiTestBackgroundProbe probe( []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QCOMPARE( project.mapLayers().size(), 0 );
 }
 
 void TestQgsAiToolRegistry::addLayerFromServiceLoadsXyzAndRollsBack()

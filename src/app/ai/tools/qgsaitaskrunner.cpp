@@ -229,7 +229,9 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsAiBackgroundTask *task, const 
   };
   QObject::connect( task, &QgsTask::taskCompleted, &loop, finishRun );
   QObject::connect( task, &QgsTask::taskTerminated, &loop, finishRun );
-  QObject::connect( task, &QgsTask::progressChanged, &loop, [label]( double progress ) { reportProgress( label, progress ); }, Qt::QueuedConnection );
+  // Auto: direct when QgsTask re-emits progress on this thread, queued when a task emits it from
+  // its worker. Either way the handler runs here, and before the completion that quits the loop.
+  QObject::connect( task, &QgsTask::progressChanged, &loop, [label]( double progress ) { reportProgress( label, progress ); } );
 
   const QPointer<QgsAiBackgroundTask> taskGuard( task );
   task->armUserCancel();

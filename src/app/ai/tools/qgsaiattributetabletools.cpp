@@ -385,10 +385,10 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( !layer->fields().at( fieldIndex ).convertCompatible( convertedValue, &conversionError ) )
     return QgsAiToolResult::error( conversionError.isEmpty() ? u"Value is not compatible with field: %1"_s.arg( fieldName ) : conversionError );
 
+  // Only parse here: the iterator prepares and evaluates the filter in the worker.
   QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
   context.setFields( layer->fields() );
-  QgsExpression filter( filterExpression );
-  filter.prepare( &context );
+  const QgsExpression filter( filterExpression );
 
   QgsFeatureRequest request;
   request.setFilterExpression( filterExpression );
@@ -428,10 +428,15 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
     options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Updating attributes"_s,
       [job]( QgsFeedback *feedback ) {
-        QgsFeatureIterator it = job->source->getFeatures( job->request );
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
@@ -456,11 +461,14 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
 
   if ( wait.abandoned )
     return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Batch attribute update was canceled."_s );
   if ( !wait.succeeded )
     return QgsAiToolResult::error( wait.error );
-  if ( layerGuard.isNull() || layerChanged )
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
   const QList<PendingUpdate> &pendingUpdates = job->pendingUpdates;
 
@@ -560,8 +568,7 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   bool needsGeometry = false;
   if ( !filterExpression.isEmpty() )
   {
-    QgsExpression filter( filterExpression );
-    filter.prepare( &context );
+    const QgsExpression filter( filterExpression );
     needsGeometry = filter.needsGeometry();
     const QSet<int> attributeIndexes = filter.referencedAttributeIndexes( layer->fields() );
     if ( !attributeIndexes.isEmpty() )
@@ -602,10 +609,15 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
     options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Selecting features"_s,
       [job]( QgsFeedback *feedback ) {
-        QgsFeatureIterator it = job->source->getFeatures( job->request );
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
@@ -627,17 +639,22 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
 
   if ( wait.abandoned )
     return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Feature selection was canceled."_s );
   if ( !wait.succeeded )
     return QgsAiToolResult::error( wait.error );
-  if ( layerGuard.isNull() || layerChanged )
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
   const QgsFeatureIds &ids = job->ids;
 
   const int beforeSelectedCount = layer->selectedFeatureCount();
   phaseTimer.restart();
-  layer->selectByIds( ids, behavior, layerChanged );
+  // The ids come from a snapshot of a layer that did not change meanwhile (checked above),
+  // so they are valid: skip the second, GUI-thread lookup that validateIds would run.
+  layer->selectByIds( ids, behavior, false );
   qgsAiLogPerf( u"select_features"_s, u"apply"_s, phaseTimer.elapsed() );
 
   QJsonObject diff;
