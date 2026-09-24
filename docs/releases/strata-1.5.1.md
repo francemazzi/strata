@@ -15,6 +15,28 @@ signed assets and receipts match this tag.
   at slow feature loops instead of refusing them.
 - Empty HTTP 2xx assistant replies still recover; pre-dispatch configuration
   failures keep the error path.
+- Stop also interrupts web search, web fetch, MCP calls, downloads, DataHub
+  extraction and tree detection within about a second. A Stop or a new chat
+  during a tool no longer leaves the chat locked or cancels the next request.
+- Quitting Strata while an AI tool works in the background no longer crashes.
+- A Processing algorithm that fails before it starts reports its error to the
+  assistant, which can retry, instead of ending the turn as if Stop was pressed.
+- `run_python` restores Processing after every run, and its time budget can no
+  longer hang a run that is waiting on Processing. Loop hints only appear for
+  code that edits features one by one.
+- Dropping only sidecar files explains why nothing opened, and plugins still
+  receive `.qml` and `.qmd` drops.
+
+## Known limitations
+
+- `add_layer_from_file` and `add_layer_from_service` still create and validate
+  the layer on the interface thread, so a large GeoJSON or CSV file, or a slow
+  service, can pause the window briefly.
+- `calculate_field` and `batch_update_attributes` compute values in the
+  background, but writing them into the layer and saving still happen on the
+  interface thread.
+- `run_python` cannot interrupt a single long C++ call; the time budget applies
+  when control returns to Python.
 
 ## Packages
 
