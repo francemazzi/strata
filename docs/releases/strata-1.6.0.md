@@ -132,3 +132,9 @@ the Windows reference machine measurements are still to be done.
   Strata runs the tool's own rollback directly, without asking the model, and tells the
   model in the chat which changes were undone. Changes Strata cannot undo say so on their
   card.
+- Messages: answers are formatted while they stream instead of only at the end, and the
+  chat no longer jumps to the bottom while you read higher up. Every message can be copied,
+  and so can code blocks without opening them. A question can be edited or asked again
+  (also from the error banner, with Retry): the answer after it is dropped and its changes
+  are undone first; an answer that changed something for good is kept, since asking again
+  would change it twice.

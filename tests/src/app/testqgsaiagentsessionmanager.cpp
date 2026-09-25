@@ -291,6 +291,19 @@ namespace
       int mChanges = 0;
   };
 
+  //! Changes something permanently, without asking (like a Processing run writing files).
+  class PermanentTool : public QgsAiTool
+  {
+    public:
+      QString name() const override { return u"write_files"_s; }
+      QString description() const override { return u"permanent tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s }, { u"diff"_s, QJsonObject { { u"rollback_supported"_s, false } } } } );
+      }
+  };
+
   //! A tool whose changes Strata cannot undo, like a database write.
   class IrreversibleTool : public QgsAiTool
   {
@@ -505,6 +518,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void pickedModeIsRememberedAcrossStarts();
     void agentModeAsksOnlyBeforeWhatCannotBeUndone();
     void toolSignalsAndUndoTurn();
+    void retryAndEditUndoTheDroppedAnswer();
     void toolCallLimitPausesAndContinues();
     void cumulativeToolBudgetStopsAutomaticContinuation();
     void repeatedEquivalentToolCallsStopTurn();
@@ -1040,6 +1054,91 @@ void TestQgsAiAgentSessionManager::toolSignalsAndUndoTurn()
   // The model learns about it from a note.
   QCOMPARE( manager.history().last().metadata.value( u"ui_kind"_s ).toString(), u"undo_note"_s );
   QVERIFY( manager.history().last().content.contains( u"set_value"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::retryAndEditUndoTheDroppedAnswer()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  auto toolCall = []( const QString &name ) {
+    return QgsAiTestLoopbackServer::jsonResponse(
+      200,
+      "OK",
+      u"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_%1\",\"type\":\"function\",\"function\":{\"name\":\"%1\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"_s
+        .arg( name )
+        .toUtf8()
+    );
+  };
+  auto answer = []( const QString &text ) {
+    return QgsAiTestLoopbackServer::jsonResponse( 200, "OK", u"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"%1\"},\"finish_reason\":\"stop\"}]}"_s.arg( text ).toUtf8() );
+  };
+  QgsAiTestLoopbackServer server;
+  server.responses << toolCall( u"set_value"_s ) << answer( u"First answer"_s ) << answer( u"Second answer"_s ) << answer( u"Third answer"_s ) << toolCall( u"write_files"_s ) << answer( u"Fourth answer"_s );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QStringList undone;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<UndoableTool>( &undone ) );
+  registry.registerTool( std::make_unique<PermanentTool>() );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  const auto contents = [&manager]() {
+    QStringList texts;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      texts << qgsAiChatRoleToString( message.role ) + u":"_s + ( message.role == QgsAiChatRole::Tool ? message.metadata.value( u"tool_name"_s ).toString() : message.content );
+    return texts;
+  };
+  const auto waitFor = [&manager]( const QString &text ) {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return !manager.hasActiveRequest() && std::any_of( history.cbegin(), history.cend(), [&text]( const QgsAiChatMessage &message ) { return message.content == text; } );
+  };
+
+  manager.sendUserMessage( u"change a value"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( waitFor( u"First answer"_s ), 60000 );
+
+  // Retry: the change of the dropped answer is undone, then the question is asked again.
+  QVERIFY( manager.retryLastTurn() );
+  QCOMPARE( undone, QStringList( { u"tok_1"_s } ) );
+  QTRY_VERIFY_WITH_TIMEOUT( waitFor( u"Second answer"_s ), 60000 );
+  QCOMPARE( contents(), QStringList( { u"user:change a value"_s, u"assistant:Second answer"_s } ) );
+
+  // Edit and resend replaces the question.
+  QVERIFY( manager.editAndResend( manager.history().first().id, u"a different question"_s ) );
+  QTRY_VERIFY_WITH_TIMEOUT( waitFor( u"Third answer"_s ), 60000 );
+  QCOMPARE( contents(), QStringList( { u"user:a different question"_s, u"assistant:Third answer"_s } ) );
+
+  // An answer that changed something for good is not dropped: asking again would change it twice.
+  manager.sendUserMessage( u"write files"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( waitFor( u"Fourth answer"_s ), 60000 );
+  const QStringList before = contents();
+  QString error;
+  QVERIFY( !manager.retryLastTurn( &error ) );
+  QVERIFY2( error.contains( u"cannot be undone"_s ), qPrintable( error ) );
+  QCOMPARE( contents(), before );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()

@@ -572,6 +572,32 @@ bool QgsAiChatHistoryStore::updateMessageMetadata( const QString &sessionId, con
   return touchSession( sessionId );
 }
 
+bool QgsAiChatHistoryStore::removeMessages( const QString &sessionId, const QStringList &messageIds )
+{
+  if ( sessionId.isEmpty() || messageIds.isEmpty() )
+    return false;
+  if ( !ensureReady() )
+    return false;
+
+  QSqlDatabase db = QSqlDatabase::database( connectionName() );
+  QSqlQuery q( db );
+  q.prepare( u"DELETE FROM messages WHERE session_id = ? AND message_id = ?"_s );
+  db.transaction();
+  for ( const QString &messageId : messageIds )
+  {
+    q.addBindValue( sessionId );
+    q.addBindValue( messageId );
+    if ( !q.exec() )
+    {
+      QgsMessageLog::logMessage( u"removeMessages failed: %1"_s.arg( q.lastError().text() ), u"AI/ChatHistory"_s, Qgis::MessageLevel::Warning, false );
+      db.rollback();
+      return false;
+    }
+  }
+  db.commit();
+  return touchSession( sessionId );
+}
+
 bool QgsAiChatHistoryStore::renameSession( const QString &sessionId, const QString &newTitle )
 {
   if ( !ensureReady() )

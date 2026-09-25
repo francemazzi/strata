@@ -888,6 +888,90 @@ int QgsAiAgentSessionManager::undoTurn( const QString &messageId, QStringList *f
   return static_cast<int>( undoneTools.size() );
 }
 
+bool QgsAiAgentSessionManager::dropHistoryFrom( int index, QString *error )
+{
+  const auto fail = [error]( const QString &message ) {
+    if ( error )
+      *error = message;
+    return false;
+  };
+  // A change that stays in the project must not be made a second time by the new answer.
+  for ( int i = index; i < mHistory.size(); ++i )
+  {
+    const QgsAiChatMessage &message = mHistory.at( i );
+    if ( message.role != QgsAiChatRole::Tool || message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1 )
+      continue;
+    const QJsonObject diff = QJsonDocument::fromJson( message.content.toUtf8() ).object().value( u"diff"_s ).toObject();
+    if ( diff.contains( u"rollback_supported"_s ) && !diff.value( u"rollback_supported"_s ).toBool() && !toolMessageCanBeUndone( message ) )
+      return fail( tr( "The answer made a change that cannot be undone (%1); ask a new question instead." ).arg( message.metadata.value( u"tool_name"_s ).toString() ) );
+  }
+  for ( int i = mHistory.size() - 1; i >= index; --i )
+  {
+    if ( toolMessageCanBeUndone( mHistory.at( i ) ) )
+    {
+      QString undoError;
+      if ( !undoToolCallWithoutNote( mHistory.at( i ).id, &undoError, nullptr ) )
+        return fail( tr( "A change of that answer could not be undone: %1" ).arg( undoError ) );
+    }
+  }
+
+  QStringList removed;
+  for ( int i = index; i < mHistory.size(); ++i )
+    removed << mHistory.at( i ).id;
+  mHistory.erase( mHistory.begin() + index, mHistory.end() );
+  if ( mHistoryStore && mHistoryStore->hasPersistentHistoryScope() && !mActiveSessionId.isEmpty() && !removed.isEmpty() )
+    mHistoryStore->removeMessages( mActiveSessionId, removed );
+  emit historyReplaced();
+  return true;
+}
+
+bool QgsAiAgentSessionManager::retryLastTurn( QString *error )
+{
+  if ( hasActiveRequest() )
+  {
+    if ( error )
+      *error = tr( "Wait for the assistant to finish before retrying." );
+    return false;
+  }
+  for ( int i = mHistory.size() - 1; i >= 0; --i )
+  {
+    if ( mHistory.at( i ).role != QgsAiChatRole::User )
+      continue;
+    return editAndResend( mHistory.at( i ).id, mHistory.at( i ).content, error );
+  }
+  if ( error )
+    *error = tr( "There is no message to send again." );
+  return false;
+}
+
+bool QgsAiAgentSessionManager::editAndResend( const QString &messageId, const QString &text, QString *error )
+{
+  if ( hasActiveRequest() )
+  {
+    if ( error )
+      *error = tr( "Wait for the assistant to finish before sending again." );
+    return false;
+  }
+  if ( text.trimmed().isEmpty() )
+  {
+    if ( error )
+      *error = tr( "The message is empty." );
+    return false;
+  }
+  for ( int i = 0; i < mHistory.size(); ++i )
+  {
+    if ( mHistory.at( i ).id != messageId || mHistory.at( i ).role != QgsAiChatRole::User )
+      continue;
+    if ( !dropHistoryFrom( i, error ) )
+      return false;
+    sendUserMessage( text );
+    return true;
+  }
+  if ( error )
+    *error = tr( "The message was not found in this chat." );
+  return false;
+}
+
 bool QgsAiAgentSessionManager::continueAfterToolLimit( const QString &messageId )
 {
   if ( !mRouter || hasActiveRequest() || messageId.isEmpty() )

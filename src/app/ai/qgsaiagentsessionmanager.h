@@ -131,6 +131,19 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     int undoTurn( const QString &messageId, QStringList *failures = nullptr );
 
     /**
+     * Sends the last user message again and drops the answer after it, e.g. after an error.
+     * Changes of the dropped answer are undone first; returns FALSE with \a error when a
+     * request runs, nothing can be retried, or a change cannot be undone.
+     */
+    bool retryLastTurn( QString *error = nullptr );
+
+    /**
+     * Replaces the user message \a messageId with \a text and sends it, dropping everything
+     * after it. Changes made since are undone first, as for retryLastTurn().
+     */
+    bool editAndResend( const QString &messageId, const QString &text, QString *error = nullptr );
+
+    /**
      * Sets the persistent chat history store. When set, every message appended
      * to the in-memory history is also written to SQLite when the current
      * history scope is persistent. Pass nullptr to disable persistence.
@@ -382,6 +395,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     bool undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName );
     //! Tells the model which tool calls the user undid.
     void recordUndoNote( const QStringList &toolNames );
+    //! Undoes the changes of the history from \a index on, then drops those messages.
+    bool dropHistoryFrom( int index, QString *error );
 
     void loadPersistedBehaviorSettings();
     void persistBehaviorSettings() const;

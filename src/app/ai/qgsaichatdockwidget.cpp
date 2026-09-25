@@ -70,6 +70,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QClipboard>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QColor>
@@ -874,6 +875,11 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mErrorActionButton = new QPushButton( mErrorBanner );
   mErrorActionButton->setObjectName( u"aiRequestErrorAction"_s );
   errorActions->addWidget( mErrorActionButton );
+  QPushButton *retryButton = new QPushButton( tr( "Retry" ), mErrorBanner );
+  retryButton->setObjectName( u"aiRequestErrorRetry"_s );
+  retryButton->setToolTip( tr( "Send the last message again." ) );
+  connect( retryButton, &QPushButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
+  errorActions->addWidget( retryButton );
   errorActions->addStretch( 1 );
   QPushButton *dismissErrorButton = new QPushButton( tr( "Dismiss" ), mErrorBanner );
   dismissErrorButton->setObjectName( u"aiRequestErrorDismiss"_s );
@@ -1517,8 +1523,13 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
       if ( QWidget *actions = createToolResultActionsWidget( message ) )
         cardLayout->addWidget( actions );
     }
-    else if ( message.role == QgsAiChatRole::User )
+    else if ( message.role == QgsAiChatRole::Assistant && !message.content.trimmed().isEmpty() && message.metadata.value( u"ui_kind"_s ).toString() != "undo_note"_L1 )
     {
+      cardLayout->addLayout( createMessageActionsRow( message, messageWidget ) );
+    }
+    if ( message.role == QgsAiChatRole::User )
+    {
+      QHBoxLayout *row = createMessageActionsRow( message, messageWidget );
       // Shown once the turn has changes that can be undone (refreshUndoTurnButtons).
       QPushButton *undoTurn = new QPushButton( tr( "Undo this turn" ), messageWidget );
       undoTurn->setObjectName( u"aiUndoTurnButton"_s );
@@ -1528,19 +1539,80 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
       undoTurn->setStyleSheet( u"QPushButton#aiUndoTurnButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
       const QString messageId = message.id;
       connect( undoTurn, &QPushButton::clicked, this, [this, messageId]() { undoTurnFromChat( messageId ); } );
-      QHBoxLayout *row = new QHBoxLayout();
-      row->addStretch( 1 );
       row->addWidget( undoTurn );
       cardLayout->addLayout( row );
       mUndoTurnButtons << undoTurn;
     }
   }
 
+  const bool follow = message.role == QgsAiChatRole::User || isTranscriptAtBottom();
   const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
   mTranscriptLayout->insertWidget( insertIndex, messageWidget );
   if ( message.role == QgsAiChatRole::Tool )
     refreshUndoTurnButtons();
-  scrollTranscriptToBottom();
+  // Someone reading higher up is not pulled down; their own message always shows.
+  if ( follow )
+    scrollTranscriptToBottom();
+}
+
+QHBoxLayout *QgsAiChatDockWidget::createMessageActionsRow( const QgsAiChatMessage &message, QWidget *card )
+{
+  QHBoxLayout *row = new QHBoxLayout();
+  row->setContentsMargins( 0, 0, 0, 0 );
+  const QString buttonStyle = u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s;
+  const auto addAction = [&]( const QString &objectName, const QString &text, const QString &tip ) {
+    QToolButton *button = new QToolButton( card );
+    button->setObjectName( objectName );
+    button->setText( text );
+    button->setToolTip( tip );
+    button->setAutoRaise( true );
+    button->setStyleSheet( buttonStyle );
+    row->addWidget( button );
+    return button;
+  };
+  const QString messageId = message.id;
+  const QString text = message.content;
+  QToolButton *copy = addAction( u"aiCopyMessageButton"_s, tr( "Copy" ), tr( "Copy the message text." ) );
+  connect( copy, &QToolButton::clicked, this, [text]() { QApplication::clipboard()->setText( text ); } );
+  if ( message.role == QgsAiChatRole::User )
+  {
+    QToolButton *editButton = addAction( u"aiEditMessageButton"_s, tr( "Edit" ), tr( "Change this message and send it again; what came after it is undone and dropped." ) );
+    connect( editButton, &QToolButton::clicked, this, [this, messageId, text]() {
+      bool ok = false;
+      const QString edited = QInputDialog::getMultiLineText( this, tr( "Edit message" ), tr( "Message" ), text, &ok );
+      if ( ok && !edited.trimmed().isEmpty() )
+        editAndResendFromChat( messageId, edited );
+    } );
+    QToolButton *retry = addAction( u"aiRetryMessageButton"_s, tr( "Retry" ), tr( "Send this message again; what came after it is undone and dropped." ) );
+    connect( retry, &QToolButton::clicked, this, [this, messageId, text]() { editAndResendFromChat( messageId, text ); } );
+  }
+  row->addStretch( 1 );
+  return row;
+}
+
+void QgsAiChatDockWidget::editAndResendFromChat( const QString &messageId, const QString &text )
+{
+  if ( !mSessionManager )
+    return;
+  QString error;
+  if ( !mSessionManager->editAndResend( messageId, text, &error ) )
+    QMessageBox::warning( this, tr( "Send again" ), error );
+}
+
+void QgsAiChatDockWidget::retryFromChat()
+{
+  if ( !mSessionManager )
+    return;
+  hideRequestError();
+  QString error;
+  if ( !mSessionManager->retryLastTurn( &error ) )
+    QMessageBox::warning( this, tr( "Retry" ), error );
+}
+
+bool QgsAiChatDockWidget::isTranscriptAtBottom() const
+{
+  const QScrollBar *bar = mTranscriptScrollArea ? mTranscriptScrollArea->verticalScrollBar() : nullptr;
+  return !bar || bar->value() >= bar->maximum() - 48;
 }
 
 QWidget *QgsAiChatDockWidget::createToolResultActionsWidget( const QgsAiChatMessage &message )
@@ -1850,7 +1922,19 @@ QWidget *QgsAiChatDockWidget::createCollapsibleSection( const QString &title, co
     "QToolButton#aiTechnicalToggle { color: palette(window-text); background: transparent; border: 0; border-radius: 6px; padding: 3px 6px; text-align: left; } "
     "QToolButton#aiTechnicalToggle:hover { background: palette(alternate-base); }"
   ) );
-  layout->addWidget( toggle );
+  QHBoxLayout *header = new QHBoxLayout();
+  header->setContentsMargins( 0, 0, 0, 0 );
+  header->addWidget( toggle );
+  header->addStretch( 1 );
+  // Copy without opening the section first.
+  QToolButton *copy = new QToolButton( section );
+  copy->setObjectName( u"aiCopyCodeButton"_s );
+  copy->setText( tr( "Copy" ) );
+  copy->setAutoRaise( true );
+  copy->setStyleSheet( u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s );
+  connect( copy, &QToolButton::clicked, section, [content]() { QApplication::clipboard()->setText( content ); } );
+  header->addWidget( copy );
+  layout->addLayout( header );
 
   QTextEdit *details = new QTextEdit( section );
   details->setObjectName( u"aiTechnicalContent"_s );
@@ -2790,7 +2874,7 @@ void QgsAiChatDockWidget::appendStreamChunk( const QString &chunk )
     mStreamingTextEdit = new QTextEdit( card );
     mStreamingTextEdit->setObjectName( u"aiStreamingTextEdit"_s );
     mStreamingTextEdit->setReadOnly( true );
-    mStreamingTextEdit->setAcceptRichText( false );
+    mStreamingTextEdit->setAcceptRichText( true );
     mStreamingTextEdit->setFrameShape( QFrame::NoFrame );
     mStreamingTextEdit->setMinimumHeight( 48 );
     applyTranscriptTextEditWrapping( mStreamingTextEdit );
@@ -2799,15 +2883,36 @@ void QgsAiChatDockWidget::appendStreamChunk( const QString &chunk )
     const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
     mTranscriptLayout->insertWidget( insertIndex, card );
     mStreamingInProgress = true;
+    mStreamingText.clear();
   }
-  if ( mStreamingTextEdit )
+  mStreamingText += chunk;
+  // Rendered as markdown at most every 80 ms: a long answer is not parsed again for each token.
+  if ( !mStreamingRenderTimer )
   {
-    QTextCursor cursor = mStreamingTextEdit->textCursor();
-    cursor.movePosition( QTextCursor::End );
-    cursor.insertText( chunk );
-    mStreamingTextEdit->setTextCursor( cursor );
+    mStreamingRenderTimer = new QTimer( this );
+    mStreamingRenderTimer->setSingleShot( true );
+    mStreamingRenderTimer->setInterval( 80 );
+    connect( mStreamingRenderTimer, &QTimer::timeout, this, &QgsAiChatDockWidget::renderStreamingText );
   }
-  scrollTranscriptToBottom();
+  // The first words show at once; what follows is gathered until the timer fires.
+  if ( !mStreamingRenderTimer->isActive() )
+  {
+    renderStreamingText();
+    mStreamingRenderTimer->start();
+  }
+}
+
+void QgsAiChatDockWidget::renderStreamingText()
+{
+  if ( !mStreamingTextEdit )
+    return;
+  const bool follow = isTranscriptAtBottom();
+  mStreamingTextEdit->setHtml( renderMarkdown( mStreamingText ) );
+  // Tall enough for the text: the transcript scrolls, not the message.
+  mStreamingTextEdit->document()->setTextWidth( mStreamingTextEdit->viewport()->width() );
+  mStreamingTextEdit->setMinimumHeight( std::max( 48, static_cast<int>( mStreamingTextEdit->document()->size().height() ) + 8 ) );
+  if ( follow )
+    scrollTranscriptToBottom();
 }
 
 void QgsAiChatDockWidget::closeStreamingAssistantMessage()
@@ -2825,6 +2930,9 @@ void QgsAiChatDockWidget::closeStreamingAssistantMessage()
   }
   mStreamingInProgress = false;
   mStreamingTextEdit = nullptr;
+  mStreamingText.clear();
+  if ( mStreamingRenderTimer )
+    mStreamingRenderTimer->stop();
 }
 
 void QgsAiChatDockWidget::updateRuntimeState( const QString &state, const QString &detail )

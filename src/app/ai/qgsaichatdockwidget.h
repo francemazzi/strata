@@ -101,6 +101,13 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     //! Shows "Undo this turn" on the user messages whose turn has changes that can be undone.
     void refreshUndoTurnButtons();
     void undoToolFromChat( const QString &toolMessageId );
+    //! Copy on assistant messages; Copy, Edit and Retry on user messages.
+    QHBoxLayout *createMessageActionsRow( const QgsAiChatMessage &message, QWidget *card );
+    void editAndResendFromChat( const QString &messageId, const QString &text );
+    void retryFromChat();
+    //! TRUE when the transcript is scrolled to (or near) its end.
+    bool isTranscriptAtBottom() const;
+    void renderStreamingText();
     void undoTurnFromChat( const QString &messageId );
     //! The card of the tool running now: what it does, for how long, and Stop.
     void showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args );
@@ -232,6 +239,9 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
     bool mStreamingInProgress = false;
     QTextEdit *mStreamingTextEdit = nullptr;
+    //! Raw text streamed so far, rendered as markdown every 80 ms.
+    QString mStreamingText;
+    QTimer *mStreamingRenderTimer = nullptr;
     bool mRequestRunning = false;
 
     QPointer<QFrame> mLiveToolCard;

@@ -671,7 +671,8 @@ void TestQgsAiChatDockWidget::doesNotDuplicateStreamedAssistantResponse()
 
   manager.responseChunkReceived( u"Ciao! Come posso "_s );
   manager.responseChunkReceived( u"aiutarti con QGIS oggi?"_s );
-  QCOMPARE( transcriptText( dock ).count( u"Ciao! Come posso aiutarti con QGIS oggi?"_s ), 1 );
+  // The streamed text is rendered as markdown every 80 ms.
+  QTRY_COMPARE_WITH_TIMEOUT( transcriptText( dock ).count( u"Ciao! Come posso aiutarti con QGIS oggi?"_s ), 1, 2000 );
 
   manager.messageAdded( assistantMessage );
   QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
@@ -1078,6 +1079,11 @@ void TestQgsAiChatDockWidget::toolCardsShowLiveStateAndUndo()
   QVERIFY( summaryShown );
   QPushButton *undo = dock.findChild<QPushButton *>( u"aiUndoToolButton"_s );
   QVERIFY( undo && undo->isEnabled() );
+  // Messages have their actions: Copy on the answer, Copy, Edit and Retry on the question.
+  QCOMPARE( dock.findChildren<QToolButton *>( u"aiCopyMessageButton"_s ).size(), 2 );
+  QVERIFY( dock.findChild<QToolButton *>( u"aiEditMessageButton"_s ) );
+  QVERIFY( dock.findChild<QToolButton *>( u"aiRetryMessageButton"_s ) );
+  QVERIFY( dock.findChild<QPushButton *>( u"aiRequestErrorRetry"_s ) );
   QPushButton *undoTurn = dock.findChild<QPushButton *>( u"aiUndoTurnButton"_s );
   QVERIFY( undoTurn && !undoTurn->isHidden() );
 
