@@ -14,20 +14,9 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingAlgRunnerTask,
     QgsProcessingException,
-    QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
     QgsProcessingModelAlgorithm,
-    QgsProcessingParameterAnnotationLayer,
-    QgsProcessingParameterFeatureSource,
-    QgsProcessingParameterMapLayer,
-    QgsProcessingParameterMeshLayer,
-    QgsProcessingParameterMultipleLayers,
-    QgsProcessingParameterPointCloudLayer,
-    QgsProcessingParameterRasterLayer,
-    QgsProcessingParameterVectorLayer,
-    QgsProcessingUtils,
     QgsProject,
-    QgsProperty,
     QgsTask,
 )
 from qgis.PyQt import sip
@@ -58,11 +47,23 @@ _original_processing_execute = None
 _abandoned_runs = []
 
 
-class RunPythonTimeout(BaseException):
+class RunPythonInterrupted(BaseException):
+    """Stops a run_python snippet. A BaseException, so ``except Exception`` lets it through."""
+
+
+class RunPythonTimeout(RunPythonInterrupted):
     """Raised when run_python exceeds its budget or Stop is pressed outside Processing."""
 
     def __init__(self, message=None):
         super().__init__(message or _interrupt_message or "Python execution timed out.")
+
+
+class RunPythonLayersRemoved(RunPythonInterrupted):
+    """Raised when project layers were removed while processing.run was running.
+
+    The snippet may still hold Python references to them, and sip does not notice
+    when C++ deletes a layer it created: using one would crash Strata.
+    """
 
 
 def _wrap_bridge(bridge_ptr):
@@ -114,55 +115,6 @@ def _runs_in_background(alg):
     return True
 
 
-_LAYER_PARAMETER_TYPES = {
-    QgsProcessingParameterFeatureSource.typeName(),
-    QgsProcessingParameterVectorLayer.typeName(),
-    QgsProcessingParameterRasterLayer.typeName(),
-    QgsProcessingParameterMapLayer.typeName(),
-    QgsProcessingParameterMultipleLayers.typeName(),
-    QgsProcessingParameterMeshLayer.typeName(),
-    QgsProcessingParameterPointCloudLayer.typeName(),
-    QgsProcessingParameterAnnotationLayer.typeName(),
-}
-
-
-def _input_project_layers(alg, parameters, context):
-    """Project layers read by alg's inputs. Never loads a layer.
-
-    Declared as the task's dependent layers, they make QGIS refuse to remove them or
-    close the project while the run is pumping events.
-    """
-    project = QgsProject.instance()
-    layers = {}
-
-    def collect(value):
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                collect(item)
-            return
-        if isinstance(value, QgsProcessingFeatureSourceDefinition):
-            collect(value.source.staticValue())
-            return
-        if isinstance(value, QgsProperty):
-            if value.propertyType() == Qgis.PropertyType.Static:
-                collect(value.staticValue())
-            return
-        layer = value if isinstance(value, QgsMapLayer) else None
-        if layer is None and isinstance(value, str) and value:
-            layer = QgsProcessingUtils.mapLayerFromString(value, context, False)
-        if layer is not None and project.mapLayer(layer.id()) is not None:
-            layers[layer.id()] = layer
-
-    for definition in alg.parameterDefinitions():
-        if (
-            definition.isDestination()
-            or definition.type() not in _LAYER_PARAMETER_TYPES
-        ):
-            continue
-        collect((parameters or {}).get(definition.name()))
-    return list(layers.values())
-
-
 def _raise_async(thread_id, message):
     global _interrupt_message
     _interrupt_message = message
@@ -190,7 +142,12 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
         QgsTask.Flag.CanCancel | QgsTask.Flag.CancelWithoutPrompt | QgsTask.Flag.Silent
     )
     task = QgsProcessingAlgRunnerTask(alg, parameters, context, feedback, flags)
-    task.setDependentLayers(_input_project_layers(alg, parameters, context))
+    # The snippet may hold Python references to any project layer, not only the
+    # inputs, and sip does not notice when C++ deletes a layer it created. While the
+    # run pumps events, QGIS refuses to remove the layers a task depends on or to
+    # close the project.
+    project = QgsProject.instance()
+    task.setDependentLayers(list(project.mapLayers().values()))
     if task.isCanceled():
         # prepare() failed in the constructor: the task never runs and never emits
         # executed, so report the failure now instead of waiting forever.
@@ -218,8 +175,18 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
         if not sip.isdeleted(task):
             task.cancel()
 
+    # A plugin can still remove layers from code: the task manager then cancels the
+    # task, and the snippet must not go on with its references.
+    removed = []
+
+    def on_layers_will_be_removed(items):
+        for item in items:
+            layer = item if isinstance(item, QgsMapLayer) else project.mapLayer(item)
+            removed.append(layer.name() if layer is not None else str(item))
+
     task.executed.connect(on_executed)
     feedback.errorReported.connect(on_error)
+    project.layersWillBeRemoved.connect(on_layers_will_be_removed)
     if bridge is not None:
         bridge.canceled.connect(on_bridge_canceled)
         feedback.progressChanged.connect(bridge.setProgress)
@@ -228,7 +195,10 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
         loop.exec()
     finally:
         # The caller may reuse its feedback for later runs: leave no connection behind.
-        connections = [(feedback.errorReported, on_error)]
+        connections = [
+            (feedback.errorReported, on_error),
+            (project.layersWillBeRemoved, on_layers_will_be_removed),
+        ]
         if bridge is not None:
             connections += [
                 (bridge.canceled, on_bridge_canceled),
@@ -249,6 +219,13 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
             task.cancel()
         raise QgsProcessingException(
             "Strata is closing; the Processing run was stopped."
+        )
+
+    if removed:
+        raise RunPythonLayersRemoved(
+            "Project layers were removed while processing.run was running: "
+            + ", ".join(removed)
+            + "."
         )
 
     if not outcome["ok"] and not catch_exceptions:

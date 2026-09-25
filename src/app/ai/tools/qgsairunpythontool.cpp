@@ -220,8 +220,10 @@ QString QgsAiRunPythonTool::description() const
     "for static file changes. Prefer calculate_field, batch_update_attributes or "
     "run_processing_algorithm instead of Python feature loops: they run in the background "
     "and can be stopped. Python execution stops after a time budget (120 s by default, "
-    "configurable in the AI settings); time spent inside processing.run does not count, "
-    "and processing.run keeps the window responsive and honors Stop."
+    "configurable in the AI settings). processing.run runs the algorithms shipped with Strata "
+    "(native, GDAL, and models built from them) in the background: the window stays responsive, "
+    "Stop works and that time does not count. Script and plugin algorithms run on the interface "
+    "thread, like in the Python console. While processing.run works, project layers cannot be removed."
   );
 }
 
@@ -421,12 +423,15 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   const QStringList hints = featureLoopHints( code );
   if ( activeFeedback.canceledByUser() )
     return QgsAiToolResult::canceledResult( u"Python execution was canceled."_s );
+  if ( exceptionType == "RunPythonLayersRemoved"_L1 )
+  {
+    // Removed from code by a plugin: a tool error the model can react to, not a Stop.
+    return QgsAiToolResult::error( u"%1 run_python stopped so the snippet would not use a deleted layer. Fetch the layers again and retry."_s.arg( exceptionMessage ) );
+  }
   if ( exceptionType == "RunPythonTimeout"_L1 )
   {
-    QString message
-      = u"run_python stopped after %1 s of Python (time inside processing.run does not count). Use calculate_field, batch_update_attributes or run_processing_algorithm for long GIS work."_s.arg(
-        mTimeoutSeconds
-      );
+    QString message = u"run_python stopped after %1 s of Python (time inside background processing.run calls does not count). Use calculate_field, batch_update_attributes or run_processing_algorithm for long GIS work."_s
+                        .arg( mTimeoutSeconds );
     for ( const QString &hint : hints )
       message += ' ' + hintMessage( hint );
     return QgsAiToolResult::error( message );

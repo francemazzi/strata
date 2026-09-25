@@ -17,9 +17,7 @@ from qgis.core import (
     QgsPointXY,
     QgsProcessing,
     QgsProcessingAlgorithm,
-    QgsProcessingContext,
     QgsProcessingException,
-    QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
     QgsProcessingModelAlgorithm,
     QgsProcessingModelChildAlgorithm,
@@ -32,7 +30,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.sip import unwrapinstance
 from qgis.testing import QgisTestCase, start_app
-from strata_ai.run_python import RunPythonTimeout, session
+from strata_ai.run_python import RunPythonLayersRemoved, RunPythonTimeout, session
 
 start_app()
 
@@ -208,46 +206,41 @@ class TestStrataAiRunPython(QgisTestCase):
         self.assertIsInstance(result["OUTPUT"], QgsVectorLayer)
         QgsProject.instance().removeMapLayer(layer.id())
 
-    def test_off_thread_run_declares_project_input_layers(self):
+    def test_off_thread_run_declares_all_project_layers(self):
         layer = _memory_points(8)
-        QgsProject.instance().addMapLayer(layer)
-        self.addCleanup(QgsProject.instance().removeMapLayer, layer.id())
-        declared = {"count": 0}
-        QTimer.singleShot(
-            0,
-            lambda: declared.__setitem__(
-                "count",
-                len(QgsApplication.taskManager().tasksDependentOnLayer(layer)),
-            ),
-        )
+        other = _memory_points(1, "held-by-snippet")
+        QgsProject.instance().addMapLayers([layer, other])
+        self.addCleanup(QgsProject.instance().removeMapLayers, [layer.id(), other.id()])
+        declared = {}
+
+        def record():
+            manager = QgsApplication.taskManager()
+            declared["input"] = len(manager.tasksDependentOnLayer(layer))
+            declared["other"] = len(manager.tasksDependentOnLayer(other))
+
+        QTimer.singleShot(0, record)
         with session(0, 30):
             processing.run("native:buffer", _buffer_parameters(layer))
-        # While the run pumps events, QGIS refuses to remove the input or close the project.
-        self.assertEqual(declared["count"], 1)
+        # While the run pumps events, QGIS refuses to remove any project layer, not only
+        # the input: the snippet may hold references to them.
+        self.assertEqual(declared, {"input": 1, "other": 1})
 
-    def test_input_project_layers_resolves_references_without_loading(self):
-        in_project = _memory_points(1, "in_project")
-        QgsProject.instance().addMapLayer(in_project)
-        self.addCleanup(QgsProject.instance().removeMapLayer, in_project.id())
-        outside = _memory_points(1, "outside")
-        alg = QgsApplication.processingRegistry().algorithmById("native:buffer")
-        context = QgsProcessingContext()
-        context.setProject(QgsProject.instance())
-
-        def resolved(value):
-            layers = run_python._input_project_layers(
-                alg, {"INPUT": value, "OUTPUT": "TEMPORARY_OUTPUT"}, context
-            )
-            return [layer.id() for layer in layers]
-
-        self.assertEqual(resolved(in_project), [in_project.id()])
-        self.assertEqual(resolved(in_project.id()), [in_project.id()])
-        self.assertEqual(
-            resolved(QgsProcessingFeatureSourceDefinition(in_project.id(), True)),
-            [in_project.id()],
-        )
-        self.assertEqual(resolved(outside), [])
-        self.assertEqual(resolved("/does/not/exist.gpkg"), [])
+    def test_layer_removed_by_code_during_run_stops_the_snippet(self):
+        other = _memory_points(1, "held-by-snippet")
+        QgsProject.instance().addMapLayer(other)
+        other_id = other.id()
+        # A plugin removes a layer from code: the task manager cancels the run.
+        QTimer.singleShot(200, lambda: QgsProject.instance().removeMapLayer(other_id))
+        started = time.monotonic()
+        with self.assertRaises(RunPythonLayersRemoved) as raised:
+            with session(0, 30):
+                try:
+                    processing.run("strataaitest:slow", {"DURATION": 30})
+                except Exception:  # pylint: disable=broad-except
+                    self.fail("the snippet must not be able to catch it and go on")
+        self.assertIn("held-by-snippet", str(raised.exception))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIsNone(QgsProject.instance().mapLayer(other_id))
 
     def test_run_and_load_results_adds_layer(self):
         layer = _memory_points(4, "load-src")
