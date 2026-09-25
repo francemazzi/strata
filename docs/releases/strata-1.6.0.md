@@ -20,3 +20,7 @@ the Windows reference machine measurements are still to be done.
 - Workspace scans skip version control, cache and virtual environment folders at any
   depth instead of walking them, stop after a time budget, skip network shares unless
   allowed (`strata/index/allow_network_workspace`) and OneDrive placeholders on Windows.
+- Layers are prepared for indexing on the interface thread from metadata only; their
+  features are read in the background. Geometries are only turned into WKT when the
+  privacy setting allows them in the model context, and layers from remote services are
+  indexed from their metadata unless `strata/index/include_remote_layers` is on.

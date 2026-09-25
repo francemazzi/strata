@@ -26,6 +26,7 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QList>
+#include <QScopeGuard>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -803,6 +804,10 @@ void TestQgsAiWorkspaceIndex::chunkerOutputPersistsAsLayerChunks()
   auto layer = std::make_unique<QgsVectorLayer>( shpPath, u"points"_s, u"ogr"_s );
   QVERIFY( layer->isValid() );
 
+  // WKT blobs are only collected when the privacy setting allows geometries in the model context.
+  QgsSettings wktSettings;
+  wktSettings.setValue( u"strata/privacy/include_layer_wkt_in_model_context"_s, true );
+  const auto restoreWkt = qScopeGuard( [&wktSettings]() { wktSettings.remove( u"strata/privacy/include_layer_wkt_in_model_context"_s ); } );
   const auto chunks = QgsAiLayerChunker::chunkVector( layer.get() );
   QVERIFY( !chunks.isEmpty() );
 
