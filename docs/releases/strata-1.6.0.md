@@ -31,3 +31,7 @@ the Windows reference machine measurements are still to be done.
   changed. Indexing stops within one batch when canceled, when an import starts or when
   Strata quits, and a request that arrives during a pass is run afterwards instead of
   being dropped.
+- The project health check behind the chat's suggestion card samples layer geometries in
+  the background. It used to read up to 200 features of every vector layer on the interface
+  thread whenever layers changed (about 0.85 s with 100 layers) and again before every
+  model round; the model context now reuses the last completed check.

@@ -27,6 +27,7 @@
 #include "ai/index/qgsaiembeddingprovider.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "layers/qgsbatchedlayeraddcontroller.h"
 #include "qgisapp.h"
 #include "qgsaichatpromptedit.h"
@@ -1113,8 +1114,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   } );
 
   // Suggestions are recomputed when the project changes shape; the debounce
-  // matters because the collector samples features (up to 200 per vector layer)
-  // and layer batches would otherwise stall the UI.
+  // groups layer batches into one check, which samples features (up to 200 per
+  // vector layer) on a worker thread.
   mGisCardRefreshTimer = new QTimer( this );
   mGisCardRefreshTimer->setSingleShot( true );
   mGisCardRefreshTimer->setInterval( 1500 );
@@ -2796,7 +2797,7 @@ void QgsAiChatDockWidget::sendMessage()
   if ( gisMentionRe.match( input ).hasMatch() )
   {
     // Explicit user request: attach the full block regardless of toggles or dismissals.
-    const QString gisBlock = QgsAiGisSuggestionEngine::formatHealthBlock( QgsAiGisSuggestionEngine::suggestionsForProject( QgsProject::instance() ), true );
+    const QString gisBlock = QgsAiGisSuggestionEngine::formatHealthBlock( QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject::instance() ), true );
     outgoing += u"\n\n"_s + ( gisBlock.isEmpty() ? tr( "(No GIS suggestions for the current project right now.)" ) : gisBlock );
   }
   mSessionManager->sendUserMessage( outgoing, contextFiles );
@@ -3227,7 +3228,7 @@ void QgsAiChatDockWidget::dismissGisSuggestion( const QString &suggestionId )
     dismissed << suggestionId;
     settings.setValue( key, dismissed );
   }
-  refreshGisSuggestionCard();
+  showGisSuggestions( mGisSuggestions );
 }
 
 void QgsAiChatDockWidget::refreshGisSuggestionCard()
@@ -3235,14 +3236,67 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
   if ( !mGisCardContainer || !mGisCardBodyLayout )
     return;
 
-  // Strata: the suggestion engine samples features from every layer on the main thread;
-  // while a batched layer import is running, retry later instead of competing with it
+  // Strata: while a batched layer import is running, retry later instead of competing with it
   if ( QgsBatchedLayerAddController::instance()->isActive() )
   {
     if ( mGisCardRefreshTimer )
       mGisCardRefreshTimer->start( 5000 );
     return;
   }
+
+  QgsProject *project = QgsProject::instance();
+  if ( !QgsAiGisSuggestionEngine::suggestionsEnabledForProject( project ) )
+  {
+    showGisSuggestions( {} );
+    return;
+  }
+
+  // Geometries are sampled on a worker thread; the card changes when the check ends.
+  // A refresh asked for meanwhile runs after it, because the project has changed since.
+  if ( mGisSuggestionTask )
+  {
+    mGisSuggestionRefreshPending = true;
+    return;
+  }
+
+  QgsAiPerfScope perf( u"chat"_s, u"gis_suggestions_snapshot"_s, 50 );
+  QgsAiGisProjectSnapshot snapshot = QgsAiGisSuggestionEngine::snapshotProject( project, true );
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  if ( !manager )
+  {
+    const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::evaluate( snapshot );
+    QgsAiGisSuggestionEngine::rememberGeometrySamples( snapshot );
+    showGisSuggestions( suggestions );
+    return;
+  }
+
+  QgsAiGisSuggestionTask *task = new QgsAiGisSuggestionTask( std::move( snapshot ) );
+  mGisSuggestionTask = task;
+  const auto finish = [this, task]( bool completed ) {
+    if ( mGisSuggestionTask == task )
+      mGisSuggestionTask = nullptr;
+    if ( completed )
+      QgsAiGisSuggestionEngine::rememberGeometrySamples( task->snapshot() );
+    if ( mGisSuggestionRefreshPending )
+    {
+      mGisSuggestionRefreshPending = false;
+      refreshGisSuggestionCard();
+    }
+    else if ( completed )
+    {
+      showGisSuggestions( task->suggestions() );
+    }
+  };
+  connect( task, &QgsTask::taskCompleted, this, [finish]() { finish( true ); } );
+  connect( task, &QgsTask::taskTerminated, this, [finish]() { finish( false ); } );
+  manager->addTask( task );
+}
+
+void QgsAiChatDockWidget::showGisSuggestions( const QList<QgsAiGisSuggestion> &suggestions )
+{
+  mGisSuggestions = suggestions;
+  if ( !mGisCardContainer || !mGisCardBodyLayout )
+    return;
 
   while ( QLayoutItem *item = mGisCardBodyLayout->takeAt( 0 ) )
   {
@@ -3251,19 +3305,12 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
     delete item;
   }
 
-  QgsProject *project = QgsProject::instance();
-  if ( !QgsAiGisSuggestionEngine::suggestionsEnabledForProject( project ) )
-  {
-    mGisCardContainer->setVisible( false );
-    return;
-  }
-
+  const QgsProject *project = QgsProject::instance();
   const QString projectFile = project ? project->fileName() : QString();
   const QStringList dismissed = QgsSettings().value( QgsAiGisSuggestionEngine::dismissedSettingsKey( projectFile ) ).toStringList();
 
   // Low-risk findings stay model-side context only; the card surfaces what deserves attention.
   QList<QgsAiGisSuggestion> visible;
-  const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::suggestionsForProject( project );
   for ( const QgsAiGisSuggestion &suggestion : suggestions )
   {
     if ( suggestion.risk == "low"_L1 || dismissed.contains( suggestion.id ) )

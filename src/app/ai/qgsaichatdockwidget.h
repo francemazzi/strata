@@ -18,6 +18,7 @@
 
 #include "qgis_app.h"
 #include "qgsaiagentsessionmanager.h"
+#include "qgsaigissuggestionengine.h"
 #include "qgsdockwidget.h"
 
 #include <QList>
@@ -37,8 +38,6 @@ class QTextEdit;
 class QTimer;
 class QToolButton;
 class QVBoxLayout;
-
-struct QgsAiGisSuggestion;
 
 class QgsAiChatPromptEdit;
 class QgsAiDiscoveryController;
@@ -162,6 +161,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void maybeShowWelcomeBanner();
     void sendGisSuggestionToChat( const QgsAiGisSuggestion &suggestion );
     void dismissGisSuggestion( const QString &suggestionId );
+    void showGisSuggestions( const QList<QgsAiGisSuggestion> &suggestions );
 
     struct AttachedFile
     {
@@ -201,6 +201,9 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QWidget *mGisCardBody = nullptr;
     QVBoxLayout *mGisCardBodyLayout = nullptr;
     QTimer *mGisCardRefreshTimer = nullptr;
+    QPointer<QgsAiGisSuggestionTask> mGisSuggestionTask;
+    bool mGisSuggestionRefreshPending = false;
+    QList<QgsAiGisSuggestion> mGisSuggestions;
 
     QFrame *mErrorBanner = nullptr;
     QLabel *mErrorTitleLabel = nullptr;

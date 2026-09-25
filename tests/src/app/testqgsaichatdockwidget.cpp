@@ -490,9 +490,10 @@ void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
   QVERIFY( !dock.findChild<QWidget *>( u"aiGisSuggestionsTab"_s ) );
   QVERIFY( !dock.findChild<QListWidget *>( u"aiGisSuggestionList"_s ) );
 
+  // The check samples geometries on a worker thread: the card appears when it ends.
   QFrame *card = dock.findChild<QFrame *>( u"aiGisSuggestionCard"_s );
   QVERIFY( card );
-  QVERIFY( card->isVisible() );
+  QTRY_VERIFY_WITH_TIMEOUT( card->isVisible(), 10000 );
 
   QPushButton *review = dock.findChild<QPushButton *>( u"aiGisCardReviewButton"_s );
   QVERIFY( review );
