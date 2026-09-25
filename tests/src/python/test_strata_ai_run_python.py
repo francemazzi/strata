@@ -1,5 +1,7 @@
 """QGIS unit tests for strata_ai.run_python session helpers."""
 
+import sys
+import textwrap
 import threading
 import time
 import unittest
@@ -27,7 +29,7 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtCore import QCoreApplication, QTimer
 from qgis.PyQt.sip import unwrapinstance
 from qgis.testing import QgisTestCase, start_app
 from strata_ai.run_python import RunPythonLayersRemoved, RunPythonTimeout, session
@@ -135,6 +137,18 @@ class _ModelProvider(QgsProcessingProvider):
     def loadAlgorithms(self):
         self.addAlgorithm(_model_with_child("trustedchild", "strataaitest:slow"))
         self.addAlgorithm(_model_with_child("untrustedchild", "strataaiuntrusted:slow"))
+
+
+def _run_snippet(source, timeout_s, namespace=None, bridge_ptr=0):
+    """Runs source like the run_python wrapper does: compiled as <ai_run_python>."""
+    code = compile(textwrap.dedent(source), "<ai_run_python>", "exec")
+    namespace = dict(namespace or {})
+    with session(bridge_ptr, timeout_s, code):
+        exec(code, namespace)
+    return namespace
+
+
+_HAS_MONITORING = hasattr(sys, "monitoring")
 
 
 def _memory_points(count, name="pts"):
@@ -387,6 +401,113 @@ class TestStrataAiRunPython(QgisTestCase):
                 except RunPythonTimeout:
                     caught += 1
         self.assertEqual(caught, 2)
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_snippet_timeout_interrupts_a_one_line_loop(self):
+        started = time.monotonic()
+        with self.assertRaises(RunPythonTimeout):
+            _run_snippet("while True: pass", 1)
+        self.assertLess(time.monotonic() - started, 10)
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_snippet_timeout_runs_finally_and_with_exit(self):
+        log = []
+        source = """
+            class Guard:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    log.append("with-exit")
+                    return False
+
+            try:
+                with Guard():
+                    while True: pass
+            finally:
+                log.append("finally")
+        """
+        with self.assertRaises(RunPythonTimeout):
+            _run_snippet(source, 1, {"log": log})
+        self.assertEqual(log, ["with-exit", "finally"])
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_snippet_timeout_fires_again_after_a_swallowed_interrupt(self):
+        source = """
+            caught = 0
+            started = time.monotonic()
+            while caught < 2 and time.monotonic() - started < 20:
+                try:
+                    while True: pass
+                except RunPythonTimeout:
+                    caught += 1
+        """
+        namespace = _run_snippet(
+            source, 1, {"time": time, "RunPythonTimeout": RunPythonTimeout}
+        )
+        self.assertEqual(namespace["caught"], 2)
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_timeout_never_lands_in_plugin_code(self):
+        plugin = {"calls": 0, "errors": []}
+
+        def plugin_slot():
+            # A plugin slot that runs while the snippet pumps events: busy Python code
+            # an asynchronous interrupt could land in. Never re-raised, so a failure
+            # shows up in the assertion instead of aborting the test run.
+            try:
+                total = 0
+                for i in range(20000):
+                    total += i
+                plugin["calls"] += 1
+            except BaseException as exc:  # pylint: disable=broad-except
+                plugin["errors"].append(type(exc).__name__)
+
+        timer = QTimer()
+        timer.setInterval(0)
+        timer.timeout.connect(plugin_slot)
+        timer.start()
+        self.addCleanup(timer.stop)
+        source = """
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                QCoreApplication.processEvents()
+        """
+        started = time.monotonic()
+        with self.assertRaises(RunPythonTimeout):
+            _run_snippet(
+                source, 1, {"time": time, "QCoreApplication": QCoreApplication}
+            )
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertGreater(plugin["calls"], 0)
+        self.assertEqual(plugin["errors"], [])
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_layer_removed_stops_a_snippet_that_swallows_it(self):
+        other = _memory_points(1, "held-by-snippet")
+        QgsProject.instance().addMapLayer(other)
+        other_id = other.id()
+        QTimer.singleShot(200, lambda: QgsProject.instance().removeMapLayer(other_id))
+        after = []
+        source = """
+            try:
+                processing.run("strataaitest:slow", {"DURATION": 30})
+            except BaseException:
+                pass
+            after.append("went on")
+        """
+        with self.assertRaises(RunPythonLayersRemoved):
+            _run_snippet(source, 30, {"processing": processing, "after": after})
+        self.assertEqual(after, [])
+
+    @unittest.skipUnless(_HAS_MONITORING, "needs sys.monitoring (Python 3.12+)")
+    def test_monitoring_tool_released_after_session(self):
+        with self.assertRaises(RunPythonTimeout):
+            _run_snippet("while True: pass", 1)
+        self.assertTrue(all(sys.monitoring.get_tool(tool) is None for tool in (3, 4)))
+        # The snippet's code runs uninstrumented afterwards.
+        namespace = _run_snippet("value = sum(range(10))", 30)
+        self.assertEqual(namespace["value"], 45)
 
     def test_processing_time_does_not_count_against_the_budget(self):
         # 0.8 s of the 1 s budget in Python, then a 1.5 s Processing run: the run must

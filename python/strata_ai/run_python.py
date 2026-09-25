@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import threading
 import time
+import types
 from contextlib import contextmanager
 
 from qgis.core import (
@@ -45,6 +47,19 @@ _original_processing_execute = None
 # Processing runs abandoned when Strata quits: their C++ task still references the
 # context and feedback, which must outlive the Python frames that created them.
 _abandoned_runs = []
+
+# With sys.monitoring (Python 3.12+) the interrupt is raised from an INSTRUCTION event
+# on the snippet's own code objects: it never lands in a plugin slot that runs while
+# the snippet waits in processEvents() or a dialog, as an asynchronous exception can.
+# LINE events miss one-line loops, and an exception raised from a JUMP event skips
+# the snippet's except, finally and with handlers (CPython 3.12 to 3.14).
+_MONITORING_TOOL_IDS = (4, 3)
+_monitoring_tool = None
+_snippet_codes = ()
+_events_enabled = False
+# (exception class, message, seconds between two raises) once armed, else None.
+_armed = None
+_next_raise = 0.0
 
 
 class RunPythonInterrupted(BaseException):
@@ -130,6 +145,76 @@ def _raise_async(thread_id, message):
 def _clear_async(thread_id):
     if thread_id is not None:
         ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_id), None)
+
+
+def _code_objects(code):
+    """code and every code object nested in it: functions, lambdas, classes, comprehensions."""
+    codes = []
+    pending = [code]
+    while pending:
+        current = pending.pop()
+        codes.append(current)
+        pending.extend(c for c in current.co_consts if isinstance(c, types.CodeType))
+    return tuple(codes)
+
+
+def _on_instruction(code, offset):
+    global _next_raise
+    armed = _armed
+    # Never inside a Processing wait, e.g. in a snippet callback that a timer runs there.
+    if armed is None or _execute_depth > 0:
+        return
+    exception, message, refire_s = armed
+    now = time.monotonic()
+    if now < _next_raise:
+        return
+    _next_raise = now + refire_s
+    raise exception(message)
+
+
+def _acquire_monitoring_tool():
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is None:
+        return None
+    for tool in _MONITORING_TOOL_IDS:
+        if monitoring.get_tool(tool) is None:
+            monitoring.use_tool_id(tool, "strata-ai-run-python")
+            monitoring.register_callback(
+                tool, monitoring.events.INSTRUCTION, _on_instruction
+            )
+            return tool
+    return None
+
+
+def _release_monitoring_tool(tool, codes):
+    monitoring = sys.monitoring
+    try:
+        for code in codes:
+            monitoring.set_local_events(tool, code, 0)
+        monitoring.register_callback(tool, monitoring.events.INSTRUCTION, None)
+    finally:
+        monitoring.free_tool_id(tool)
+
+
+def _arm(exception, message, refire_s=REFIRE_INTERVAL_S):
+    """Raises exception in the snippet from now on. Call with _lock held.
+
+    Without sys.monitoring, only RunPythonTimeout is delivered, asynchronously.
+    """
+    global _armed, _events_enabled
+    if _monitoring_tool is None:
+        if exception is RunPythonTimeout:
+            _raise_async(_main_thread_id, message)
+        return
+    # A removed layer wins over a timeout: the snippet must not run another instruction.
+    if _armed is None or _armed[0] is not RunPythonLayersRemoved:
+        _armed = (exception, message, refire_s)
+    if not _events_enabled:
+        for code in _snippet_codes:
+            sys.monitoring.set_local_events(
+                _monitoring_tool, code, sys.monitoring.events.INSTRUCTION
+            )
+        _events_enabled = True
 
 
 def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
@@ -222,11 +307,15 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
         )
 
     if removed:
-        raise RunPythonLayersRemoved(
+        message = (
             "Project layers were removed while processing.run was running: "
             + ", ".join(removed)
             + "."
         )
+        # Also armed, so a bare except in the snippet cannot go on with its references.
+        with _lock:
+            _arm(RunPythonLayersRemoved, message, refire_s=0.0)
+        raise RunPythonLayersRemoved(message)
 
     if not outcome["ok"] and not catch_exceptions:
         message = errors[-1] if errors else ""
@@ -306,18 +395,25 @@ def _restore_execute_patch():
 
 
 @contextmanager
-def session(bridge_ptr, timeout_s=120):
+def session(bridge_ptr, timeout_s=120, code=None):
     """Patch Processing.execute, honor Stop, and interrupt Python after timeout_s seconds.
 
     Time spent inside a patched Processing run does not count: the GUI stays
     responsive there and Stop cancels the run itself.
+
+    code is the compiled snippet. With it and sys.monitoring, the interrupt is only
+    raised inside the snippet's own code; otherwise it is an asynchronous exception
+    raised in whatever Python code runs next on this thread.
     """
     global _active_bridge, _interrupt_message, _main_thread_id, _session_active
+    global _monitoring_tool, _snippet_codes, _events_enabled, _armed, _next_raise
 
     bridge = _wrap_bridge(bridge_ptr)
     main_thread_id = threading.get_ident()
     budget = max(1.0, float(timeout_s))
     stop_watchdog = threading.Event()
+    codes = _code_objects(code) if code is not None else ()
+    tool = _acquire_monitoring_tool() if codes else None
 
     def watchdog():
         used = 0.0
@@ -340,13 +436,18 @@ def session(bridge_ptr, timeout_s=120):
                         if canceled
                         else f"stopped after {int(timeout_s)} s of Python"
                     )
-                    _raise_async(main_thread_id, message)
+                    _arm(RunPythonTimeout, message)
                     next_fire = now + REFIRE_INTERVAL_S
 
     with _lock:
         _active_bridge = bridge
         _interrupt_message = ""
         _main_thread_id = main_thread_id
+        _monitoring_tool = tool
+        _snippet_codes = codes if tool is not None else ()
+        _events_enabled = False
+        _armed = None
+        _next_raise = 0.0
         _session_active = True
     watcher = threading.Thread(
         target=watchdog, name="strata-ai-run-python-timeout", daemon=True
@@ -362,11 +463,19 @@ def session(bridge_ptr, timeout_s=120):
         # then restore Processing, so the restore itself cannot be interrupted.
         with _lock:
             _session_active = False
+            _armed = None
+            _monitoring_tool = None
+            _snippet_codes = ()
+            _events_enabled = False
         stop_watchdog.set()
-        _clear_async(main_thread_id)
         try:
-            _restore_execute_patch()
+            if tool is not None:
+                _release_monitoring_tool(tool, codes)
         finally:
-            _active_bridge = None
-            if watcher.is_alive():
-                watcher.join(timeout=1.0)
+            _clear_async(main_thread_id)
+            try:
+                _restore_execute_patch()
+            finally:
+                _active_bridge = None
+                if watcher.is_alive():
+                    watcher.join(timeout=1.0)

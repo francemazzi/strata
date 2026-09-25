@@ -83,8 +83,10 @@ except Exception as __qgsai_import_error:
 
 try:
 %3
-    with __qgsai_session(%4, %5):
-        exec(compile(__qgsai_code, "<ai_run_python>", "exec"), globals())
+    __qgsai_compiled = compile(__qgsai_code, "<ai_run_python>", "exec")
+    # The session gets the compiled snippet so its interrupts only land in the snippet's code.
+    with __qgsai_session(%4, %5, __qgsai_compiled):
+        exec(__qgsai_compiled, globals())
 except SystemExit as __qgsai_ex:
     if __qgsai_ex.code not in (None, 0):
         __qgsai_exception_type = type(__qgsai_ex).__name__
