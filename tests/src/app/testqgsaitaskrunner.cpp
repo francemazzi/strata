@@ -4,6 +4,7 @@
   begin                : September 2026
 ***************************************************************************/
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "qgsexpression.h"
 #include "qgsexpressionfunction.h"
 #include "qgsfeedback.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
@@ -21,6 +23,7 @@
 #include <QPointer>
 #include <QScopeGuard>
 #include <QString>
+#include <QStringList>
 #include <QThread>
 #include <QTimer>
 
@@ -84,6 +87,7 @@ class TestQgsAiTaskRunner : public QObject
     void tasksAreSilentAndCancelWithoutPrompt();
     void cancelHookRunsOnStop();
     void progressHandlerReceivesUpdates();
+    void guiStallMonitorNamesOverlappingScope();
     void guiThreadExpressionFunction_data();
     void guiThreadExpressionFunction();
     void registeredFunctionNeedsGuiThread();
@@ -388,6 +392,36 @@ void TestQgsAiTaskRunner::registeredFunctionNeedsGuiThread()
   QVERIFY( QgsExpression::registerFunction( new RegisteredTestFunction(), true ) );
   const auto unregister = qScopeGuard( []() { QgsExpression::unregisterFunction( u"strata_ai_test_function"_s ); } );
   QCOMPARE( qgsAiGuiThreadExpressionFunction( u"strata_ai_test_function() + 1"_s ), u"strata_ai_test_function"_s );
+}
+
+void TestQgsAiTaskRunner::guiStallMonitorNamesOverlappingScope()
+{
+  QStringList perfLines;
+  const QMetaObject::Connection connection
+    = connect( QgsApplication::messageLog(), &QgsMessageLog::messageReceivedWithFormat, this, [&perfLines]( const QString &message, const QString &tag, Qgis::MessageLevel, Qgis::StringFormat ) {
+        if ( tag == "AI/Perf"_L1 )
+          perfLines << message;
+      } );
+  const auto hasLine = [&perfLines]( const QString &prefix, const QString &needle ) {
+    return std::any_of( perfLines.cbegin(), perfLines.cend(), [&prefix, &needle]( const QString &line ) { return line.startsWith( prefix ) && line.contains( needle ); } );
+  };
+
+  qgsAiSetGuiStallMonitorThreshold( 50 );
+  QTest::qWait( 60 );
+  {
+    // A quick scope under its minimum is not logged.
+    const QgsAiPerfScope quick( u"test"_s, u"quick"_s, 1000 );
+  }
+  {
+    const QgsAiPerfScope scope( u"test"_s, u"block"_s );
+    QThread::msleep( 250 );
+  }
+  QTRY_VERIFY_WITH_TIMEOUT( hasLine( u"gui_stall"_s, u"test:block"_s ), 2000 );
+  qgsAiSetGuiStallMonitorThreshold( 0 );
+  disconnect( connection );
+
+  QVERIFY( hasLine( u"test block elapsedMs="_s, QString() ) );
+  QVERIFY( !hasLine( u"test quick"_s, QString() ) );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )

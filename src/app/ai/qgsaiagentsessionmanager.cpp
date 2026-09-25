@@ -21,6 +21,7 @@
 
 #include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsairunpythontool.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiauditlog.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaigissuggestionengine.h"
@@ -605,7 +606,12 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       // An empty reply after this turn's tools ran is recovered below (retry prompt or a local
       // summary of the tool results). Any other failure, including an empty reply before any
       // tool or a provider error delivered inside a 200 stream, takes the error path.
-      const bool emptyReplyAfterTools = !success && httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty() && mTotalToolIterations > 0
+      const bool emptyReplyAfterTools = !success
+                                        && httpStatus >= 200
+                                        && httpStatus < 300
+                                        && responseText.trimmed().isEmpty()
+                                        && mStreamedText.trimmed().isEmpty()
+                                        && mTotalToolIterations > 0
                                         && ( errorMessage.isEmpty() || errorMessage == QgsAiModelRouter::emptyCompletionErrorMessage() );
       if ( success || emptyReplyAfterTools )
       {
@@ -2864,6 +2870,7 @@ QList<QgsAiChatMessage> QgsAiAgentSessionManager::trimHistoryByTokenBudget( int 
 
 QList<QgsAiChatMessage> QgsAiAgentSessionManager::buildOutgoingMessages() const
 {
+  QgsAiPerfScope perf( u"chat"_s, u"build_messages"_s, 50 );
   QList<QgsAiChatMessage> result;
 
   QgsAiChatMessage systemMessage;
@@ -3089,7 +3096,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
                                       && !mManagedAgentPolicy.isEmpty()
                                       && !managedPolicyReferencesUnknownTools( mManagedAgentPolicy, mToolRegistry );
       const QStringList managedAllowed = applyManagedPolicy ? ( roundAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
-                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
+                                                                                                    : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
                                                             : QStringList();
       const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
       const QString blockedReason = blockedByManagedPolicy ? u"managed_policy"_s : ( toolAvailable ? u"agent_mode"_s : u"tool_unavailable"_s );
@@ -3271,6 +3278,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       {
         QElapsedTimer toolTimer;
         toolTimer.start();
+        QgsAiPerfScope perf( u"tool"_s, call.name, 200 );
         result = mToolRegistry->execute( call.name, call.args );
         QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
       }

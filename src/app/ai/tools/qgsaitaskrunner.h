@@ -186,6 +186,40 @@ APP_EXPORT void qgsAiQuitBackgroundWaitLoopsForTesting();
 //! Logs a per-phase timing line under the "AI/Perf" message log tag.
 APP_EXPORT void qgsAiLogPerf( const QString &tool, const QString &phase, qint64 elapsedMs );
 
+/**
+ * Marks a unit of AI work on the calling thread for performance diagnostics.
+ *
+ * On destruction it logs the elapsed time with qgsAiLogPerf(), when it reaches \a minLogMs (use it
+ * for frequent calls that are usually instant). On the GUI thread it also tells the stall monitor
+ * which AI work was running, so a stall report can name it.
+ */
+class APP_EXPORT QgsAiPerfScope
+{
+  public:
+    QgsAiPerfScope( const QString &tool, const QString &phase, int minLogMs = 0 );
+    ~QgsAiPerfScope();
+
+    QgsAiPerfScope( const QgsAiPerfScope & ) = delete;
+    QgsAiPerfScope &operator=( const QgsAiPerfScope & ) = delete;
+
+    //! Milliseconds since the scope started.
+    qint64 elapsedMs() const;
+
+  private:
+    QString mTool;
+    QString mPhase;
+    int mMinLogMs = 0;
+    qint64 mStartMs = 0;
+    qint64 mRecordId = -1;
+};
+
+/**
+ * Logs GUI-thread stalls longer than \a thresholdMs as "gui_stall" lines under "AI/Perf", naming
+ * the QgsAiPerfScope work that overlapped each stall. Call on the GUI thread; a threshold of 0 or
+ * less stops the monitor. Off by default: Strata enables it when STRATA_AI_GUI_STALL_MS is set.
+ */
+APP_EXPORT void qgsAiSetGuiStallMonitorThreshold( int thresholdMs );
+
 //! True if \a layer's provider reads through a shared transaction connection, which must stay on the GUI thread.
 APP_EXPORT bool qgsAiProviderUsesTransaction( const QgsVectorLayer *layer );
 

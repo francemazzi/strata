@@ -16,6 +16,7 @@
 #include "qgsaitaskrunner.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include "qgsapplication.h"
 #include "qgsexpression.h"
@@ -28,12 +29,15 @@
 #include "qgsvectorlayer.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
+#include <QMutex>
 #include <QObject>
 #include <QPointer>
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 
 using namespace Qt::StringLiterals;
@@ -333,6 +337,165 @@ QgsAiTaskWaitResult qgsAiRunFunction( const QString &description, QgsAiBackgroun
 void qgsAiLogPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
 {
   QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+}
+
+namespace
+{
+  //! Process-wide monotonic clock shared by perf scopes and the stall monitor.
+  qint64 aiPerfClockMs()
+  {
+    static const QElapsedTimer clock = []() {
+      QElapsedTimer timer;
+      timer.start();
+      return timer;
+    }();
+    return clock.elapsed();
+  }
+
+  //! A GUI-thread QgsAiPerfScope, kept while the stall monitor runs so a stall can be attributed.
+  struct AiPerfRecord
+  {
+      qint64 id = -1;
+      QString label;
+      qint64 startMs = 0;
+      //! -1 while the scope is still open.
+      qint64 endMs = -1;
+  };
+
+  QMutex sAiPerfRecordsMutex;
+  QList<AiPerfRecord> sAiPerfRecords;
+  qint64 sAiPerfNextRecordId = 0;
+  std::atomic_bool sAiPerfStallMonitorActive { false };
+
+  class AiGuiStallMonitor : public QObject
+  {
+    public:
+      explicit AiGuiStallMonitor( QObject *parent )
+        : QObject( parent )
+      {
+        mTimer.setTimerType( Qt::PreciseTimer );
+        mTimer.setInterval( TICK_MS );
+        QObject::connect( &mTimer, &QTimer::timeout, this, [this]() { tick(); } );
+      }
+
+      void start( int thresholdMs )
+      {
+        mThresholdMs = thresholdMs;
+        mLastTickMs = aiPerfClockMs();
+        mTimer.start();
+      }
+
+      void stop() { mTimer.stop(); }
+
+    private:
+      static constexpr int TICK_MS = 20;
+
+      void tick()
+      {
+        const qint64 now = aiPerfClockMs();
+        const qint64 stallMs = now - mLastTickMs - TICK_MS;
+        if ( stallMs > mThresholdMs )
+          report( mLastTickMs, now, stallMs );
+        mLastTickMs = now;
+        prune( now );
+      }
+
+      static void report( qint64 fromMs, qint64 toMs, qint64 stallMs )
+      {
+        QStringList labels;
+        {
+          const QMutexLocker locker( &sAiPerfRecordsMutex );
+          for ( const AiPerfRecord &record : std::as_const( sAiPerfRecords ) )
+          {
+            // Name only work that explains a real share of the stall: a quick scope that merely
+            // ran during a long stall caused by something else is not the culprit.
+            const qint64 overlapMs = std::min( record.endMs < 0 ? toMs : record.endMs, toMs ) - std::max( record.startMs, fromMs );
+            if ( ( overlapMs * 3 >= stallMs || overlapMs >= 100 ) && !labels.contains( record.label ) )
+              labels << record.label;
+          }
+        }
+        QgsMessageLog::logMessage( u"gui_stall ms=%1 during=%2"_s.arg( stallMs ).arg( labels.isEmpty() ? u"unknown"_s : labels.join( ',' ) ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+      }
+
+      static void prune( qint64 nowMs )
+      {
+        // Keep closed scopes long enough to attribute the stall that just ended.
+        const QMutexLocker locker( &sAiPerfRecordsMutex );
+        sAiPerfRecords
+          .erase( std::remove_if( sAiPerfRecords.begin(), sAiPerfRecords.end(), [nowMs]( const AiPerfRecord &record ) { return record.endMs >= 0 && record.endMs < nowMs - 10000; } ), sAiPerfRecords.end() );
+      }
+
+      QTimer mTimer;
+      int mThresholdMs = 0;
+      qint64 mLastTickMs = 0;
+  };
+
+  QPointer<AiGuiStallMonitor> sAiPerfStallMonitor;
+
+  bool aiPerfOnGuiThread()
+  {
+    return QCoreApplication::instance() && QThread::currentThread() == QCoreApplication::instance()->thread();
+  }
+} // namespace
+
+QgsAiPerfScope::QgsAiPerfScope( const QString &tool, const QString &phase, int minLogMs )
+  : mTool( tool )
+  , mPhase( phase )
+  , mMinLogMs( minLogMs )
+  , mStartMs( aiPerfClockMs() )
+{
+  if ( sAiPerfStallMonitorActive && aiPerfOnGuiThread() )
+  {
+    const QMutexLocker locker( &sAiPerfRecordsMutex );
+    mRecordId = sAiPerfNextRecordId++;
+    AiPerfRecord record;
+    record.id = mRecordId;
+    record.label = u"%1:%2"_s.arg( tool, phase );
+    record.startMs = mStartMs;
+    sAiPerfRecords.append( record );
+  }
+}
+
+QgsAiPerfScope::~QgsAiPerfScope()
+{
+  const qint64 endMs = aiPerfClockMs();
+  if ( mRecordId >= 0 )
+  {
+    const QMutexLocker locker( &sAiPerfRecordsMutex );
+    for ( AiPerfRecord &record : sAiPerfRecords )
+    {
+      if ( record.id == mRecordId )
+      {
+        record.endMs = endMs;
+        break;
+      }
+    }
+  }
+  if ( endMs - mStartMs >= mMinLogMs )
+    qgsAiLogPerf( mTool, mPhase, endMs - mStartMs );
+}
+
+qint64 QgsAiPerfScope::elapsedMs() const
+{
+  return aiPerfClockMs() - mStartMs;
+}
+
+void qgsAiSetGuiStallMonitorThreshold( int thresholdMs )
+{
+  if ( thresholdMs <= 0 )
+  {
+    sAiPerfStallMonitorActive = false;
+    if ( sAiPerfStallMonitor )
+      sAiPerfStallMonitor->stop();
+    return;
+  }
+
+  if ( !QCoreApplication::instance() )
+    return;
+  if ( !sAiPerfStallMonitor )
+    sAiPerfStallMonitor = new AiGuiStallMonitor( QCoreApplication::instance() );
+  sAiPerfStallMonitor->start( thresholdMs );
+  sAiPerfStallMonitorActive = true;
 }
 
 bool qgsAiProviderUsesTransaction( const QgsVectorLayer *layer )

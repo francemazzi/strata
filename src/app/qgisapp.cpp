@@ -1439,6 +1439,9 @@ QgisApp::QgisApp(
 
 #ifdef HAVE_AI_ASSISTANT
   startProfile( tr( "AI assistant dock" ) );
+  // Diagnostics for scripts/ai/run_scenarios.py: log interface stalls and the AI work behind them.
+  if ( const int stallThresholdMs = qEnvironmentVariableIntValue( "STRATA_AI_GUI_STALL_MS" ); stallThresholdMs > 0 )
+    qgsAiSetGuiStallMonitorThreshold( stallThresholdMs );
   mAiModelRouter = std::make_unique<QgsAiModelRouter>( this );
   const QString aiWorkspaceRoot = QgsAiFileContextProvider::resolveWorkspaceRoot();
   mAiFileContextProvider = std::make_unique<QgsAiFileContextProvider>( aiWorkspaceRoot, this );
