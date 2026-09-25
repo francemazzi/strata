@@ -158,3 +158,6 @@ the Windows reference machine measurements are still to be done.
   flashes them (or zooms to a layer the tool added). `calculate_field` and
   `batch_update_attributes` report which features changed and say it plainly ("Calculated
   AREA for 1,240 features of Parcels.").
+- Approvals are asked in the chat instead of a modal box with raw JSON: a card says what
+  the tool will do ("calculate_field · Parcels · AREA = $area"), its risk, and the
+  arguments (closed), with Accept (Ctrl+Enter) and Reject; Stop counts as Reject.

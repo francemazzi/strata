@@ -525,6 +525,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void toolSignalsAndUndoTurn();
     void retryAndEditUndoTheDroppedAnswer();
     void mapContextTellsTheModelWhatTheUserSees();
+    void stopAnswersAPendingApprovalWithNo();
     void toolCallLimitPausesAndContinues();
     void cumulativeToolBudgetStopsAutomaticContinuation();
     void repeatedEquivalentToolCallsStopTurn();
@@ -1197,6 +1198,56 @@ void TestQgsAiAgentSessionManager::mapContextTellsTheModelWhatTheUserSees()
   // The user can leave it out.
   manager.setMapContextIncluded( false );
   QVERIFY( !manager.buildSystemPrompt().contains( u"Active layer"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::stopAnswersAPendingApprovalWithNo()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::
+      jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_edit","type":"function","function":{"name":"edit_layer","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  bool ran = false;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<CallbackTool>( u"edit_layer"_s, true, nullptr, &ran ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"ask_before_edits"_s );
+
+  // The chat asks; the user presses Stop instead of answering.
+  int asked = 0;
+  connect( &manager, &QgsAiAgentSessionManager::toolApprovalRequested, this, [&manager, &asked]() {
+    ++asked;
+    QTimer::singleShot( 50, &manager, [&manager]() { manager.cancelActiveRequest(); } );
+  } );
+  manager.sendUserMessage( u"edit the layer"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( asked == 1 && !manager.hasActiveRequest(), 60000 );
+  QVERIFY( !ran );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()

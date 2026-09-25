@@ -58,6 +58,7 @@
 #include <QJsonParseError>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMetaMethod>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
@@ -948,6 +949,35 @@ int QgsAiAgentSessionManager::undoTurn( const QString &messageId, QStringList *f
   return static_cast<int>( undoneTools.size() );
 }
 
+bool QgsAiAgentSessionManager::askToolApproval( const QgsAiToolCall &call, QgsAiToolRiskLevel risk )
+{
+  static const QMetaMethod approvalSignal = QMetaMethod::fromSignal( &QgsAiAgentSessionManager::toolApprovalRequested );
+  if ( !isSignalConnected( approvalSignal ) )
+    return approveGenericToolCall( call.name, risk, call.args );
+
+  // The chat shows the question in its transcript; the round waits here, the window stays live.
+  QEventLoop loop;
+  mApprovalLoop = &loop;
+  mApprovalCallId = call.id;
+  mApprovalGranted = false;
+  emit toolApprovalRequested( call.id, call.name, call.args.toVariantMap(), QgsAiToolRiskLevelName( risk ) );
+  if ( mApprovalLoop && !mToolRunCanceled )
+    loop.exec();
+  mApprovalLoop = nullptr;
+  mApprovalCallId.clear();
+  return mApprovalGranted && !mToolRunCanceled;
+}
+
+void QgsAiAgentSessionManager::resolveToolApproval( const QString &callId, bool approved )
+{
+  if ( callId != mApprovalCallId || !mApprovalLoop )
+    return;
+  mApprovalGranted = approved;
+  QEventLoop *loop = mApprovalLoop;
+  mApprovalLoop = nullptr;
+  loop->quit();
+}
+
 bool QgsAiAgentSessionManager::dropHistoryFrom( int index, QString *error )
 {
   const auto fail = [error]( const QString &message ) {
@@ -1463,6 +1493,9 @@ void QgsAiAgentSessionManager::cancelActiveRequest()
   if ( mExecutingToolCalls || qgsAiHasActiveBackgroundTool() )
   {
     mToolRunCanceled = true;
+    // Stop while an approval waits: the answer is no.
+    if ( mApprovalLoop )
+      mApprovalLoop->quit();
     qgsAiCancelActiveBackgroundTool();
     emit requestStateChanged( u"cancelling"_s, tr( "Stopping…" ) );
     return;
@@ -3553,7 +3586,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       const bool cannotBeUndone = ( calledTool && !calledTool->canBeUndone() ) || ( mcpTool && mcpTool->mutating );
       const bool needsGenericApproval = genericApproval && ( roundAgent == "ask_before_edits"_L1 || ( roundAgent == "editor"_L1 && cannotBeUndone ) );
       const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
-      if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
+      if ( needsGenericApproval && !askToolApproval( call, approvalRisk ) )
       {
         QJsonObject metadata;
         metadata.insert( u"agent_mode"_s, roundAgent );

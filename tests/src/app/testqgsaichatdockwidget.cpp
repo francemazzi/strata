@@ -213,6 +213,27 @@ namespace
       QStringList *mUndone = nullptr;
       std::function<void()> mOnChange;
   };
+
+  //! A change that asks before it runs in "Ask before edits"; counts its runs.
+  class DockApprovalTool : public QgsAiTool
+  {
+    public:
+      explicit DockApprovalTool( int *runs )
+        : mRuns( runs )
+      {}
+      QString name() const override { return u"approval_tool"_s; }
+      QString description() const override { return u"approval tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        ++*mRuns;
+        return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s } } );
+      }
+      bool requiresApproval() const override { return true; }
+
+    private:
+      int *mRuns = nullptr;
+  };
 } // namespace
 
 class TestQgsAiChatDockWidget : public QObject
@@ -243,6 +264,7 @@ class TestQgsAiChatDockWidget : public QObject
     void emptyChatSuggestsPromptsForTheProject();
     void mapContextPillShowsWhatIsSent();
     void toolCardShowsChangesOnMap();
+    void toolApprovalIsAskedInTheChat();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -1285,6 +1307,85 @@ void TestQgsAiChatDockWidget::toolCardShowsChangesOnMap()
   QCOMPARE( spy.count(), 1 );
   QCOMPARE( spy.at( 0 ).at( 0 ).toString(), layer->id() );
   QCOMPARE( spy.at( 0 ).at( 1 ).value<QList<qint64>>(), QList<qint64>( { 4, 9 } ) );
+}
+
+void TestQgsAiChatDockWidget::toolApprovalIsAskedInTheChat()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+  const QByteArray call = QByteArrayLiteral(
+    R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_a","type":"function","function":{"name":"approval_tool","arguments":"{\"layer_id\":\"x\"}"}}]},"finish_reason":"tool_calls"}]})"
+  );
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", call )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", call )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Not done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  int runs = 0;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<DockApprovalTool>( &runs ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"ask_before_edits"_s );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+  const auto answered = [&manager]( const QString &text ) {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return !manager.hasActiveRequest() && std::any_of( history.cbegin(), history.cend(), [&text]( const QgsAiChatMessage &message ) { return message.content == text; } );
+  };
+
+  // The question is a card in the chat, not a modal box. The round waits in a nested event
+  // loop: answer from a timer, as a user would click while it runs.
+  QString summary;
+  bool approve = true;
+  QTimer answer;
+  connect( &answer, &QTimer::timeout, this, [&dock, &summary, &approve, &runs]() {
+    QFrame *card = dock.findChild<QFrame *>( u"aiApprovalCard"_s );
+    if ( !card || runs < 0 )
+      return;
+    summary = card->findChild<QLabel *>( u"aiApprovalSummary"_s )->text();
+    card->findChild<QPushButton *>( approve ? u"aiApproveToolButton"_s : u"aiRejectToolButton"_s )->click();
+  } );
+  answer.start( 20 );
+
+  manager.sendUserMessage( u"change it"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( answered( u"Done"_s ), 60000 );
+  QVERIFY2( summary.startsWith( "approval_tool"_L1 ), qPrintable( summary ) );
+  QCOMPARE( runs, 1 );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiApprovalCard"_s ) );
+
+  // Reject: the tool does not run.
+  approve = false;
+  summary.clear();
+  manager.sendUserMessage( u"change it again"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( answered( u"Not done"_s ), 60000 );
+  QVERIFY( !summary.isEmpty() );
+  QCOMPARE( runs, 1 );
 }
 
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()

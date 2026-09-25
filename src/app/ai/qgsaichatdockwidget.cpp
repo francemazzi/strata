@@ -121,6 +121,7 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QSet>
+#include <QShortcut>
 #include <QSize>
 #include <QSizePolicy>
 #include <QStandardItemModel>
@@ -1154,6 +1155,7 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
     connect( mSessionManager, &QgsAiAgentSessionManager::toolProgress, this, &QgsAiChatDockWidget::updateLiveToolProgress );
     connect( mSessionManager, &QgsAiAgentSessionManager::toolFinished, this, [this]( const QString &callId, bool, qint64 ) { closeLiveToolCard( callId ); } );
     connect( mSessionManager, &QgsAiAgentSessionManager::toolCallsUndone, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolApprovalRequested, this, &QgsAiChatDockWidget::showToolApprovalCard );
     // The suggested prompts follow the layers of the open project, once a burst of changes
     // (a project with 100 layers opening) is over, and only while the chat is visible.
     QTimer *emptyStateTimer = new QTimer( this );
@@ -1848,6 +1850,73 @@ void QgsAiChatDockWidget::updateLiveToolProgress( const QString &callId, double 
     return;
   mLiveToolProgress->setText( tr( "%1 · %2%" ).arg( label ).arg( static_cast<int>( percent ) ) );
   mLiveToolProgress->setVisible( true );
+}
+
+void QgsAiChatDockWidget::showToolApprovalCard( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel )
+{
+  if ( !mTranscriptLayout )
+    return;
+  if ( mApprovalCard )
+    mApprovalCard->deleteLater();
+  mApprovalCallId = callId;
+  // A closed chat would leave the question unseen and the assistant waiting.
+  setUserVisible( true );
+
+  mApprovalCard = new QFrame( mTranscriptContainer );
+  mApprovalCard->setObjectName( u"aiApprovalCard"_s );
+  applyTranscriptWidthPolicy( mApprovalCard );
+  mApprovalCard->setStyleSheet( u"QFrame#aiApprovalCard { background: palette(alternate-base); border: 1px solid palette(highlight); border-radius: 6px; }"_s );
+  QVBoxLayout *layout = new QVBoxLayout( mApprovalCard );
+  layout->setContentsMargins( 10, 8, 10, 8 );
+  layout->setSpacing( 6 );
+  QLabel *title = new QLabel( tr( "Allow this change?" ), mApprovalCard );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  layout->addWidget( title );
+  QLabel *summary = new QLabel( toolCallSummary( toolName, args ), mApprovalCard );
+  summary->setObjectName( u"aiApprovalSummary"_s );
+  summary->setWordWrap( true );
+  layout->addWidget( summary );
+  QLabel *risk = new QLabel( tr( "Risk: %1" ).arg( riskLevel ), mApprovalCard );
+  risk->setStyleSheet( u"color: palette(mid);"_s );
+  layout->addWidget( risk );
+  layout->addWidget( createCollapsibleSection( tr( "Arguments" ), QString::fromUtf8( QJsonDocument( QJsonObject::fromVariantMap( args ) ).toJson( QJsonDocument::Indented ) ), u"json"_s, true ) );
+
+  QHBoxLayout *buttons = new QHBoxLayout();
+  QPushButton *accept = new QPushButton( tr( "Accept" ), mApprovalCard );
+  accept->setObjectName( u"aiApproveToolButton"_s );
+  accept->setToolTip( tr( "Run the tool (Ctrl+Enter)" ) );
+  accept->setStyleSheet( u"QPushButton#aiApproveToolButton { background: palette(highlight); color: palette(highlighted-text); border: 0; border-radius: 6px; padding: 4px 12px; font-weight: 600; }"_s );
+  QPushButton *reject = new QPushButton( tr( "Reject" ), mApprovalCard );
+  reject->setObjectName( u"aiRejectToolButton"_s );
+  reject->setStyleSheet( u"QPushButton#aiRejectToolButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 4px 12px; }"_s );
+  connect( accept, &QPushButton::clicked, this, [this]() { answerToolApproval( true ); } );
+  connect( reject, &QPushButton::clicked, this, [this]() { answerToolApproval( false ); } );
+  QShortcut *acceptShortcut = new QShortcut( QKeySequence( Qt::CTRL | Qt::Key_Return ), this );
+  acceptShortcut->setContext( Qt::WidgetWithChildrenShortcut );
+  connect( acceptShortcut, &QShortcut::activated, this, [this]() { answerToolApproval( true ); } );
+  connect( mApprovalCard, &QObject::destroyed, acceptShortcut, &QObject::deleteLater );
+  buttons->addWidget( accept );
+  buttons->addWidget( reject );
+  buttons->addStretch( 1 );
+  layout->addLayout( buttons );
+
+  const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
+  mTranscriptLayout->insertWidget( insertIndex, mApprovalCard );
+  scrollTranscriptToBottom();
+  accept->setFocus();
+}
+
+void QgsAiChatDockWidget::answerToolApproval( bool approved )
+{
+  if ( !mApprovalCard || mApprovalCallId.isEmpty() )
+    return;
+  const QString callId = mApprovalCallId;
+  mApprovalCallId.clear();
+  mTranscriptLayout->removeWidget( mApprovalCard );
+  mApprovalCard->deleteLater();
+  mApprovalCard = nullptr;
+  if ( mSessionManager )
+    mSessionManager->resolveToolApproval( callId, approved );
 }
 
 void QgsAiChatDockWidget::closeLiveToolCard( const QString &callId )
@@ -3192,7 +3261,16 @@ void QgsAiChatDockWidget::setRequestRunning( bool running )
   for ( QPushButton *undo : undoButtons )
     undo->setEnabled( !running );
   if ( !running )
+  {
     closeLiveToolCard( mLiveToolCallId );
+    // Stopped while waiting for an answer: the question is gone.
+    if ( mApprovalCard )
+    {
+      mApprovalCard->deleteLater();
+      mApprovalCard = nullptr;
+      mApprovalCallId.clear();
+    }
+  }
   refreshUndoTurnButtons();
   if ( mSendButton )
   {

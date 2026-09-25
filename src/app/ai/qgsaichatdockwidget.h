@@ -132,6 +132,9 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args );
     void updateLiveToolProgress( const QString &callId, double percent, const QString &label );
     void closeLiveToolCard( const QString &callId );
+    //! The question "may this tool run?" as a card in the chat, with Accept and Reject.
+    void showToolApprovalCard( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel );
+    void answerToolApproval( bool approved );
     //! One line describing a tool call for the user ("calculate_field · Parcels · AREA").
     static QString toolCallSummary( const QString &toolName, const QVariantMap &args );
     QString renderToolMessageMarkdown( const QgsAiChatMessage &message ) const;
@@ -270,6 +273,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     };
     QList<QueuedMessage> mQueuedMessages;
     QPointer<QFrame> mEmptyState;
+    QPointer<QFrame> mApprovalCard;
+    QString mApprovalCallId;
     QToolButton *mMapContextPill = nullptr;
     QTimer *mMapContextTimer = nullptr;
     QWidget *mQueueBar = nullptr;

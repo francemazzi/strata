@@ -28,6 +28,7 @@
 #include "qgscoordinatereferencesystem.h"
 #include "qgsrectangle.h"
 
+#include <QEventLoop>
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -132,6 +133,9 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
 
     //! One short line for the chat ("Parcels · 12 selected · 1:5,000"), empty when there is nothing to say.
     QString mapContextSummary() const;
+
+    //! Answers toolApprovalRequested(): the tool call runs when \a approved.
+    void resolveToolApproval( const QString &callId, bool approved );
 
     //! The user may leave the map context out of the next messages.
     void setMapContextIncluded( bool included ) { mMapContextIncluded = included; }
@@ -371,6 +375,12 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     void toolCallsUndone();
 
     /**
+     * A tool call waits for the user's approval; answer with resolveToolApproval(). While
+     * nothing is connected, a message box asks instead.
+     */
+    void toolApprovalRequested( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel );
+
+    /**
      * Emitted whenever the cumulative per-session token/cost accounting changes:
      * after every model response carrying usage, and with an empty total when a
      * new session starts (runtime accumulation only, not persisted).
@@ -428,6 +438,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     bool undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName );
     //! Tells the model which tool calls the user undid.
     void recordUndoNote( const QStringList &toolNames );
+    //! Asks the user whether \a call may run: in the chat when it is connected, otherwise with a message box.
+    bool askToolApproval( const QgsAiToolCall &call, QgsAiToolRiskLevel risk );
     //! Undoes the changes of the history from \a index on, then drops those messages.
     bool dropHistoryFrom( int index, QString *error );
 
@@ -466,6 +478,10 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     //! Id of the tool call running now, for its progress.
     QString mRunningToolCallId;
     std::function<QgsAiMapContext()> mMapContextProvider;
+    //! The approval being waited for, answered by resolveToolApproval() or Stop.
+    QPointer<QEventLoop> mApprovalLoop;
+    QString mApprovalCallId;
+    bool mApprovalGranted = false;
     bool mMapContextIncluded = true;
     QgsAiModelRouter::Provider mActiveProvider = QgsAiModelRouter::Provider::OpenAi;
     QString mCurrentPrompt;
