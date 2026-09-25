@@ -34,38 +34,161 @@ SCENARIOS = [
     "ai_settings_ok",
     "chat_during_indexing",
     "quit_during_indexing",
+    "reopen_project",
+    "idle_memory",
+    "map_during_indexing",
+    "tools_on_dataset",
 ]
+#: Extra lines of the [strata] settings group, per scenario.
+SCENARIO_SETTINGS = {
+    "idle_memory": ["index\\model_idle_unload_s=20"],
+    # Seven tool rounds in a row: more than the pause limit of new profiles (5 until phase 4).
+    "tools_on_dataset": ["agent\\max_tool_iterations_per_turn=20"],
+}
 HERE = os.path.dirname(os.path.abspath(__file__))
 STALL_RE = re.compile(r"^gui_stall ms=(\d+) during=(.*)$")
 
 # Pass/fail thresholds per roadmap phase (see roadmap_ottimizzazione/00_ROADMAP.md).
 CHECKS = {
     "phase1": {"max_ai_stall_ms": 200, "max_exit_ms": 5000},
-    "phase2": {"max_ai_stall_ms": 200, "max_exit_ms": 5000, "max_avg_cpu_pct": 400},
+    "phase2": {
+        "max_ai_stall_ms": 200,
+        "max_exit_ms": 5000,
+        "max_reopen_embeds": 0,
+        "max_idle_rss_growth_mb": 100,
+        "max_map_slowdown": 1.2,
+        "max_indicator_delay_ms": 1000,
+        "max_indexing_cpu_total_pct": 50,
+    },
+    "phase3": {
+        "max_ai_stall_ms": 200,
+        "max_exit_ms": 5000,
+        "max_stop_ms": 1000,
+        "max_tool_errors": 0,
+    },
 }
+#: Copy of the heavy layer the tool tour adds and edits, so the dataset itself never changes.
+TOUR_LAYER = os.path.join("data", "scenario_tour_copy.gpkg")
+
+
+def _find_layer_id(content, name):
+    """Id of the layer called name in a tool result (list_project_layers, add_layer_from_file)."""
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return None
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if item.get("name") == name or item.get("layer_name") == name:
+                found = item.get("id") or item.get("layer_id")
+                if found:
+                    return found
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
+def tool_tour_reply(server, body):
+    """Phase 3 script: one tool per round on the dataset, then a slow one the user stops."""
+    messages = body.get("messages", [])
+
+    def prompt_index(text):
+        # The map image comes back as a user message too: find the turn by its prompt.
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user" and text in json.dumps(
+                messages[i].get("content")
+            ):
+                return i
+        return None
+
+    second = prompt_index("Compute the buffered area")
+    start = second if second is not None else prompt_index("Take a tour") or 0
+    results = [
+        m.get("content") or "" for m in messages[start + 1 :] if m.get("role") == "tool"
+    ]
+    results = [r if isinstance(r, str) else json.dumps(r) for r in results]
+    if results:
+        server.tool_results.append(results[-1])
+    state = server.state
+    step = len(results)
+    if second is None:
+        if step == 1:
+            state["heavy_id"] = _find_layer_id(results[-1], "confini_dettagliati")
+        if step == 6:
+            state["copy_id"] = _find_layer_id(results[-1], "confini_copia")
+        plan = [
+            ("list_project_layers", {}),
+            (
+                "describe_layer",
+                {"layer_id": state.get("heavy_id") or "", "sample_features": 3},
+            ),
+            ("capture_map_canvas", {}),
+            ("search_files", {"query": "alberi"}),
+            ("list_files", {}),
+            (
+                "add_layer_from_file",
+                {"path": state["copy_path"], "name": "confini_copia"},
+            ),
+            (
+                "calculate_field",
+                {
+                    "layer_id": state.get("copy_id") or "",
+                    "field_name": "strata_perimeter",
+                    "expression": "$perimeter",
+                    "create_field": True,
+                    "field_type": "double",
+                },
+            ),
+        ]
+        if step < len(plan):
+            return plan[step]
+        return "SCENARIO-TOOLS-DONE: every tool answered."
+    if step == 0:
+        # Seconds of GEOS work (20 buffers of 200 polygons of 20000 vertices): the user presses Stop.
+        return (
+            "calculate_field",
+            {
+                "layer_id": state.get("copy_id") or "",
+                "field_name": "strata_buffer_area",
+                "expression": "array_sum(array_foreach(generate_series(1, 20), area(buffer($geometry, @element))))",
+                "create_field": True,
+                "field_type": "double",
+            },
+        )
+    return "SCENARIO-STOP-REPLY: stopped."
+
+
+def search_workspace_reply(server, body):
+    """A search_workspace call first, then a text reply."""
+    if any(message.get("role") == "tool" for message in body.get("messages", [])):
+        return "SCENARIO-REPLY: the parcels layers are indexed."
+    return ("search_workspace", {"query": "land use parcels"})
+
+
+#: Loopback chat script per scenario.
+CHAT_SCRIPTS = {"tools_on_dataset": tool_tour_reply}
 
 
 class LoopbackChatHandler(BaseHTTPRequestHandler):
-    """OpenAI-compatible chat completions: a search_workspace call first, then a text reply."""
+    """OpenAI-compatible chat completions answered by the scenario's script: a tool call as
+    (name, arguments), or a text reply."""
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         self.server.requests += 1
-        if any(message.get("role") == "tool" for message in body.get("messages", [])):
-            message = {
-                "role": "assistant",
-                "content": "SCENARIO-REPLY: the parcels layers are indexed.",
-            }
+        reply = self.server.script(self.server, body)
+        if isinstance(reply, str):
+            message = {"role": "assistant", "content": reply}
             finish = "stop"
         else:
             call = {
-                "id": "call_scenario_search",
+                "id": f"call_scenario_{self.server.requests}",
                 "type": "function",
-                "function": {
-                    "name": "search_workspace",
-                    "arguments": json.dumps({"query": "land use parcels"}),
-                },
+                "function": {"name": reply[0], "arguments": json.dumps(reply[1])},
             }
             message = {"role": "assistant", "content": None, "tool_calls": [call]}
             finish = "tool_calls"
@@ -87,9 +210,12 @@ class LoopbackChatHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_loopback_chat():
+def start_loopback_chat(script=search_workspace_reply, state=None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), LoopbackChatHandler)
     server.requests = 0
+    server.script = script
+    server.state = state or {}
+    server.tool_results = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -144,7 +270,18 @@ def run_scenario(args, scenario):
     os.makedirs(settings_dir, exist_ok=True)
     # The chat uses the OpenRouter provider pointed at a loopback server, with a fake key
     # passed through the environment so nothing is stored.
-    chat_server = start_loopback_chat()
+    tour_copy = None
+    state = {}
+    if scenario == "tools_on_dataset":
+        # Inside the workspace, so the file tools accept it; removed afterwards.
+        tour_copy = os.path.join(os.path.abspath(args.dataset), TOUR_LAYER)
+        shutil.copyfile(
+            os.path.join(os.path.abspath(args.dataset), "data", "heavy.gpkg"), tour_copy
+        )
+        state["copy_path"] = tour_copy
+    chat_server = start_loopback_chat(
+        CHAT_SCRIPTS.get(scenario, search_workspace_reply), state
+    )
     endpoint = (
         f"http://127.0.0.1:{chat_server.server_address[1]}/api/v1/chat/completions"
     )
@@ -162,6 +299,8 @@ def run_scenario(args, scenario):
             # Tools are off for new profiles until fix_primo_prompt_agisce (roadmap phase 4).
             "[strata]\nagent\\allow_custom_actions=true\n"
         )
+        for line in SCENARIO_SETTINGS.get(scenario, []):
+            f.write(line + "\n")
 
     env = dict(os.environ)
     env["STRATA_AI_GUI_STALL_MS"] = str(args.stall_ms)
@@ -205,9 +344,14 @@ def run_scenario(args, scenario):
         process.wait()
         exit_wall = time.time()
     chat_server.shutdown()
+    if tour_copy:
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(tour_copy + suffix):
+                os.remove(tour_copy + suffix)
 
     summary = {
         "scenario": scenario,
+        "cpu_count": os.cpu_count(),
         "returncode": process.returncode,
         "timed_out": timed_out,
         "wall_s": round(exit_wall - started, 1),
@@ -260,8 +404,41 @@ def run_scenario(args, scenario):
                 "chat_requests": chat_server.requests,
             }
         )
-        if "chat_reply_ms" in results:
-            summary["chat_reply_ms"] = results["chat_reply_ms"]
+        if scenario in CHAT_SCRIPTS:
+            errors = [
+                r[:300] for r in chat_server.tool_results if r.startswith('{"error"')
+            ]
+            summary["tool_results"] = len(chat_server.tool_results)
+            summary["tool_errors"] = errors
+            summary["tool_calls"] = [
+                e.get("tool") for e in results["events"] if e["event"] == "tool_call"
+            ]
+        for key in (
+            "chat_reply_ms",
+            "indexing_cpu_pct",
+            "indexing_cpu_total_pct",
+            "reopen_layer_embeds",
+            "reopen_file_embeds",
+            "reopen_unchanged_layers",
+            "rss_opened_mb",
+            "rss_indexed_mb",
+            "rss_idle_mb",
+            "map_during_ms",
+            "map_idle_ms",
+            "stop_ms",
+            "stopped_tool_succeeded",
+        ):
+            if key in results:
+                summary[key] = results[key]
+        times = {
+            e["event"]: e["at_ms"]
+            for e in results["events"]
+            if e["event"] in ("indexing_task_started", "indicator_shown")
+        }
+        if len(times) == 2:
+            summary["indicator_delay_ms"] = (
+                times["indicator_shown"] - times["indexing_task_started"]
+            )
         if "quit_requested_wall" in results:
             summary["exit_ms"] = round(
                 (exit_wall - results["quit_requested_wall"]) * 1000
@@ -289,13 +466,47 @@ def check(summary, thresholds):
         problems.append(
             f"exit took {summary['exit_ms']} ms > {thresholds['max_exit_ms']} ms"
         )
+    if "reopen_layer_embeds" in summary and "max_reopen_embeds" in thresholds:
+        embeds = summary["reopen_layer_embeds"] + summary.get("reopen_file_embeds", 0)
+        if embeds > thresholds["max_reopen_embeds"]:
+            problems.append(f"reopening embedded {embeds} times")
+    if "rss_idle_mb" in summary and "max_idle_rss_growth_mb" in thresholds:
+        growth = summary["rss_idle_mb"] - summary["rss_opened_mb"]
+        if growth > thresholds["max_idle_rss_growth_mb"]:
+            problems.append(
+                f"idle memory {growth} MB above the opened project > {thresholds['max_idle_rss_growth_mb']} MB"
+            )
+    if "map_during_ms" in summary and "max_map_slowdown" in thresholds:
+        slowdown = summary["map_during_ms"] / max(1, summary["map_idle_ms"])
+        if slowdown > thresholds["max_map_slowdown"]:
+            problems.append(
+                f"map drawn {slowdown:.2f}x slower during indexing > {thresholds['max_map_slowdown']}x"
+            )
+    if "indicator_delay_ms" in summary and "max_indicator_delay_ms" in thresholds:
+        if summary["indicator_delay_ms"] > thresholds["max_indicator_delay_ms"]:
+            problems.append(
+                f"indicator shown {summary['indicator_delay_ms']} ms after indexing started"
+            )
     if (
-        "max_avg_cpu_pct" in thresholds
-        and summary.get("cpu_avg_pct", 0) > thresholds["max_avg_cpu_pct"]
+        "indexing_cpu_total_pct" in summary
+        and "max_indexing_cpu_total_pct" in thresholds
+        and summary["indexing_cpu_total_pct"] > thresholds["max_indexing_cpu_total_pct"]
     ):
         problems.append(
-            f"average CPU {summary['cpu_avg_pct']}% > {thresholds['max_avg_cpu_pct']}%"
+            f"indexing used {summary['indexing_cpu_total_pct']}% of the computer > {thresholds['max_indexing_cpu_total_pct']}%"
         )
+    if "stop_ms" in summary and "max_stop_ms" in thresholds:
+        if summary["stop_ms"] > thresholds["max_stop_ms"]:
+            problems.append(
+                f"Stop took {summary['stop_ms']} ms > {thresholds['max_stop_ms']} ms"
+            )
+        if summary.get("stopped_tool_succeeded") is not False:
+            problems.append("Stop did not stop the running tool")
+    if "tool_errors" in summary and "max_tool_errors" in thresholds:
+        if len(summary["tool_errors"]) > thresholds["max_tool_errors"]:
+            problems.append(
+                f"{len(summary['tool_errors'])} tools failed: {summary['tool_errors']}"
+            )
     return problems
 
 

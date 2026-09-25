@@ -7,11 +7,19 @@ message log lines, writes them to the results file and quits Strata.
 
 import json
 import os
+import subprocess
 import sys
 import time
 
-from qgis.core import Qgis, QgsApplication, QgsProject, QgsVectorLayer
-from qgis.PyQt.QtCore import QObject, QTimer
+from qgis.core import (
+    Qgis,
+    QgsApplication,
+    QgsMapRendererParallelJob,
+    QgsProject,
+    QgsRectangle,
+    QgsVectorLayer,
+)
+from qgis.PyQt.QtCore import QObject, QSize, QTimer
 from qgis.PyQt.QtWidgets import QApplication, QLabel, QMessageBox, QTextEdit
 from qgis.utils import iface
 
@@ -42,6 +50,16 @@ def _on_message(message, tag, level, *_rest):
         _STATE["perf"].append([_now_ms(), message])
     elif tag == "AI/Index":
         _STATE["index"].append([_now_ms(), message])
+    elif tag == "AI" and message.startswith("Tool call: name="):
+        _event("tool_call", tool=message.split("name=", 1)[1].split(" ", 1)[0])
+        return
+    elif tag == "AI" and message.startswith("Tool call finished: name="):
+        _event(
+            "tool_finished",
+            tool=message.split("name=", 1)[1].split(" ", 1)[0],
+            success=message.rstrip().endswith("success=1"),
+        )
+        return
     else:
         return
     _STATE["last_ai_message"] = time.monotonic()
@@ -146,28 +164,29 @@ def _when_indexing(then):
     _later(200, poll)
 
 
-def _send_chat_message():
-    """Sends a chat message through the chat panel; the loopback provider answers with a
-    search_workspace call, then with a text reply containing SCENARIO-REPLY."""
+def _chat(text, marker, then, mode="Ask before edits"):
+    """Sends text through the chat panel in the given mode and calls then(reply_ms) once a
+    reply containing marker is shown."""
     prompt = _widget("aiPromptInput")
     send = _widget("aiSendButton")
     if prompt is None or send is None:
         _quit("chat_widgets_missing")
         return
-    # New profiles start in Plan mode, which runs no tools: pick a mode that runs read-only ones.
+    # New profiles start in Plan mode, which runs no tools.
     pill = _widget("aiModePill")
     modes = [
         a
         for a in (pill.menu().actions() if pill is not None and pill.menu() else [])
-        if a.text() == "Ask before edits"
+        if a.text() == mode
     ]
     if not modes:
         _quit("chat_mode_missing")
         return
     modes[0].trigger()
-    prompt.setPlainText("Which layers describe land use parcels?")
-    _event("chat_sent")
+    prompt.setPlainText(text)
+    _event("chat_sent", marker=marker)
     sent_ms = _now_ms()
+    replied = {"value": False}
 
     def answer_trust_question():
         # The first message in a workspace asks whether to trust it, in a modal message box.
@@ -176,17 +195,14 @@ def _send_chat_message():
                 _event("trust_question_answered")
                 widget.reject()
                 return
-        if (
-            "chat_reply_shown" not in [e["event"] for e in _STATE["events"]]
-            and _now_ms() - sent_ms < 10000
-        ):
+        if not replied["value"] and _now_ms() - sent_ms < 10000:
             _later(200, answer_trust_question)
 
     _later(200, answer_trust_question)
     send.click()
 
     def poll():
-        if _STATE["done"]:
+        if _STATE["done"] or marker is None:
             return
         texts = [w.text() for w in iface.mainWindow().findChildren(QLabel)]
         texts += [
@@ -194,16 +210,82 @@ def _send_chat_message():
             for w in iface.mainWindow().findChildren(QTextEdit)
             if w is not prompt
         ]
-        if any("SCENARIO-REPLY" in text for text in texts):
+        if any(marker in text for text in texts):
+            replied["value"] = True
             reply_ms = _now_ms() - sent_ms
             _event("chat_reply_shown", after_ms=reply_ms)
-            _later(3000, lambda: _quit("done", chat_reply_ms=reply_ms))
-        elif _now_ms() - sent_ms > 120000:
+            then(reply_ms)
+        elif _now_ms() - sent_ms > 180000:
             _quit("chat_reply_timeout")
         else:
             _later(200, poll)
 
     _later(200, poll)
+
+
+def _send_chat_message():
+    """The loopback provider answers with a search_workspace call, then with SCENARIO-REPLY."""
+    _chat(
+        "Which layers describe land use parcels?",
+        "SCENARIO-REPLY",
+        lambda reply_ms: _later(3000, lambda: _quit("done", chat_reply_ms=reply_ms)),
+    )
+
+
+def _tool_tour():
+    """Phase 3: the loopback provider calls one tool after another on the dataset (layers, map,
+    files, a new layer, a field calculation), then a slow calculation that the user stops."""
+
+    def stop_slow_tool():
+        send = _widget("aiSendButton")
+        seen = {"value": False}
+
+        def wait_for_tool():
+            if _STATE["done"]:
+                return
+            calls = [
+                e
+                for e in _STATE["events"]
+                if e["event"] == "tool_call" and e.get("tool") == "calculate_field"
+            ]
+            if len(calls) >= 2 and not seen["value"]:
+                seen["value"] = True
+                _later(300, press_stop)
+            elif not seen["value"]:
+                _later(50, wait_for_tool)
+
+        def press_stop():
+            _event("stop_pressed", running=send.text())
+            pressed_ms = _now_ms()
+            send.click()
+
+            def wait_idle():
+                if send.text() != "↑" and _now_ms() - pressed_ms < 30000:
+                    _later(20, wait_idle)
+                    return
+                stop_ms = _now_ms() - pressed_ms
+                _event("stopped", after_ms=stop_ms)
+                finished = [e for e in _STATE["events"] if e["event"] == "tool_finished"]
+                # Stopped for real only if the running tool ended without success.
+                stopped_tool_succeeded = finished[-1]["success"] if finished else None
+                _later(2000, lambda: _quit("done", stop_ms=stop_ms, stopped_tool_succeeded=stopped_tool_succeeded))
+
+            _later(20, wait_idle)
+
+        _chat(
+            "Compute the buffered area of every boundary.",
+            None,
+            lambda _ms: None,
+            mode="Agent",
+        )
+        _later(50, wait_for_tool)
+
+    _chat(
+        "Take a tour of the project tools.",
+        "SCENARIO-TOOLS-DONE",
+        lambda reply_ms: _later(1000, stop_slow_tool),
+        mode="Agent",
+    )
 
 
 def _accept_ai_settings():
@@ -259,15 +341,129 @@ def _watch_message_boxes():
                 _event(
                     "message_box", title=widget.windowTitle(), text=widget.text()[:300]
                 )
+            # capture_map_canvas asks once whether map images may go to the provider: yes, as a
+            # user trying the tool would answer.
+            if "send images to vision-capable" in widget.text():
+                yes = widget.button(QMessageBox.StandardButton.Yes)
+                if yes is not None:
+                    _event("image_consent_given")
+                    yes.click()
     _STATE["message_boxes"] = shown
     if not _STATE["done"]:
         _later(250, _watch_message_boxes)
+
+
+def _rss_mb():
+    """Resident memory of Strata now (ps), in MB."""
+    output = subprocess.check_output(
+        ["ps", "-o", "rss=", "-p", str(os.getpid())], text=True
+    )
+    return round(int(output.split()[0]) / 1024)
+
+
+def _count_perf(prefix, since=0):
+    return sum(1 for _, line in _STATE["perf"][since:] if line.startswith(prefix))
+
+
+INDEXING_TASKS = ("Index AI workspace", "Index AI layers")
+
+
+def _watch_indexing():
+    """Records when an indexing task first runs, when the chat shows it, and the CPU used meanwhile."""
+    events = [e["event"] for e in _STATE["events"]]
+    running = any(
+        task.description() in INDEXING_TASKS
+        for task in QgsApplication.taskManager().activeTasks()
+    )
+    if running and "indexing_task_started" not in events:
+        _event("indexing_task_started")
+        _STATE["cpu_at_start"] = (time.process_time(), time.monotonic())
+    # The chat panel may be closed (and is, offscreen): what counts is the indicator itself.
+    indicator = _widget("aiIndexingIndicator")
+    if (
+        indicator is not None
+        and not indicator.isHidden()
+        and "indicator_shown" not in events
+    ):
+        _event("indicator_shown", text=_widget("aiIndexingStatusButton").text())
+    if not _STATE["done"]:
+        _later(100, _watch_indexing)
+
+
+def _indexing_cpu():
+    """CPU used by Strata since indexing started, in percent of one core and of the whole computer."""
+    if "cpu_at_start" not in _STATE:
+        return {}
+    cpu0, wall0 = _STATE["cpu_at_start"]
+    busy = (time.process_time() - cpu0) / max(0.001, time.monotonic() - wall0) * 100
+    return {
+        "indexing_cpu_pct": round(busy),
+        "indexing_cpu_total_pct": round(busy / (os.cpu_count() or 1), 1),
+    }
+
+
+def _time_map_refreshes(label, count, then):
+    """Draws the project map count times, panning each time, and records the median time.
+
+    A render job of fixed size, not the canvas widget: an offscreen canvas may have no size and
+    never draw.
+    """
+    canvas = iface.mapCanvas()
+    settings = canvas.mapSettings()
+    settings.setOutputSize(QSize(1280, 800))
+    settings.setLayers(QgsProject.instance().layerTreeRoot().checkedLayers())
+    extent = QgsProject.instance().viewSettings().fullExtent()
+    if extent.isEmpty():
+        extent = canvas.extent()
+    settings.setDestinationCrs(QgsProject.instance().crs())
+    times = []
+    jobs = []
+
+    def one(index):
+        shift = extent.width() * 0.05 * (1 if index % 2 else -1)
+        settings.setExtent(
+            QgsRectangle(
+                extent.xMinimum() + shift,
+                extent.yMinimum(),
+                extent.xMaximum() + shift,
+                extent.yMaximum(),
+            )
+        )
+        job = QgsMapRendererParallelJob(settings)
+        jobs.append(job)
+        started = time.monotonic()
+        done = {"value": False}
+
+        def finished():
+            if done["value"]:
+                return
+            done["value"] = True
+            times.append(round((time.monotonic() - started) * 1000))
+            if index + 1 < count:
+                _later(150, lambda: one(index + 1))
+            else:
+                median = sorted(times)[len(times) // 2]
+                _event(label, median_ms=median, all_ms=times)
+                then(median)
+
+        def too_slow():
+            if not done["value"]:
+                job.cancelWithoutBlocking()
+                _event(label + "_render_timeout", index=index)
+                finished()
+
+        job.finished.connect(finished)
+        job.start()
+        _later(60000, too_slow)
+
+    one(0)
 
 
 def _run():
     scenario = _CONFIG["scenario"]
     _event("start", scenario=scenario)
     _watch_message_boxes()
+    _watch_indexing()
     if scenario == "startup":
         _later(_CONFIG.get("wait_s", 25) * 1000, lambda: _quit("done"))
     elif scenario == "open_project":
@@ -275,7 +471,100 @@ def _run():
         def step():
             started = _now_ms()
             _open_project()
-            _wait_for_idle(started, lambda: _quit("done"))
+            _wait_for_idle(started, lambda: _quit("done", **_indexing_cpu()))
+
+        _later(2000, step)
+    elif scenario == "reopen_project":
+        # Opening the same unchanged project again must embed nothing.
+        def step():
+            started = _now_ms()
+            _open_project()
+
+            def reopen():
+                _event(
+                    "first_open_indexed",
+                    layer_embeds=_count_perf("index_task embed_layer"),
+                    file_embeds=_count_perf("index_task embed_files"),
+                )
+                QgsProject.instance().clear()
+                _event("project_closed")
+                mark = len(_STATE["perf"])
+                reopened = _now_ms()
+                _open_project()
+
+                def done():
+                    _quit(
+                        "done",
+                        reopen_layer_embeds=_count_perf("index_task embed_layer", mark),
+                        reopen_file_embeds=_count_perf("index_task embed_files", mark),
+                        reopen_unchanged_layers=_count_perf(
+                            "index_task layer_unchanged", mark
+                        ),
+                    )
+
+                _wait_for_idle(reopened, done)
+
+            _wait_for_idle(started, reopen)
+
+        _later(2000, step)
+    elif scenario == "idle_memory":
+        # After indexing, the model is released once idle (strata/index/model_idle_unload_s).
+        def step():
+            started = _now_ms()
+            _open_project()
+            rss_opened = _rss_mb()
+            _event("rss", stage="project_opened", mb=rss_opened)
+
+            def indexed():
+                rss_indexed = _rss_mb()
+                _event("rss", stage="indexed", mb=rss_indexed)
+
+                def idle():
+                    rss_idle = _rss_mb()
+                    _event("rss", stage="idle", mb=rss_idle)
+                    _quit(
+                        "done",
+                        rss_opened_mb=rss_opened,
+                        rss_indexed_mb=rss_indexed,
+                        rss_idle_mb=rss_idle,
+                    )
+
+                _later((_CONFIG.get("model_idle_s", 20) + 20) * 1000, idle)
+
+            _wait_for_idle(started, indexed)
+
+        _later(2000, step)
+    elif scenario == "map_during_indexing":
+        # Drawing the map while indexing runs, compared with drawing it once indexing is done.
+        def step():
+            started = _now_ms()
+            _open_project()
+
+            def during():
+                def after(median_during):
+                    def idle():
+                        _time_map_refreshes(
+                            "map_idle",
+                            7,
+                            lambda median_idle: _quit(
+                                "done",
+                                map_during_ms=median_during,
+                                map_idle_ms=median_idle,
+                            ),
+                        )
+
+                    _wait_for_idle(started, idle)
+
+                _time_map_refreshes("map_during_indexing", 7, after)
+
+            _when_indexing(during)
+
+        _later(2000, step)
+    elif scenario == "tools_on_dataset":
+
+        def step():
+            _open_project()
+            _later(3000, _tool_tour)
 
         _later(2000, step)
     elif scenario == "add_layers":
