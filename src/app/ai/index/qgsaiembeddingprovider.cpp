@@ -130,6 +130,18 @@ namespace
     return cleaned;
   }
 
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  QString e5MissingModelMessage( const QString &filesError )
+  {
+    const QString developerDir = QgsAiE5EmbeddingProvider::developerModelDirectory();
+    return developerDir.isEmpty()
+             ? u"Local multilingual E5 embedding model is not installed. Download it from the AI settings dialog or set STRATA_AI_EMBEDDING_MODEL_DIR for development builds. Expected cache: %1"_s.arg(
+                 QgsAiE5EmbeddingProvider::userModelDirectory()
+               )
+             : u"STRATA_AI_EMBEDDING_MODEL_DIR is set to %1, but the local multilingual E5 files are not usable: %2"_s.arg( developerDir, filesError );
+  }
+#endif
+
   QString modelDownloadUrl( const QString &relativePath )
   {
     return u"https://huggingface.co/intfloat/multilingual-e5-small/resolve/%1/%2"_s.arg( QString::fromLatin1( E5_HF_REVISION ), relativePath );
@@ -451,6 +463,7 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 #ifndef HAVE_AI_E5_EMBEDDINGS
   mRuntimeError = u"Local multilingual E5 embedding support was not compiled because ONNX Runtime and/or SentencePiece were not found."_s;
   mRuntimeLoadAttempted = true;
+  setLoadFailure( mRuntimeError );
   if ( errorMessage )
     *errorMessage = mRuntimeError;
   return false;
@@ -471,13 +484,9 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
   QString filesError;
   if ( !modelFilesAvailable( modelDir, &filesError ) )
   {
-    const QString developerDir = developerModelDirectory();
-    mRuntimeError
-      = developerDir.isEmpty()
-          ? u"Local multilingual E5 embedding model is not installed. Download it from the AI settings dialog or set STRATA_AI_EMBEDDING_MODEL_DIR for development builds. Expected cache: %1"_s.arg(
-              userModelDirectory()
-            )
-          : u"STRATA_AI_EMBEDDING_MODEL_DIR is set to %1, but the local multilingual E5 files are not usable: %2"_s.arg( developerDir, filesError );
+    mRuntimeError = e5MissingModelMessage( filesError );
+    // Not a load failure: the files may be installed later from the settings dialog.
+    mRuntimeLoadAttempted = false;
     if ( errorMessage )
       *errorMessage = mRuntimeError;
     return false;
@@ -485,6 +494,19 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 
   const QString onnxPath = modelPath( modelDir );
   const QString spPath = tokenizerPath( modelDir );
+
+  // A damaged tokenizer must never reach SentencePiece: its failure status is an absl::Status,
+  // and destroying one crashes when SentencePiece and Strata were built against different
+  // abseil versions. The file is small, so check it against its pinned hash first.
+  QString tokenizerHashError;
+  if ( !fileMatchesSha256( spPath, QString::fromLatin1( E5_SENTENCEPIECE_SHA256 ), &tokenizerHashError ) )
+  {
+    mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer %1: the file is damaged or incompatible (%2). Download the model again from the AI settings."_s.arg( spPath, tokenizerHashError );
+    setLoadFailure( mRuntimeError );
+    if ( errorMessage )
+      *errorMessage = mRuntimeError;
+    return false;
+  }
 
   try
   {
@@ -494,7 +516,10 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     const auto tokenizerStatus = runtime->tokenizer->Load( QFile::encodeName( spPath ).toStdString() );
     if ( !tokenizerStatus.ok() )
     {
-      mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer: %1"_s.arg( QString::fromStdString( tokenizerStatus.ToString() ) );
+      // Only ok() is read: formatting the absl::Status crashes when SentencePiece and Strata
+      // link different abseil builds, and a damaged file is enough to get here.
+      mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer %1: the file is damaged or incompatible. Download the model again from the AI settings."_s.arg( spPath );
+      setLoadFailure( mRuntimeError );
       if ( errorMessage )
         *errorMessage = mRuntimeError;
       return false;
@@ -532,6 +557,7 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     if ( runtime->inputNames.empty() || runtime->outputNames.empty() )
     {
       mRuntimeError = u"Failed to load multilingual E5 ONNX model: model has no usable inputs or outputs."_s;
+      setLoadFailure( mRuntimeError );
       if ( errorMessage )
         *errorMessage = mRuntimeError;
       return false;
@@ -539,6 +565,7 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 
     mRuntime = std::move( runtime );
     mRuntimeError.clear();
+    mRuntimeReady = true;
     return true;
   }
   catch ( const Ort::Exception &e )
@@ -550,15 +577,45 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     mRuntimeError = u"Failed to load multilingual E5 embedding model: %1"_s.arg( QString::fromUtf8( e.what() ) );
   }
 
+  setLoadFailure( mRuntimeError );
   if ( errorMessage )
     *errorMessage = mRuntimeError;
   return false;
 #endif
 }
 
+void QgsAiE5EmbeddingProvider::setLoadFailure( const QString &error ) const
+{
+  const QMutexLocker locker( &mLoadFailureMutex );
+  mLoadFailure = error;
+  mRuntimeFailed = true;
+}
+
 bool QgsAiE5EmbeddingProvider::isAvailable( QString *errorMessage ) const
 {
+#ifndef HAVE_AI_E5_EMBEDDINGS
   return ensureRuntime( errorMessage );
+#else
+  // Cheap on purpose: callers include timers on the interface thread. The model itself is
+  // loaded by embed(), which only runs in background tasks.
+  if ( mRuntimeReady )
+    return true;
+  if ( mRuntimeFailed )
+  {
+    if ( errorMessage )
+    {
+      const QMutexLocker locker( &mLoadFailureMutex );
+      *errorMessage = mLoadFailure;
+    }
+    return false;
+  }
+  QString filesError;
+  if ( modelFilesAvailable( activeModelDirectory(), &filesError ) )
+    return true;
+  if ( errorMessage )
+    *errorMessage = e5MissingModelMessage( filesError );
+  return false;
+#endif
 }
 
 bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage, int maxBatch )
@@ -605,7 +662,7 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
       if ( !encodeStatus.ok() )
       {
         if ( errorMessage )
-          *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings: %1"_s.arg( QString::fromStdString( encodeStatus.ToString() ) );
+          *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings."_s;
         return false;
       }
 

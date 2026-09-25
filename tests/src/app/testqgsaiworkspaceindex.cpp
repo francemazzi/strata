@@ -208,6 +208,7 @@ class TestQgsAiWorkspaceIndex : public QObject
     void layerSnapshotsReindexWithoutDroppingFileChunks();
     void chunkerOutputPersistsAsLayerChunks();
     void reindexLayersToolRequiresConfirm();
+    void e5AvailabilityDoesNotLoadTheModel();
 
   private:
     static QgsAiWorkspaceIndex::Chunk makeFileChunk( const QString &rel, int index, const QString &text );
@@ -854,6 +855,38 @@ void TestQgsAiWorkspaceIndex::reindexLayersToolRequiresConfirm()
   const QgsAiToolResult confirmed = tool.execute( args );
   QVERIFY( !confirmed.success );
   QVERIFY2( confirmed.errorMessage.contains( u"Local embedding model"_s, Qt::CaseInsensitive ), confirmed.errorMessage.toUtf8().constData() );
+}
+
+void TestQgsAiWorkspaceIndex::e5AvailabilityDoesNotLoadTheModel()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings are not compiled in." );
+
+  ScopedEmbeddingConfiguration scopedConfiguration;
+  QTemporaryDir modelDir;
+  QVERIFY( modelDir.isValid() );
+  QVERIFY( QDir( modelDir.path() ).mkpath( u"onnx"_s ) );
+  // Files that exist but are not a model: availability must not notice, only a real load does.
+  for ( const QString &relative : { u"onnx/model_qint8_avx512_vnni.onnx"_s, u"sentencepiece.bpe.model"_s } )
+  {
+    QFile file( QDir( modelDir.path() ).filePath( relative ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "not a model" );
+  }
+  qputenv( "STRATA_AI_EMBEDDING_MODEL_DIR", QFile::encodeName( modelDir.path() ) );
+
+  QgsAiE5EmbeddingProvider provider;
+  QString error;
+  QVERIFY2( provider.isAvailable( &error ), error.toUtf8().constData() );
+  QVERIFY( !provider.runtimeLoaded() );
+
+  // The first embed() loads the model on its own thread; a failed load is then reported.
+  QList<QVector<float>> out;
+  QVERIFY( !provider.embed( { u"alpha"_s }, out, &error ) );
+  QVERIFY( !provider.runtimeLoaded() );
+  error.clear();
+  QVERIFY( !provider.isAvailable( &error ) );
+  QVERIFY( !error.isEmpty() );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

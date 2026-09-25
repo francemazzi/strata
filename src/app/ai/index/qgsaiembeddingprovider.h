@@ -16,6 +16,7 @@
 #ifndef QGSAIEMBEDDINGPROVIDER_H
 #define QGSAIEMBEDDINGPROVIDER_H
 
+#include <atomic>
 #include <memory>
 
 #include "qgis_app.h"
@@ -169,19 +170,36 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     QString modelId() const override { return modelName(); }
     QString modelRevision() const override { return pinnedModelRevision(); }
     int embeddingDimension() const override { return 384; }
+
+    /**
+     * True when the model files are installed and a previous load did not fail.
+     *
+     * Never loads the model: that happens on the first embed(), on the thread that calls it
+     * (a background task), so checking availability from the interface stays instant.
+     */
     bool isAvailable( QString *errorMessage = nullptr ) const override;
     bool embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage = nullptr, int maxBatch = 64 ) override;
     bool embed( const QStringList &texts, QgsAiEmbeddingRole role, QList<QVector<float>> &out, QString *errorMessage = nullptr, const QgsAiEmbeddingOptions &options = QgsAiEmbeddingOptions() ) override;
+
+    //! True once the ONNX session is loaded.
+    bool runtimeLoaded() const { return mRuntimeReady; }
 
   private:
     struct Runtime;
 
     bool ensureRuntime( QString *errorMessage = nullptr ) const;
+    //! Records a load failure so isAvailable() reports it without touching the runtime lock.
+    void setLoadFailure( const QString &error ) const;
 
     mutable QMutex mRuntimeMutex;
     mutable std::unique_ptr<Runtime> mRuntime;
     mutable QString mRuntimeError;
     mutable bool mRuntimeLoadAttempted = false;
+    //! Read by isAvailable() without mRuntimeMutex, which embed() holds for a whole batch.
+    mutable std::atomic_bool mRuntimeReady { false };
+    mutable std::atomic_bool mRuntimeFailed { false };
+    mutable QMutex mLoadFailureMutex;
+    mutable QString mLoadFailure;
 };
 
 class APP_EXPORT QgsAiEmbeddingProviderRegistry
