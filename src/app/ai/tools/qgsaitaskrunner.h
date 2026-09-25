@@ -178,6 +178,22 @@ APP_EXPORT void qgsAiCancelActiveBackgroundTool();
  */
 APP_EXPORT bool qgsAiWaitForActiveTasks( int timeoutMs );
 
+//! Outcome of qgsAiApplyInSlices().
+enum class QgsAiSliceResult
+{
+  Completed,
+  Canceled, //!< Stop was pressed; the changes applied so far stay for the caller to undo.
+  Failed,   //!< An item could not be applied.
+};
+
+/**
+ * Applies \a count changes on the interface thread, calling \a apply for each index, in slices of
+ * about \a sliceMs milliseconds with the event loop turning in between: the window stays
+ * responsive, progress reaches the chat and Stop ends the work between two slices. Returns why
+ * it ended; \a failedIndex receives the index \a apply refused.
+ */
+APP_EXPORT QgsAiSliceResult qgsAiApplyInSlices( const QString &label, int count, const std::function<bool( int index )> &apply, int *failedIndex = nullptr, int sliceMs = 50 );
+
 //! Outcome of qgsAiRunProcess().
 struct APP_EXPORT QgsAiProcessResult
 {

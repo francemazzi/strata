@@ -208,6 +208,55 @@ bool qgsAiWaitForActiveTasks( int timeoutMs )
   return manager->countActiveTasks() == 0;
 }
 
+QgsAiSliceResult qgsAiApplyInSlices( const QString &label, int count, const std::function<bool( int index )> &apply, int *failedIndex, int sliceMs )
+{
+  if ( count <= 0 )
+    return QgsAiSliceResult::Completed;
+
+  QgsFeedback feedback;
+  const QgsAiActiveFeedbackScope scope( &feedback, label );
+  QgsAiSliceResult result = QgsAiSliceResult::Completed;
+  int next = 0;
+  // Applies one slice; TRUE once nothing is left to do.
+  const auto applySlice = [&]() {
+    QElapsedTimer slice;
+    slice.start();
+    while ( next < count && slice.elapsed() < sliceMs )
+    {
+      if ( !apply( next ) )
+      {
+        result = QgsAiSliceResult::Failed;
+        if ( failedIndex )
+          *failedIndex = next;
+        return true;
+      }
+      ++next;
+    }
+    feedback.setProgress( 100.0 * next / count );
+    return next >= count;
+  };
+
+  // What fits in one slice needs no event loop.
+  if ( !applySlice() && !feedback.isCanceled() )
+  {
+    QEventLoop loop;
+    QTimer slices;
+    slices.setInterval( 0 );
+    QObject::connect( &feedback, &QgsFeedback::canceled, &loop, &QEventLoop::quit );
+    QObject::connect( &slices, &QTimer::timeout, &loop, [&]() {
+      if ( feedback.isCanceled() || applySlice() )
+        loop.quit();
+    } );
+    slices.start();
+    loop.exec();
+    slices.stop();
+  }
+  // Stopped even after the last value: the caller undoes what was written.
+  if ( result == QgsAiSliceResult::Completed && ( feedback.isCanceled() || next < count ) )
+    result = QgsAiSliceResult::Canceled;
+  return result;
+}
+
 QgsAiProcessResult qgsAiRunProcess( const QString &label, const QString &program, const QStringList &arguments, int timeoutMs, const QStringList &unsetVariables )
 {
   QgsAiProcessResult result;

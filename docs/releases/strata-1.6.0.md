@@ -91,3 +91,7 @@ the Windows reference machine measurements are still to be done.
 - `add_layer_from_file` and `add_layer_from_service` open the layer, check it and compute
   its extent in the background; a large file no longer freezes the window, and Stop adds
   nothing to the project.
+- `calculate_field` and `batch_update_attributes` write their values a slice at a time, so
+  the window keeps drawing; Stop while writing leaves the layer as it was. Saving a layer the
+  tool put in edit mode is still one step, to stay atomic: about 0.25 s for 200 polygons of
+  20,000 vertices in a GeoPackage.

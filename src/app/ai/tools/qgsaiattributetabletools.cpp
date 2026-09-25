@@ -481,22 +481,37 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( startedEditing && !layer->startEditing() )
     return QgsAiToolResult::error( u"Cannot start editing session for layer: %1"_s.arg( layer->name() ) );
 
+  // Written a slice at a time: a large layer never freezes the window, and Stop undoes what was
+  // written so far, leaving the layer as it was.
   QHash<QgsFeatureId, QVariant> oldValues;
   layer->beginEditCommand( u"AI batch attribute update"_s );
   phaseTimer.restart();
-  for ( const PendingUpdate &pending : std::as_const( pendingUpdates ) )
+  int failedIndex = -1;
+  const QgsAiSliceResult applied = qgsAiApplyInSlices(
+    u"Updating attributes"_s,
+    static_cast<int>( pendingUpdates.size() ),
+    [&]( int index ) {
+      if ( layerGuard.isNull() )
+        return false;
+      const PendingUpdate &pending = pendingUpdates.at( index );
+      oldValues.insert( pending.featureId, pending.oldValue );
+      return layer->changeAttributeValue( pending.featureId, fieldIndex, convertedValue, pending.oldValue, true );
+    },
+    &failedIndex
+  );
+  qgsAiLogPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while the values were written."_s );
+  if ( applied != QgsAiSliceResult::Completed )
   {
-    oldValues.insert( pending.featureId, pending.oldValue );
-    if ( !layer->changeAttributeValue( pending.featureId, fieldIndex, convertedValue, pending.oldValue, true ) )
-    {
-      layer->destroyEditCommand();
-      if ( startedEditing )
-        layer->rollBack();
-      return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( pending.featureId ) );
-    }
+    layer->destroyEditCommand();
+    if ( startedEditing )
+      layer->rollBack();
+    if ( applied == QgsAiSliceResult::Canceled )
+      return QgsAiToolResult::canceledResult( u"Batch attribute update was stopped; the layer is unchanged."_s );
+    return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( pendingUpdates.at( failedIndex ).featureId ) );
   }
   layer->endEditCommand();
-  qgsAiLogPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
 
   phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )

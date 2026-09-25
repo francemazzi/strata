@@ -10,6 +10,7 @@
 #include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgsfeature.h"
+#include "qgsfeatureiterator.h"
 #include "qgsfeaturerequest.h"
 #include "qgsfield.h"
 #include "qgsgeometry.h"
@@ -21,7 +22,9 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QScopeGuard>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -48,6 +51,7 @@ class TestQgsAiEditingTools : public QObject
     void calculateFieldUsesJoinedFields();
     void calculateFieldReportsRemovedLayer();
     void calculateFieldEvaluatesAggregatesOnInterfaceThread();
+    void calculateFieldStopWhileWritingLeavesLayerUnchanged();
 };
 
 void TestQgsAiEditingTools::initTestCase()
@@ -635,6 +639,40 @@ void TestQgsAiEditingTools::calculateFieldEvaluatesAggregatesOnInterfaceThread()
   QgsFeatureIterator it = layer->getFeatures();
   while ( it.nextFeature( feature ) )
     QGSCOMPARENEAR( feature.attribute( shareIndex ).toDouble(), feature.attribute( u"value"_s ).toDouble() / 6.0, 1e-9 );
+}
+
+void TestQgsAiEditingTools::calculateFieldStopWhileWritingLeavesLayerUnchanged()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 60000 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"value"_s );
+  args.insert( u"expression"_s, u"\"value\" + 1000000"_s );
+
+  // Stop once the first slice of values is written.
+  bool stopped = false;
+  qgsAiSetBackgroundToolProgressHandler( [&stopped]( const QString &label, double ) {
+    if ( !stopped && label == "Writing calculated values"_L1 )
+    {
+      stopped = true;
+      qgsAiCancelActiveBackgroundTool();
+    }
+  } );
+  const auto restoreHandler = qScopeGuard( []() { qgsAiSetBackgroundToolProgressHandler( {} ); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( stopped );
+  QVERIFY( result.canceled );
+  QVERIFY( !layer->isEditable() );
+
+  // Nothing written stays.
+  double maximum = 0;
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    maximum = std::max( maximum, feature.attribute( u"value"_s ).toDouble() );
+  QCOMPARE( maximum, 59999.0 );
 }
 
 QGSTEST_MAIN( TestQgsAiEditingTools )

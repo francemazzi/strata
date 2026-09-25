@@ -95,6 +95,9 @@ class TestQgsAiTaskRunner : public QObject
     void processRunsWithoutFreezingAndCollectsOutput();
     void stopEndsAProcess();
     void processTimeoutEndsIt();
+    void slicesLetTheWindowTurn();
+    void smallApplyNeedsNoEventLoop();
+    void stopBetweenSlices();
 };
 
 void TestQgsAiTaskRunner::initTestCase()
@@ -477,6 +480,57 @@ void TestQgsAiTaskRunner::processTimeoutEndsIt()
   QVERIFY( result.timedOut );
   QVERIFY( !result.canceled );
   QVERIFY2( clock.elapsed() < 2500, QString::number( clock.elapsed() ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::slicesLetTheWindowTurn()
+{
+  // 300 items of 2 ms each: about 12 slices, and the window turns between them.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 10 );
+  int applied = 0;
+  const QgsAiSliceResult result = qgsAiApplyInSlices( u"Writing"_s, 300, [&applied]( int ) {
+    QThread::msleep( 2 );
+    ++applied;
+    return true;
+  } );
+  ticker.stop();
+  QCOMPARE( result, QgsAiSliceResult::Completed );
+  QCOMPARE( applied, 300 );
+  QVERIFY2( ticks >= 5, QString::number( ticks ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::smallApplyNeedsNoEventLoop()
+{
+  // What fits in one slice runs inline: nothing else can run in between.
+  int maxLoopLevel = 0;
+  const QgsAiSliceResult result = qgsAiApplyInSlices( u"Writing"_s, 10, [&maxLoopLevel]( int ) {
+    maxLoopLevel = std::max( maxLoopLevel, QThread::currentThread()->loopLevel() );
+    return true;
+  } );
+  QCOMPARE( result, QgsAiSliceResult::Completed );
+  QCOMPARE( maxLoopLevel, 0 );
+}
+
+void TestQgsAiTaskRunner::stopBetweenSlices()
+{
+  int applied = 0;
+  QTimer::singleShot( 100, []() { qgsAiCancelActiveBackgroundTool(); } );
+  int failedIndex = -1;
+  const QgsAiSliceResult result = qgsAiApplyInSlices(
+    u"Writing"_s,
+    1000,
+    [&applied]( int ) {
+      QThread::msleep( 2 );
+      ++applied;
+      return true;
+    },
+    &failedIndex
+  );
+  QCOMPARE( result, QgsAiSliceResult::Canceled );
+  QVERIFY2( applied < 1000, QString::number( applied ).toUtf8().constData() );
+  QCOMPARE( failedIndex, -1 );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )
