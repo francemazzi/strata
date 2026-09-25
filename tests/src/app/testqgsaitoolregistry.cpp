@@ -184,6 +184,7 @@ class TestQgsAiToolRegistry : public QObject
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
+    void addLayerFromFileLoadsInBackgroundAndStops();
     void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
     void addLayerFromFileContextQualityCheckFindsInvalidValue();
     void addLayerFromFileStopDuringQualityCheckRemovesLayer();
@@ -708,6 +709,53 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsUnusableVectors()
   QCOMPARE( output.value( u"feature_count"_s ).toVariant().toLongLong(), 1 );
   QCOMPARE( output.value( u"spatial"_s ).toBool(), false );
   QVERIFY( output.value( u"extent"_s ).isNull() );
+  QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileLoadsInBackgroundAndStops()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  // 150000 points: OGR parses the whole GeoJSON when opening it, about a second.
+  QFile geojson( tempDir.filePath( u"big.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly ) );
+  geojson.write( R"({"type":"FeatureCollection","features":[)" );
+  for ( int i = 0; i < 150000; ++i )
+    geojson.write( u"%1{\"type\":\"Feature\",\"properties\":{\"id\":%2},\"geometry\":{\"type\":\"Point\",\"coordinates\":[%3,%4]}}"_s.arg( i ? u","_s : QString() )
+                     .arg( i )
+                     .arg( 11 + i % 1000 * 0.001 )
+                     .arg( 45 + i / 1000 * 0.001 )
+                     .toUtf8() );
+  geojson.write( "]}" );
+  geojson.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"big.geojson"_s );
+
+  // The window keeps turning while the file is read.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 10 );
+  const QgsAiToolResult loaded = tool.execute( args );
+  ticker.stop();
+  QVERIFY2( loaded.success, qPrintable( loaded.errorMessage ) );
+  QVERIFY2( ticks >= 5, QString::number( ticks ).toUtf8().constData() );
+  QCOMPARE( loaded.output.toObject().value( u"feature_count"_s ).toVariant().toLongLong(), 150000LL );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  QgsMapLayer *layer = project.mapLayers().first();
+  QCOMPARE( layer->thread(), QThread::currentThread() );
+
+  // Stop while loading: no layer is added.
+  QTimer::singleShot( 50, []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult stopped = tool.execute( args );
+  QVERIFY( stopped.canceled );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  // The abandoned load ends on its own before the file goes away.
+  QTRY_COMPARE_WITH_TIMEOUT( QgsApplication::taskManager()->countActiveTasks(), 0, 10000 );
   QCOMPARE( project.mapLayers().size(), 1 );
 }
 

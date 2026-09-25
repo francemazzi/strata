@@ -88,3 +88,6 @@ the Windows reference machine measurements are still to be done.
   features of local layers only ("unknown" for remote ones, which would otherwise query the
   server). `install_python_package` runs pip as a separate process that Stop ends, checks
   the interpreter once per session, and makes new packages importable at once.
+- `add_layer_from_file` and `add_layer_from_service` open the layer, check it and compute
+  its extent in the background; a large file no longer freezes the window, and Stop adds
+  nothing to the project.
