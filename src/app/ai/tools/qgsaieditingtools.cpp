@@ -815,7 +815,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Expression parser error: %1"_s.arg( expression.parserErrorString() ) );
 
   // Only parse here: prepare() can already evaluate constant parts, such as an aggregate
-  // over another layer, so it runs in the worker with the rest of the evaluation.
+  // over another layer, so it runs with the rest of the evaluation.
   QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
   context.setFields( layer->fields() );
 
@@ -842,6 +842,13 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     request.setNoAttributes();
   if ( !needsGeometry )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
+
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  QString guiFunction = qgsAiGuiThreadExpressionFunction( expressionText );
+  if ( guiFunction.isEmpty() )
+    guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"calculate_field %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
 
   struct PendingValue
   {
@@ -881,7 +888,7 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   {
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
-    options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
     options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Calculating field values"_s,

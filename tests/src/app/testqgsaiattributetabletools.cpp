@@ -41,6 +41,8 @@ class TestQgsAiAttributeTableTools : public QObject
     void selectFeaturesKeepsInterfaceResponsive();
     void batchUpdateAttributesCancelLeavesLayerUnchanged();
     void selectFeaturesCancelKeepsSelection();
+    void selectFeaturesEvaluatesAggregatesOnInterfaceThread();
+    void batchUpdateAttributesEvaluatesAggregatesOnInterfaceThread();
     void identifyFeaturesAtReturnsMatchingFeature();
 };
 
@@ -358,6 +360,45 @@ void TestQgsAiAttributeTableTools::selectFeaturesCancelKeepsSelection()
   QVERIFY( !result.success );
   QVERIFY( result.canceled );
   QCOMPARE( layer->selectedFeatureIds(), before );
+}
+
+void TestQgsAiAttributeTableTools::selectFeaturesEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsAiSelectFeaturesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" > mean(\"value\")"_s );
+
+  // mean() reads the live layer, so the scan runs on the GUI thread, outside any nested event loop.
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+  QCOMPARE( layer->selectedFeatureCount(), 1 );
+}
+
+void TestQgsAiAttributeTableTools::batchUpdateAttributesEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsAiBatchUpdateAttributesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= mean(\"value\")"_s );
+  args.insert( u"field_name"_s, u"name"_s );
+  args.insert( u"value"_s, u"above"_s );
+
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+  QCOMPARE( result.output.toObject().value( u"updated_feature_count"_s ).toInt(), 2 );
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    QCOMPARE( feature.attribute( u"name"_s ).toString() == "above"_L1, feature.attribute( u"value"_s ).toInt() >= 2 );
 }
 
 void TestQgsAiAttributeTableTools::identifyFeaturesAtReturnsMatchingFeature()

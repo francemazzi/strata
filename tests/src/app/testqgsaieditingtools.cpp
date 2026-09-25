@@ -47,6 +47,7 @@ class TestQgsAiEditingTools : public QObject
     void calculateFieldIncludesAddedFeatures();
     void calculateFieldUsesJoinedFields();
     void calculateFieldReportsRemovedLayer();
+    void calculateFieldEvaluatesAggregatesOnInterfaceThread();
 };
 
 void TestQgsAiEditingTools::initTestCase()
@@ -607,6 +608,33 @@ void TestQgsAiEditingTools::calculateFieldReportsRemovedLayer()
   QVERIFY( !result.canceled );
   QVERIFY2( result.errorMessage.contains( u"removed"_s ), qPrintable( result.errorMessage ) );
   QVERIFY( !project.mapLayer( layerId ) );
+}
+
+void TestQgsAiEditingTools::calculateFieldEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 4 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"share"_s );
+  args.insert( u"expression"_s, u"\"value\" / sum(\"value\")"_s );
+  args.insert( u"create_field"_s, true );
+  args.insert( u"field_type"_s, u"double"_s );
+
+  // sum() reads the live layer, so the scan runs on the GUI thread: its progress arrives outside
+  // any nested event loop.
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+
+  const int shareIndex = layer->fields().lookupField( u"share"_s );
+  QVERIFY( shareIndex >= 0 );
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    QGSCOMPARENEAR( feature.attribute( shareIndex ).toDouble(), feature.attribute( u"value"_s ).toDouble() / 6.0, 1e-9 );
 }
 
 QGSTEST_MAIN( TestQgsAiEditingTools )

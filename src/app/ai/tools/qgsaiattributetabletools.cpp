@@ -399,6 +399,11 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( !filter.needsGeometry() )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  const QString guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"batch_update_attributes %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+
   struct PendingUpdate
   {
       QgsFeatureId featureId = FID_NULL;
@@ -427,7 +432,7 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   {
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
-    options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
     options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Updating attributes"_s,
@@ -587,6 +592,11 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   if ( !needsGeometry )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  const QString guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"select_features %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+
   // Shared with the worker, which may outlive this call if Strata quits mid-run.
   struct SelectionScanJob
   {
@@ -608,7 +618,7 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   {
     const QgsAiLayerChangeWatch watcher( layer );
     QgsAiBackgroundRunOptions options;
-    options.forceGuiThread = qgsAiProviderUsesTransaction( layer );
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
     options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Selecting features"_s,

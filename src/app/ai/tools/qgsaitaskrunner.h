@@ -190,6 +190,16 @@ APP_EXPORT void qgsAiLogPerf( const QString &tool, const QString &phase, qint64 
 APP_EXPORT bool qgsAiProviderUsesTransaction( const QgsVectorLayer *layer );
 
 /**
+ * Name of the first function in \a expression that must be evaluated on the GUI thread, or an
+ * empty string when the expression can run on a worker.
+ *
+ * These are the aggregates and the other functions that read a live layer (QGIS marks them
+ * "NOT thread safe"), eval(), whose expression is only known at run time, and functions
+ * registered from Python or by plugins, which may touch the GUI or the project.
+ */
+APP_EXPORT QString qgsAiGuiThreadExpressionFunction( const QString &expression );
+
+/**
  * Records whether a vector layer changed while a background scan of it was running.
  *
  * Connects to the layer's edit, data, field and subset signals for its lifetime.

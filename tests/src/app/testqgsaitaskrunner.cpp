@@ -10,6 +10,8 @@
 
 #include "ai/tools/qgsaitaskrunner.h"
 #include "qgsapplication.h"
+#include "qgsexpression.h"
+#include "qgsexpressionfunction.h"
 #include "qgsfeedback.h"
 #include "qgsproject.h"
 #include "qgstaskmanager.h"
@@ -17,6 +19,7 @@
 #include "qgsvectorlayer.h"
 
 #include <QPointer>
+#include <QScopeGuard>
 #include <QString>
 #include <QThread>
 #include <QTimer>
@@ -46,6 +49,17 @@ namespace
     protected:
       bool run() override { return true; }
   };
+
+  //! Stands in for a function registered from Python with @qgsfunction: neither built in nor a context function.
+  class RegisteredTestFunction : public QgsExpressionFunction
+  {
+    public:
+      RegisteredTestFunction()
+        : QgsExpressionFunction( u"strata_ai_test_function"_s, 0, u"Custom"_s )
+      {}
+
+      QVariant func( const QVariantList &, const QgsExpressionContext *, QgsExpression *, const QgsExpressionNodeFunction * ) override { return 1; }
+  };
 } // namespace
 
 class TestQgsAiTaskRunner : public QObject
@@ -70,6 +84,9 @@ class TestQgsAiTaskRunner : public QObject
     void tasksAreSilentAndCancelWithoutPrompt();
     void cancelHookRunsOnStop();
     void progressHandlerReceivesUpdates();
+    void guiThreadExpressionFunction_data();
+    void guiThreadExpressionFunction();
+    void registeredFunctionNeedsGuiThread();
 };
 
 void TestQgsAiTaskRunner::initTestCase()
@@ -336,6 +353,41 @@ void TestQgsAiTaskRunner::progressHandlerReceivesUpdates()
   QVERIFY( result.succeeded );
   QCOMPARE( seenLabel, u"progress-label"_s );
   QVERIFY( seenProgress >= 0 );
+}
+
+void TestQgsAiTaskRunner::guiThreadExpressionFunction_data()
+{
+  QTest::addColumn<QString>( "expression" );
+  QTest::addColumn<QString>( "function" );
+
+  QTest::newRow( "share of total" ) << u"\"pop\" / sum(\"pop\")"_s << u"sum"_s;
+  QTest::newRow( "grouped mean" ) << u"mean(\"pop\", group_by:=\"kind\")"_s << u"mean"_s;
+  QTest::newRow( "aggregate" ) << u"aggregate('other', 'sum', \"pop\")"_s << u"aggregate"_s;
+  QTest::newRow( "relation aggregate" ) << u"relation_aggregate('rel', 'count', \"fid\")"_s << u"relation_aggregate"_s;
+  QTest::newRow( "nested in a branch" ) << u"CASE WHEN \"a\" > 0 THEN 1 ELSE count(\"a\") END"_s << u"count"_s;
+  QTest::newRow( "overlay" ) << u"overlay_intersects('other')"_s << u"overlay_intersects"_s;
+  QTest::newRow( "represent value" ) << u"represent_value(\"kind\")"_s << u"represent_value"_s;
+  QTest::newRow( "display expression" ) << u"display_expression()"_s << u"display_expression"_s;
+  QTest::newRow( "eval" ) << u"eval('1 + 1')"_s << u"eval"_s;
+  QTest::newRow( "plain functions" ) << u"upper(\"name\") || length(\"name\")"_s << QString();
+  QTest::newRow( "get_feature is thread safe" ) << u"get_feature('other', 'id', 1)"_s << QString();
+  QTest::newRow( "context function" ) << u"project_color('red')"_s << QString();
+  QTest::newRow( "empty" ) << QString() << QString();
+  QTest::newRow( "parser error" ) << u"\"pop\" *"_s << QString();
+}
+
+void TestQgsAiTaskRunner::guiThreadExpressionFunction()
+{
+  QFETCH( QString, expression );
+  QFETCH( QString, function );
+  QCOMPARE( qgsAiGuiThreadExpressionFunction( expression ), function );
+}
+
+void TestQgsAiTaskRunner::registeredFunctionNeedsGuiThread()
+{
+  QVERIFY( QgsExpression::registerFunction( new RegisteredTestFunction(), true ) );
+  const auto unregister = qScopeGuard( []() { QgsExpression::unregisterFunction( u"strata_ai_test_function"_s ); } );
+  QCOMPARE( qgsAiGuiThreadExpressionFunction( u"strata_ai_test_function() + 1"_s ), u"strata_ai_test_function"_s );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )

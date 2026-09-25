@@ -18,6 +18,9 @@
 #include <algorithm>
 
 #include "qgsapplication.h"
+#include "qgsexpression.h"
+#include "qgsexpressioncontext.h"
+#include "qgsexpressionfunction.h"
 #include "qgsfeedback.h"
 #include "qgsmessagelog.h"
 #include "qgstaskmanager.h"
@@ -28,7 +31,9 @@
 #include <QEventLoop>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 using namespace Qt::StringLiterals;
@@ -333,6 +338,43 @@ void qgsAiLogPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
 bool qgsAiProviderUsesTransaction( const QgsVectorLayer *layer )
 {
   return layer && layer->dataProvider() && layer->dataProvider()->transaction();
+}
+
+QString qgsAiGuiThreadExpressionFunction( const QString &expression )
+{
+  if ( expression.trimmed().isEmpty() )
+    return QString();
+  const QgsExpression parsed( expression );
+  if ( parsed.hasParserError() )
+    return QString();
+
+  // Marked "NOT thread safe" in qgsexpressionfunction.cpp: they read a live layer. eval() runs an
+  // expression only known at run time.
+  static const QSet<QString> sLiveLayerFunctions { u"represent_value"_s, u"represent_attributes"_s, u"maptip"_s, u"display_expression"_s, u"eval"_s };
+
+  // Sorted, so the name reported for an expression is always the same.
+  const QSet<QString> referenced = parsed.referencedFunctions();
+  QStringList names( referenced.cbegin(), referenced.cend() );
+  names.sort();
+  const QStringList &builtins = QgsExpression::BuiltinFunctions();
+  for ( const QString &name : std::as_const( names ) )
+  {
+    if ( sLiveLayerFunctions.contains( name ) || name.startsWith( "overlay_"_L1 ) )
+      return name;
+    const int index = QgsExpression::functionIndex( name );
+    if ( index < 0 )
+      continue;
+    const QgsExpressionFunction *function = QgsExpression::Functions().at( index );
+    // aggregate(), relation_aggregate() and the layer aggregates such as sum() or mean() call
+    // QgsVectorLayer::aggregate() on the live layer from the evaluating thread.
+    if ( function->groups().contains( "Aggregates"_L1 ) )
+      return name;
+    // Registered from Python (@qgsfunction) or by a plugin. Context functions such as
+    // project_color() read copies made for the evaluation and are safe.
+    if ( !builtins.contains( name ) && !dynamic_cast<const QgsScopedExpressionFunction *>( function ) )
+      return name;
+  }
+  return QString();
 }
 
 QgsAiLayerChangeWatch::QgsAiLayerChangeWatch( QgsVectorLayer *layer )
