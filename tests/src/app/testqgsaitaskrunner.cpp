@@ -98,6 +98,7 @@ class TestQgsAiTaskRunner : public QObject
     void slicesLetTheWindowTurn();
     void smallApplyNeedsNoEventLoop();
     void stopBetweenSlices();
+    void stopLeavesAStuckWorkerBehind();
 };
 
 void TestQgsAiTaskRunner::initTestCase()
@@ -531,6 +532,27 @@ void TestQgsAiTaskRunner::stopBetweenSlices()
   QCOMPARE( result, QgsAiSliceResult::Canceled );
   QVERIFY2( applied < 1000, QString::number( applied ).toUtf8().constData() );
   QCOMPARE( failedIndex, -1 );
+}
+
+void TestQgsAiTaskRunner::stopLeavesAStuckWorkerBehind()
+{
+  // A worker in a call it cannot interrupt (a huge file being opened) ignores the feedback.
+  auto finished = std::make_shared<std::atomic_bool>( false );
+  QTimer::singleShot( 100, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiTaskWaitResult result = qgsAiRunFunction( u"stuck"_s, [finished]( QgsFeedback * ) {
+    QThread::msleep( 2500 );
+    *finished = true;
+    return true;
+  } );
+  // Stop answers within a second; the worker ends on its own later.
+  QVERIFY2( clock.elapsed() < 1000, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QVERIFY( result.canceled );
+  QVERIFY( result.abandoned );
+  QVERIFY( !*finished );
+  QTRY_VERIFY_WITH_TIMEOUT( *finished, 5000 );
+  QVERIFY( qgsAiWaitForActiveTasks( 5000 ) );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )

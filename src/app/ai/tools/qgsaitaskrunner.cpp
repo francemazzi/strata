@@ -53,12 +53,16 @@ struct QgsAiActiveRegistration
     QPointer<QEventLoop> waitLoop;
     QString label;
     bool canceledByUser = false;
+    //! The wait may end before the worker once the user pressed Stop.
+    bool abandonable = false;
 };
 
 namespace
 {
   // Ahead of long Toolbox jobs in the shared pool: the agent turn is waiting on it.
   constexpr int AI_TASK_PRIORITY = 100;
+  // How long Stop waits for a worker to notice it before leaving it to end on its own.
+  constexpr int AI_STOP_GRACE_MS = 500;
 
   QList<std::shared_ptr<QgsAiActiveRegistration>> sActiveRegistrations;
   std::function<void( const QString &label, double progress )> sProgressHandler;
@@ -183,6 +187,15 @@ void qgsAiCancelActiveBackgroundTool()
       registration->task->cancel();
     if ( registration->cancelHook )
       registration->cancelHook();
+    // Stop answers within a second even when the worker is stuck in a call it cannot interrupt.
+    if ( registration->abandonable && registration->waitLoop )
+    {
+      const QPointer<QEventLoop> loop = registration->waitLoop;
+      QTimer::singleShot( AI_STOP_GRACE_MS, loop.data(), [loop]() {
+        if ( loop )
+          loop->quit();
+      } );
+    }
   }
 }
 
@@ -353,6 +366,7 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsAiBackgroundTask *task, const 
   const std::shared_ptr<QgsAiActiveRegistration> registration = registerActive( label );
   registration->feedback = task->feedback();
   registration->task = task;
+  registration->abandonable = task->canBeAbandoned();
   registration->waitLoop = &loop;
   const RegistrationGuard guard( registration );
 
@@ -389,13 +403,14 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsAiBackgroundTask *task, const 
 
   if ( !done )
   {
-    // Something stopped every event loop (QCoreApplication::exit() when Strata quits) while
-    // the worker still runs. The task owns what it uses: ask it to stop and never touch it again.
+    // Stop left a worker stuck in an uninterruptible call, or something stopped every event loop
+    // (QCoreApplication::exit() when Strata quits) while the worker still runs. The task owns
+    // what it uses: ask it to stop and never touch it again.
     if ( taskGuard )
       taskGuard->cancel();
     result.canceled = true;
     result.abandoned = true;
-    result.error = u"Strata is closing; the background task was stopped."_s;
+    result.error = registration->canceledByUser ? u"Canceled; the background work ends on its own."_s : u"Strata is closing; the background task was stopped."_s;
     return result;
   }
 

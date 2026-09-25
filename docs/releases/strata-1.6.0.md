@@ -105,3 +105,5 @@ the Windows reference machine measurements are still to be done.
   writes the rows in the background into a new table that replaces the old one only once
   the export succeeded, so a failed or stopped export leaves the existing table intact; it
   no longer runs `VACUUM FULL`, which locked and rewrote the table.
+- Stop answers within half a second even when a tool is stuck in a call that cannot be
+  interrupted (opening a huge file, a slow server): the work ends on its own afterwards.

@@ -59,6 +59,13 @@ class APP_EXPORT QgsAiBackgroundTask : public QgsTask
     //! Called by qgsAiRunTaskWithEventLoop() right before queueing the task.
     void armUserCancel() { mUserCancelArmed = true; }
 
+    /**
+     * TRUE when the task owns everything its worker touches, so Stop may stop waiting for a worker
+     * stuck in a call it cannot interrupt (opening a huge file, a slow server): the tool returns
+     * at once and the worker ends on its own.
+     */
+    virtual bool canBeAbandoned() const { return false; }
+
   protected:
     std::shared_ptr<QgsFeedback> mFeedback;
 
@@ -80,6 +87,9 @@ class APP_EXPORT QgsAiFunctionTask : public QgsAiBackgroundTask
 {
   public:
     QgsAiFunctionTask( const QString &description, QgsAiBackgroundWork work, std::shared_ptr<QgsFeedback> feedback = nullptr );
+
+    //! The work captures its state by value (see QgsAiBackgroundWork).
+    bool canBeAbandoned() const override { return true; }
 
   protected:
     bool run() override;
