@@ -242,6 +242,7 @@ class TestQgsAiChatDockWidget : public QObject
     void messagesTypedDuringATurnAreQueued();
     void emptyChatSuggestsPromptsForTheProject();
     void mapContextPillShowsWhatIsSent();
+    void toolCardShowsChangesOnMap();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -1249,6 +1250,41 @@ void TestQgsAiChatDockWidget::mapContextPillShowsWhatIsSent()
   QVERIFY( !manager.isMapContextIncluded() );
   pill->click();
   QVERIFY( manager.isMapContextIncluded() );
+}
+
+void TestQgsAiChatDockWidget::toolCardShowsChangesOnMap()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:3003"_s, u"Parcels"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+
+  QgsAiChatMessage result;
+  result.id = u"tool-1"_s;
+  result.role = QgsAiChatRole::Tool;
+  result.metadata.insert( u"tool_name"_s, u"calculate_field"_s );
+  QJsonObject output;
+  output.insert( u"layer_id"_s, layer->id() );
+  output.insert( u"changed_feature_ids"_s, QJsonArray { 4, 9 } );
+  output.insert( u"diff"_s, QJsonObject { { u"summary"_s, u"Calculated AREA for 2 features of Parcels."_s } } );
+  result.content = QString::fromUtf8( QJsonDocument( output ).toJson( QJsonDocument::Compact ) );
+  manager.messageAdded( result );
+
+  // The card leads to the changed features on the map.
+  QPushButton *show = dock.findChild<QPushButton *>( u"aiShowOnMapButton"_s );
+  QVERIFY( show );
+  QSignalSpy spy( &dock, &QgsAiChatDockWidget::showOnMapRequested );
+  show->click();
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spy.at( 0 ).at( 0 ).toString(), layer->id() );
+  QCOMPARE( spy.at( 0 ).at( 1 ).value<QList<qint64>>(), QList<qint64>( { 4, 9 } ) );
 }
 
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()

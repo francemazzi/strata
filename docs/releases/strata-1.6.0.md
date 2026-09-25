@@ -154,3 +154,7 @@ the Windows reference machine measurements are still to be done.
   in it, so "compute the area of the selected features" works without naming the layer. A
   pill above the message box shows it ("Parcels · 12 selected · 1:5,000"); a click leaves
   it out of the next messages.
+- "Show on map" on the cards of tools that change or select features zooms to them and
+  flashes them (or zooms to a layer the tool added). `calculate_field` and
+  `batch_update_attributes` report which features changed and say it plainly ("Calculated
+  AREA for 1,240 features of Parcels.").

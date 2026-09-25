@@ -51,6 +51,9 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  //! At most this many changed feature ids go back in a result, for "Show on map".
+  constexpr qsizetype CHANGED_IDS_SAMPLE = 200;
+
   enum class EditingRollbackType
   {
     RestoreGeometry,
@@ -1029,17 +1032,25 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   const QString token = storeEditingRollback( rollback );
 
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Calculated field values from QGIS expression."_s );
+  diff.insert( u"summary"_s, u"Calculated %1 for %2 features of %3."_s.arg( fieldName ).arg( pendingValues.size() ).arg( layer->name() ) );
   diff.insert( u"layer_id"_s, layerId );
   diff.insert( u"field_name"_s, fieldName );
   diff.insert( u"expression"_s, expressionText );
   diff.insert( u"updated_feature_count"_s, pendingValues.size() );
   diff.insert( u"created_field"_s, createField );
 
+  // Which features changed, for "Show on map" in the chat (a sample on large layers).
+  QJsonArray changedIds;
+  for ( int i = 0; i < std::min<qsizetype>( pendingValues.size(), CHANGED_IDS_SAMPLE ); ++i )
+    changedIds.append( static_cast<qint64>( pendingValues.at( i ).featureId ) );
+
   QJsonObject output;
   output.insert( u"layer_id"_s, layerId );
   output.insert( u"field_name"_s, fieldName );
   output.insert( u"updated_feature_count"_s, pendingValues.size() );
+  output.insert( u"changed_feature_ids"_s, changedIds );
+  if ( pendingValues.size() > CHANGED_IDS_SAMPLE )
+    output.insert( u"changed_feature_ids_truncated"_s, true );
   output.insert( u"created_field"_s, createField );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );

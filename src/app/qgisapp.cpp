@@ -1594,6 +1594,23 @@ QgisApp::QgisApp(
   connect( mMapCanvas, &QgsMapCanvas::extentsChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
   connect( mMapCanvas, &QgsMapCanvas::currentLayerChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
   connect( mMapCanvas, &QgsMapCanvas::selectionChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
+  connect( mAiChatDock, &QgsAiChatDockWidget::showOnMapRequested, this, [this]( const QString &layerId, const QList<qint64> &featureIds ) {
+    QgsMapLayer *layer = QgsProject::instance()->mapLayer( layerId );
+    if ( !layer || !mMapCanvas )
+      return;
+    QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer );
+    if ( !vector || featureIds.isEmpty() )
+    {
+      mMapCanvas->setExtent( mMapCanvas->mapSettings().layerExtentToOutputExtent( layer, layer->extent() ) );
+      mMapCanvas->refresh();
+      return;
+    }
+    QgsFeatureIds ids;
+    for ( qint64 id : featureIds )
+      ids.insert( id );
+    mMapCanvas->zoomToFeatureIds( vector, ids );
+    mMapCanvas->flashFeatureIds( vector, ids );
+  } );
   connect( mAiChatDock, &QgsAiChatDockWidget::embeddingProviderSettingsChanged, this, [this]() {
     if ( !mAiWorkspaceIndex )
       return;

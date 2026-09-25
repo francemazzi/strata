@@ -69,6 +69,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
   signals:
     void embeddingProviderSettingsChanged();
+    //! "Show on map" on a tool card: zoom to and flash these features of the layer, or the whole layer when none.
+    void showOnMapRequested( const QString &layerId, const QList<qint64> &featureIds );
 
   public slots:
     void rebuildHistoryMenu();

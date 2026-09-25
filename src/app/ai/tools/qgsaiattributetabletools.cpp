@@ -194,6 +194,9 @@ namespace
     return true;
   }
 
+  //! At most this many changed feature ids go back in a result, for "Show on map".
+  constexpr qsizetype BATCH_CHANGED_IDS_SAMPLE = 200;
+
   QJsonArray featureIdsJson( const QgsFeatureIds &ids )
   {
     QList<QgsFeatureId> values = ids.values();
@@ -525,16 +528,24 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   const QString token = storeRollback( rollback );
 
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Batch-updated feature attributes."_s );
+  diff.insert( u"summary"_s, u"Updated %1 for %2 features of %3."_s.arg( fieldName ).arg( pendingUpdates.size() ).arg( layer->name() ) );
   diff.insert( u"layer_id"_s, layer->id() );
   diff.insert( u"field_name"_s, fieldName );
   diff.insert( u"updated_feature_count"_s, pendingUpdates.size() );
   diff.insert( u"filter_expression"_s, filterExpression );
 
+  // Which features changed, for "Show on map" in the chat (a sample on large layers).
+  QJsonArray changedIds;
+  for ( int i = 0; i < std::min<qsizetype>( pendingUpdates.size(), BATCH_CHANGED_IDS_SAMPLE ); ++i )
+    changedIds.append( static_cast<qint64>( pendingUpdates.at( i ).featureId ) );
+
   QJsonObject output;
   output.insert( u"layer_id"_s, layer->id() );
   output.insert( u"field_name"_s, fieldName );
   output.insert( u"updated_feature_count"_s, pendingUpdates.size() );
+  output.insert( u"changed_feature_ids"_s, changedIds );
+  if ( pendingUpdates.size() > BATCH_CHANGED_IDS_SAMPLE )
+    output.insert( u"changed_feature_ids_truncated"_s, true );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, attributeTableRollbackJson( token, u"restore_batch_attribute_values"_s ) );

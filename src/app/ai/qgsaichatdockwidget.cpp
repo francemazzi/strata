@@ -1681,12 +1681,32 @@ QWidget *QgsAiChatDockWidget::createToolResultActionsWidget( const QgsAiChatMess
   const bool undone = message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1;
   const bool undoable = QgsAiAgentSessionManager::toolMessageCanBeUndone( message );
   const bool declaredPermanent = output.value( u"diff"_s ).toObject().contains( u"rollback_supported"_s ) && !output.value( u"diff"_s ).toObject().value( u"rollback_supported"_s ).toBool();
-  if ( !undone && !undoable && !declaredPermanent )
+  // The features the tool changed or added, still in the project and not undone.
+  const QString layerId = output.value( u"layer_id"_s ).toString();
+  QList<qint64> featureIds;
+  for ( const QString &key : { u"changed_feature_ids"_s, u"selected_feature_ids"_s } )
+  {
+    for ( const QJsonValue &id : output.value( key ).toArray() )
+      featureIds << id.toInteger();
+  }
+  if ( output.contains( u"feature_id"_s ) )
+    featureIds << output.value( u"feature_id"_s ).toInteger();
+  const bool showable = !undone && !layerId.isEmpty() && QgsProject::instance()->mapLayer( layerId );
+  if ( !undone && !undoable && !declaredPermanent && !showable )
     return nullptr;
 
   QWidget *row = new QWidget( mTranscriptContainer );
   QHBoxLayout *layout = new QHBoxLayout( row );
   layout->setContentsMargins( 0, 0, 0, 0 );
+  if ( showable )
+  {
+    QPushButton *show = new QPushButton( tr( "Show on map" ), row );
+    show->setObjectName( u"aiShowOnMapButton"_s );
+    show->setToolTip( featureIds.isEmpty() ? tr( "Zoom to the layer." ) : tr( "Zoom to the features that changed and flash them." ) );
+    show->setStyleSheet( u"QPushButton#aiShowOnMapButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
+    connect( show, &QPushButton::clicked, this, [this, layerId, featureIds]() { emit showOnMapRequested( layerId, featureIds ); } );
+    layout->addWidget( show );
+  }
   if ( undone )
   {
     QLabel *label = new QLabel( tr( "Undone" ), row );
