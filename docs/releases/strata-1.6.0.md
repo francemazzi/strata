@@ -77,3 +77,9 @@ the Windows reference machine measurements are still to be done.
   speed, pausing on battery, reading features of remote layers, folders not to index, the
   number of files, the size of the index and a Clear index button. "Rebuild now" walks the
   workspace in its task instead of the dialog.
+
+### Assistant tools never freeze the window
+
+- `capture_map_canvas` draws in the background and returns after 20 seconds at most, with
+  what was drawn so far and a warning naming the slow layers; Stop ends the drawing. It used
+  to wait for every layer, so an unresponsive WMS froze Strata.

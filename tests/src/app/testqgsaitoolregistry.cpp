@@ -16,12 +16,15 @@
 #include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsaireadtools.h"
 #include "ai/tools/qgsairunpythontool.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
+#include "qgsexpression.h"
+#include "qgsexpressionfunction.h"
 #include "qgsfeature.h"
 #include "qgsgeometry.h"
 #include "qgsgraduatedsymbolrenderer.h"
@@ -35,6 +38,7 @@
 #include "qgsmapcanvas.h"
 #include "qgsnativealgorithms.h"
 #include "qgspallabeling.h"
+#include "qgspointxy.h"
 #include "qgsprintlayout.h"
 #include "qgsprocessingalgorithm.h"
 #include "qgsprocessingprovider.h"
@@ -42,8 +46,10 @@
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsrenderer.h"
+#include "qgsrulebasedrenderer.h"
 #include "qgssettings.h"
 #include "qgssinglesymbolrenderer.h"
+#include "qgssymbol.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectordataprovider.h"
@@ -51,6 +57,7 @@
 #include "qgsvectorlayerlabeling.h"
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -62,6 +69,7 @@
 #include <QSize>
 #include <QString>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 
 using namespace Qt::StringLiterals;
@@ -166,6 +174,8 @@ class TestQgsAiToolRegistry : public QObject
     void registryAuditsRiskyToolMetadataOnly();
     void captureMapCanvasRequiresConsent();
     void captureMapCanvasCreatesCappedPng();
+    void captureMapCanvasStopsWaitingForASlowLayer();
+    void captureMapCanvasStopsOnStop();
     void runPythonDiagnosticsAreConservative();
     void runPythonFeatureLoopHintDoesNotChangeDiagnosis();
     void setCanvasExtentSetsZoomsAndRollsBack();
@@ -354,6 +364,83 @@ void TestQgsAiToolRegistry::registryAuditsRiskyToolMetadataOnly()
   QVERIFY( line.contains( u"success=true"_s ) );
   QVERIFY( line.contains( u"args_sha256"_s ) );
   QVERIFY( !line.contains( u"secret payload"_s ) );
+}
+
+namespace
+{
+  //! Takes 50 ms per feature drawn: a layer as slow as an unresponsive web service.
+  class RegistryTestSlowRenderFunction : public QgsExpressionFunction
+  {
+    public:
+      RegistryTestSlowRenderFunction()
+        : QgsExpressionFunction( u"ai_test_slow_render"_s, 0, u"Custom"_s )
+      {}
+
+      QVariant func( const QVariantList &, const QgsExpressionContext *, QgsExpression *, const QgsExpressionNodeFunction * ) override
+      {
+        QThread::msleep( 50 );
+        return true;
+      }
+  };
+
+  //! A canvas showing 200 points whose rule calls ai_test_slow_render(), about 10 s to draw.
+  std::unique_ptr<QgsVectorLayer> registryTestSlowLayer( QgsMapCanvas &canvas )
+  {
+    if ( !QgsExpression::isFunctionName( u"ai_test_slow_render"_s ) )
+      QgsExpression::registerFunction( new RegistryTestSlowRenderFunction() );
+    auto layer = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326"_s, u"slow"_s, u"memory"_s );
+    QgsFeatureList features;
+    for ( int i = 0; i < 200; ++i )
+    {
+      QgsFeature feature;
+      feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( i * 0.05, i * 0.025 ) ) );
+      features << feature;
+    }
+    layer->dataProvider()->addFeatures( features );
+    auto *root = new QgsRuleBasedRenderer::Rule( nullptr );
+    root->appendChild( new QgsRuleBasedRenderer::Rule( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ), 0, 0, u"ai_test_slow_render()"_s ) );
+    layer->setRenderer( new QgsRuleBasedRenderer( root ) );
+    canvas.resize( 400, 300 );
+    canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:4326"_s ) );
+    canvas.setLayers( { layer.get() } );
+    canvas.setExtent( QgsRectangle( 0, 0, 10, 5 ) );
+    return layer;
+  }
+} // namespace
+
+void TestQgsAiToolRegistry::captureMapCanvasStopsWaitingForASlowLayer()
+{
+  QgsSettings().setValue( u"strata/visual_context/image_send_consent"_s, true );
+  QgsMapCanvas canvas;
+  const std::unique_ptr<QgsVectorLayer> layer = registryTestSlowLayer( canvas );
+
+  QgsAiCaptureMapCanvasTool tool( &canvas );
+  tool.setRenderTimeoutMs( 500 );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiToolResult result = tool.execute( QJsonObject() );
+  QVERIFY2( clock.elapsed() < 2500, QString::number( clock.elapsed() ).toUtf8().constData() );
+  // What was drawn is returned, with a warning about the slow layer.
+  QVERIFY2( result.success, result.errorMessage.toUtf8().constData() );
+  QVERIFY( result.output.toObject().value( u"warning"_s ).toString().contains( u"did not finish drawing"_s ) );
+  // The abandoned drawing ends on its own.
+  QTest::qWait( 300 );
+}
+
+void TestQgsAiToolRegistry::captureMapCanvasStopsOnStop()
+{
+  QgsSettings().setValue( u"strata/visual_context/image_send_consent"_s, true );
+  QgsMapCanvas canvas;
+  const std::unique_ptr<QgsVectorLayer> layer = registryTestSlowLayer( canvas );
+
+  QgsAiCaptureMapCanvasTool tool( &canvas );
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiToolResult result = tool.execute( QJsonObject() );
+  QVERIFY2( clock.elapsed() < 1500, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QVERIFY( result.canceled );
+  QTest::qWait( 300 );
 }
 
 void TestQgsAiToolRegistry::captureMapCanvasRequiresConsent()

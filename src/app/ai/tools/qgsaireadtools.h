@@ -158,9 +158,14 @@ class APP_EXPORT QgsAiCaptureMapCanvasTool : public QgsAiTool
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
 
+    //! Longest wait for the map to draw before returning what was drawn so far.
+    static constexpr int DEFAULT_RENDER_TIMEOUT_MS = 20000;
+    void setRenderTimeoutMs( int timeoutMs ) { mRenderTimeoutMs = timeoutMs; }
+
   private:
     QgsMapCanvas *mCanvas = nullptr;
     QWidget *mConsentParent = nullptr;
+    int mRenderTimeoutMs = DEFAULT_RENDER_TIMEOUT_MS;
 };
 
 #endif // QGSAIREADTOOLS_H

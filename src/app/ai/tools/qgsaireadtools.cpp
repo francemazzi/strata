@@ -19,6 +19,7 @@
 #include <cmath>
 
 #include "qgsaifilecontextprovider.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaivisualcontextutils.h"
 #include "qgsapplication.h"
@@ -49,6 +50,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -60,6 +62,7 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QUuid>
 
 using namespace Qt::StringLiterals;
@@ -926,12 +929,41 @@ QgsAiToolResult QgsAiCaptureMapCanvasTool::execute( const QJsonObject &args )
   settings.setOutputSize( outputSize );
   settings.setExtent( mCanvas->extent() );
 
-  QgsMapRendererParallelJob job( settings );
-  job.start();
-  job.waitForFinished();
-  QImage image = job.renderedImage();
+  // The map draws in QGIS's render threads while this thread keeps its event loop turning: a
+  // render thread may need it (authentication, SSL questions), a slow service must not freeze
+  // Strata, and Stop must work. A job still drawing is never deleted: it finishes on its own.
+  auto *job = new QgsMapRendererParallelJob( settings );
+  QObject::connect( job, &QgsMapRendererJob::finished, job, &QObject::deleteLater );
+  QEventLoop loop;
+  QObject::connect( job, &QgsMapRendererJob::finished, &loop, &QEventLoop::quit );
+  QTimer timeout;
+  timeout.setSingleShot( true );
+  QObject::connect( &timeout, &QTimer::timeout, &loop, &QEventLoop::quit );
+  bool canceled = false;
+  bool finished = false;
+  QObject::connect( job, &QgsMapRendererJob::finished, &loop, [&finished]() { finished = true; } );
+  job->start();
+  {
+    const QgsAiCancelHookScope cancelScope( u"Drawing the map"_s, [&loop]() { loop.quit(); } );
+    timeout.start( std::max( 1, mRenderTimeoutMs ) );
+    if ( job->isActive() )
+      loop.exec();
+    canceled = cancelScope.canceledByUser();
+  }
+  if ( canceled )
+  {
+    job->cancelWithoutBlocking();
+    return QgsAiToolResult::canceledResult( u"Map capture stopped by the user."_s );
+  }
+  // What was drawn so far: slow layers may be missing.
+  QImage image = job->renderedImage();
+  const bool timedOut = !finished && job->isActive();
+  if ( timedOut )
+    job->cancelWithoutBlocking();
   if ( image.isNull() )
-    return QgsAiToolResult::error( u"Map canvas render produced an empty image."_s );
+    return QgsAiToolResult::error(
+      timedOut ? u"The map did not finish drawing within %1 s: a layer (often a web service) is not responding."_s.arg( mRenderTimeoutMs / 1000.0 ) : u"Map canvas render produced an empty image."_s
+    );
 
   const QString dir = QgsAiVisualContextUtils::visualContextDirectory();
   QgsAiVisualContextUtils::cleanupOldVisualContextFiles( dir );
@@ -958,5 +990,7 @@ QgsAiToolResult QgsAiCaptureMapCanvasTool::execute( const QJsonObject &args )
   output.insert( u"image"_s, imageJson );
   output.insert( u"canvas"_s, canvasJson );
   output.insert( u"layers_rendered"_s, layerRefsJson( settings.layers( true ) ) );
+  if ( timedOut )
+    output.insert( u"warning"_s, u"The map did not finish drawing within %1 s; slow layers (often web services) may be missing from the image."_s.arg( mRenderTimeoutMs / 1000.0 ) );
   return QgsAiToolResult::ok( output );
 }
