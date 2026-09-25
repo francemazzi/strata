@@ -98,6 +98,7 @@ using namespace Qt::StringLiterals;
 #include "qgsdevtoolspanelwidget.h"
 #ifdef HAVE_AI_ASSISTANT
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingactivity.h"
 #include "ai/index/qgsaiindexingscheduler.h"
 #include "ai/index/qgsaiindexingthrottle.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
@@ -1518,6 +1519,7 @@ QgisApp::QgisApp(
   mAiToolRegistry->registerTool( std::make_unique<QgsAiReindexLayersTool>( mAiWorkspaceIndex.get() ) );
   mAiIndexingScheduler = std::make_unique<QgsAiIndexingScheduler>( mAiWorkspaceIndex.get(), this );
   mAiLayerIndexCoordinator = std::make_unique<QgsAiLayerIndexCoordinator>( mAiWorkspaceIndex.get(), this );
+  mAiIndexingActivity = std::make_unique<QgsAiIndexingActivity>( mAiWorkspaceIndex.get(), mAiIndexingScheduler.get(), mAiLayerIndexCoordinator.get(), this );
   QgsSettings aiSettings;
   const bool runningCiTests = qgetenv( "QGIS_CONTINUOUS_INTEGRATION_RUN" ) == QByteArrayLiteral( "true" );
   const bool automaticIndexing = aiSettings.value( u"strata/index/automatic"_s, true ).toBool();
@@ -1577,6 +1579,7 @@ QgisApp::QgisApp(
   connect( mAiChatHistoryStore.get(), &QgsAiChatHistoryStore::sessionListChanged, mAiChatDock, &QgsAiChatDockWidget::rebuildHistoryMenu );
   mAiChatDock->setDiscoveryController( discoveryController );
   mAiChatDock->setLayerIndexCoordinator( mAiLayerIndexCoordinator.get() );
+  mAiChatDock->setIndexingActivity( mAiIndexingActivity.get() );
   connect( mAiChatDock, &QgsAiChatDockWidget::embeddingProviderSettingsChanged, this, [this]() {
     if ( !mAiWorkspaceIndex )
       return;
@@ -1618,6 +1621,8 @@ QgisApp::QgisApp(
       if ( wasEnabled && needsIndexing && layerIndexing && providerAvailable )
         mAiLayerIndexCoordinator->scheduleAllLayers();
     }
+    if ( mAiIndexingActivity )
+      mAiIndexingActivity->refresh();
   } );
   mAiChatDock->setWindowTitle( tr( "AI Assistant" ) );
   mAiChatDock->setObjectName( u"AiAssistant"_s );

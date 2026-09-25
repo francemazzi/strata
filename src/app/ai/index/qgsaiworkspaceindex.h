@@ -185,6 +185,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     //! Shares ownership of \a embeddingProvider with the tasks using it, so it can be replaced while they run.
     void setEmbeddingProvider( std::shared_ptr<QgsAiEmbeddingProvider> embeddingProvider );
     virtual bool embeddingProviderAvailable() const;
+    //! Why embeddingProviderAvailable() is false, worded for the user; empty when it is available.
+    QString unavailableReason() const;
     //! Temporary compatibility wrapper for older call sites.
     virtual bool hasEmbeddingConfiguration() const;
 

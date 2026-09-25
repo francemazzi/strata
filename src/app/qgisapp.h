@@ -174,6 +174,7 @@ class QgsAiChatHistoryStore;
 class QgsAiChatDockWidget;
 class QgsAiEmbeddingProvider;
 class QgsAiFileContextProvider;
+class QgsAiIndexingActivity;
 class QgsAiIndexingScheduler;
 class QgsAiLayerIndexCoordinator;
 class QgsAiMessageLogBuffer;
@@ -2824,6 +2825,7 @@ class APP_EXPORT QgisApp : public QMainWindow, private Ui::MainWindow
     std::unique_ptr<QgsAiWorkspaceIndex> mAiWorkspaceIndex;
     std::unique_ptr<QgsAiIndexingScheduler> mAiIndexingScheduler;
     std::unique_ptr<QgsAiLayerIndexCoordinator> mAiLayerIndexCoordinator;
+    std::unique_ptr<QgsAiIndexingActivity> mAiIndexingActivity;
     std::unique_ptr<QgsAiMessageLogBuffer> mAiMessageLogBuffer;
     std::unique_ptr<QgsAiToolRegistry> mAiToolRegistry;
     std::unique_ptr<QgsAiAgentSessionManager> mAiSessionManager;

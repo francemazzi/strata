@@ -26,6 +26,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSet>
 #include <QStorageInfo>
 #include <QString>
@@ -198,6 +199,15 @@ QgsAiFileContextProvider::WorkspaceScanResult QgsAiFileContextProvider::scanWork
 
   const QDir rootDir( workspaceRoot );
   const QString query = options.query.trimmed();
+  QList<QRegularExpression> userExclusions;
+  for ( const QString &pattern : options.excludedFolders )
+  {
+    if ( !pattern.trimmed().isEmpty() )
+      userExclusions << QRegularExpression( QRegularExpression::wildcardToRegularExpression( pattern.trimmed() ), QRegularExpression::CaseInsensitiveOption );
+  }
+  const auto userExcluded = [&userExclusions]( const QString &name ) {
+    return std::any_of( userExclusions.cbegin(), userExclusions.cend(), [&name]( const QRegularExpression &exclusion ) { return exclusion.match( name ).hasMatch(); } );
+  };
   QElapsedTimer clock;
   clock.start();
 
@@ -235,7 +245,7 @@ QgsAiFileContextProvider::WorkspaceScanResult QgsAiFileContextProvider::scanWork
         const bool rootOnlyExcluded = std::any_of( FILE_CONTEXT_ROOT_ONLY_EXCLUSIONS.cbegin(), FILE_CONTEXT_ROOT_ONLY_EXCLUSIONS.cend(), [&relativeDir]( const QString &excluded ) {
           return relativeDir == excluded;
         } );
-        if ( !rootOnlyExcluded && !isExcludedFolderName( entry.fileName() ) )
+        if ( !rootOnlyExcluded && !isExcludedFolderName( entry.fileName() ) && !userExcluded( entry.fileName() ) )
           pendingDirs.append( absolutePath );
         continue;
       }

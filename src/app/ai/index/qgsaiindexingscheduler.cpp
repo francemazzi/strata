@@ -23,9 +23,12 @@
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
 #include "qgsmessagelog.h"
+#include "qgssettings.h"
 #include "qgstaskmanager.h"
 
 #include <QString>
+
+#include "moc_qgsaiindexingscheduler.cpp"
 
 using namespace Qt::StringLiterals;
 
@@ -65,7 +68,8 @@ namespace
         if ( ok )
           ok = mIndex->reindex( snapshot, mWorkspaceRoot, &error, mFeedback.get() );
         mIndex->closeDatabaseConnectionForCurrentThread();
-        if ( !ok )
+        // A canceled pass (pause, quit, another project) is not an error to show.
+        if ( !ok && !isCanceled() )
           mErrorMessage = error;
         return ok && !isCanceled();
       }
@@ -84,6 +88,13 @@ QgsAiIndexingScheduler::QgsAiIndexingScheduler( QgsAiWorkspaceIndex *index, QObj
 {
   mDebounceTimer.setSingleShot( true );
   connect( &mDebounceTimer, &QTimer::timeout, this, &QgsAiIndexingScheduler::startWorkspaceIndexing );
+}
+
+QgsAiIndexingScheduler::~QgsAiIndexingScheduler()
+{
+  shutdown();
+  if ( mRunningTask )
+    mRunningTask->waitForFinished( 5000 );
 }
 
 void QgsAiIndexingScheduler::setAutomaticEnabled( bool enabled )
@@ -106,7 +117,36 @@ void QgsAiIndexingScheduler::scheduleWorkspaceIndexing( int delayMs )
 {
   if ( mShutdown || !mAutomaticEnabled || !mIndex || !mIndex->embeddingProviderAvailable() )
     return;
+  if ( mPaused )
+  {
+    mRerunRequested = true;
+    return;
+  }
   mDebounceTimer.start( std::max( 0, delayMs ) );
+}
+
+void QgsAiIndexingScheduler::setPaused( bool paused )
+{
+  if ( mPaused == paused )
+    return;
+  mPaused = paused;
+  if ( mPaused )
+  {
+    mDebounceTimer.stop();
+    if ( isRunning() )
+    {
+      mRerunRequested = true;
+      cancel();
+    }
+    return;
+  }
+  if ( std::exchange( mRerunRequested, false ) && !isRunning() )
+    scheduleWorkspaceIndexing( 0 );
+}
+
+int QgsAiIndexingScheduler::maxFiles()
+{
+  return std::max( 1, QgsSettings().value( u"strata/index/max_files"_s, QgsAiWorkspaceIndex::DEFAULT_MAX_FILES ).toInt() );
 }
 
 void QgsAiIndexingScheduler::cancel()
@@ -132,6 +172,11 @@ void QgsAiIndexingScheduler::startWorkspaceIndexing()
 {
   if ( mShutdown || !mAutomaticEnabled || !mIndex || !mIndex->embeddingProviderAvailable() )
     return;
+  if ( mPaused )
+  {
+    mRerunRequested = true;
+    return;
+  }
 
   const QString workspaceRoot = mIndex->workspaceRoot();
   if ( isRunning() )
@@ -150,14 +195,14 @@ void QgsAiIndexingScheduler::startWorkspaceIndexing()
   {
     QString error;
     QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
-    const bool snapshotOk = QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( workspaceRoot, QgsAiWorkspaceIndex::DEFAULT_MAX_FILES, snapshot, &error );
+    const bool snapshotOk = QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( workspaceRoot, maxFiles(), snapshot, &error );
     const bool ok = snapshotOk && mIndex->reindex( snapshot, workspaceRoot, &error );
     if ( !ok && !error.isEmpty() )
       QgsMessageLog::logMessage( u"AI workspace indexing failed: %1"_s.arg( error ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
     return;
   }
 
-  QgsAiWorkspaceIndexTask *task = new QgsAiWorkspaceIndexTask( mIndex, workspaceRoot, QgsAiWorkspaceIndex::DEFAULT_MAX_FILES );
+  QgsAiWorkspaceIndexTask *task = new QgsAiWorkspaceIndexTask( mIndex, workspaceRoot, maxFiles() );
   mRunningTask = task;
   mRunningRoot = workspaceRoot;
   mRerunRequested = false;
@@ -167,22 +212,26 @@ void QgsAiIndexingScheduler::startWorkspaceIndexing()
       mRunningTask = nullptr;
       mRunningRoot.clear();
     }
-    if ( mRerunRequested && !mShutdown && mAutomaticEnabled )
+    if ( mRerunRequested && !mShutdown && mAutomaticEnabled && !mPaused )
     {
       mRerunRequested = false;
       scheduleWorkspaceIndexing( 1000 );
     }
   };
-  connect( task, &QgsTask::taskCompleted, this, [finish]() {
+  connect( task, &QgsTask::progressChanged, this, &QgsAiIndexingScheduler::passProgress );
+  connect( task, &QgsTask::taskCompleted, this, [this, finish]() {
     QgsMessageLog::logMessage( u"AI workspace index updated in background."_s, u"AI/Index"_s, Qgis::MessageLevel::Info, false );
     finish();
+    emit passFinished( true, QString() );
   } );
-  connect( task, &QgsTask::taskTerminated, this, [task, finish]() {
+  connect( task, &QgsTask::taskTerminated, this, [this, task, finish]() {
     const QString error = task->errorMessage();
     if ( !error.isEmpty() )
       QgsMessageLog::logMessage( u"AI workspace background indexing stopped: %1"_s.arg( error ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
     finish();
+    emit passFinished( false, error );
   } );
+  emit passStarted();
   // Lowest priority: background indexing must never take precedence over
   // user-initiated tasks (in QGIS higher priority numbers win, so 0 is lowest).
   manager->addTask( task, 0 );

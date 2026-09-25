@@ -579,6 +579,19 @@ bool QgsAiWorkspaceIndex::embeddingProviderAvailable() const
   return provider && indexRemoteConsentMissing( provider.get() ).isEmpty() && provider->isAvailable( &ignored );
 }
 
+QString QgsAiWorkspaceIndex::unavailableReason() const
+{
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  if ( !provider )
+    return tr( "No embedding provider is configured." );
+  if ( const QString consentMissing = indexRemoteConsentMissing( provider.get() ); !consentMissing.isEmpty() )
+    return consentMissing;
+  QString error;
+  if ( !provider->isAvailable( &error ) )
+    return error.isEmpty() ? tr( "The embedding provider is not available." ) : error;
+  return QString();
+}
+
 void QgsAiWorkspaceIndex::onWorkspaceRootChanged()
 {
   const QString root = mContextProvider ? mContextProvider->workspaceRoot() : QString();
@@ -1460,6 +1473,7 @@ bool QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( const QString &workspaceRoo
   const QgsAiPerfScope perf( u"index_task"_s, u"scan_files"_s );
   QgsAiFileContextProvider::WorkspaceScanOptions options;
   options.timeBudgetMs = FILE_SCAN_TIME_BUDGET_MS;
+  options.excludedFolders = QgsSettings().value( u"strata/index/excluded_folders"_s ).toStringList();
   const QgsAiFileContextProvider::WorkspaceScanResult scan = QgsAiFileContextProvider::scanWorkspace( workspaceRoot, options, feedback );
   if ( feedback && feedback->isCanceled() )
   {

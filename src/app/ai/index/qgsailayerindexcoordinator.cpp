@@ -102,6 +102,15 @@ QgsAiLayerIndexCoordinator::QgsAiLayerIndexCoordinator( QgsAiWorkspaceIndex *ind
   connect( &mDebounceTimer, &QTimer::timeout, this, &QgsAiLayerIndexCoordinator::flushDirty );
 }
 
+QgsAiLayerIndexCoordinator::~QgsAiLayerIndexCoordinator()
+{
+  if ( mRunningTask )
+  {
+    mRunningTask->cancel();
+    mRunningTask->waitForFinished( 5000 );
+  }
+}
+
 void QgsAiLayerIndexCoordinator::setEnabled( bool enabled )
 {
   if ( mEnabled == enabled )
@@ -273,6 +282,7 @@ void QgsAiLayerIndexCoordinator::scheduleAllLayers()
       mDirtyLayers.insert( it.value()->id() );
   }
   startDebounceTimer();
+  emit queueChanged();
 }
 
 void QgsAiLayerIndexCoordinator::scheduleDirty( const QString &layerId )
@@ -283,6 +293,7 @@ void QgsAiLayerIndexCoordinator::scheduleDirty( const QString &layerId )
     return;
   mDirtyLayers.insert( layerId );
   startDebounceTimer();
+  emit queueChanged();
 }
 
 void QgsAiLayerIndexCoordinator::beginBulkOperation()
@@ -318,7 +329,7 @@ void QgsAiLayerIndexCoordinator::setInterFlushDelayMs( int ms )
 
 void QgsAiLayerIndexCoordinator::startDebounceTimer()
 {
-  if ( mBulkOperationDepth > 0 )
+  if ( mBulkOperationDepth > 0 || mPaused )
     return;
   const int ms = mUseBulkDebounce ? mBulkDebounceMs : mDebounceMs;
   mDebounceTimer.start( ms );
@@ -328,7 +339,7 @@ void QgsAiLayerIndexCoordinator::scheduleNextFlush()
 {
   // separates consecutive main-thread snapshots with real event-loop idle time,
   // instead of chaining them back-to-back at 0 ms
-  if ( mBulkOperationDepth > 0 )
+  if ( mBulkOperationDepth > 0 || mPaused )
     return;
   mDebounceTimer.start( mInterFlushDelayMs );
 }
@@ -336,6 +347,42 @@ void QgsAiLayerIndexCoordinator::scheduleNextFlush()
 bool QgsAiLayerIndexCoordinator::isRunning() const
 {
   return mRunningTask && mRunningTask->isActive();
+}
+
+void QgsAiLayerIndexCoordinator::setPaused( bool paused )
+{
+  if ( mPaused == paused )
+    return;
+  mPaused = paused;
+  if ( mPaused )
+  {
+    mDebounceTimer.stop();
+    if ( mRunningTask && mRunningTask->isActive() )
+    {
+      if ( !mRunningLayerId.isEmpty() )
+        mDirtyLayers.insert( mRunningLayerId );
+      mRunningTask->cancel();
+    }
+  }
+  else if ( mEnabled && !mDirtyLayers.isEmpty() )
+  {
+    scheduleNextFlush();
+  }
+  emit queueChanged();
+}
+
+int QgsAiLayerIndexCoordinator::pendingLayerCount() const
+{
+  const bool runningCounted = isRunning() && !mDirtyLayers.contains( mRunningLayerId );
+  return static_cast<int>( mDirtyLayers.size() ) + ( runningCounted ? 1 : 0 );
+}
+
+QString QgsAiLayerIndexCoordinator::runningLayerName() const
+{
+  if ( !isRunning() || !mProject )
+    return QString();
+  const QgsMapLayer *layer = mProject->mapLayer( mRunningLayerId );
+  return layer ? layer->name() : QString();
 }
 
 void QgsAiLayerIndexCoordinator::shutdown()
@@ -346,7 +393,7 @@ void QgsAiLayerIndexCoordinator::shutdown()
 
 void QgsAiLayerIndexCoordinator::flushDirty()
 {
-  if ( mBulkOperationDepth > 0 || mShutdown )
+  if ( mBulkOperationDepth > 0 || mShutdown || mPaused )
     return;
 
   mUseBulkDebounce = false;
@@ -401,6 +448,7 @@ void QgsAiLayerIndexCoordinator::flushDirty()
   QgsAiLayerIndexTask *task = new QgsAiLayerIndexTask( mIndex, std::move( snapshot ) );
   mRunningTask = task;
   mRunningLayerId = layerId;
+  emit queueChanged();
 
   auto finishTask = [this, task]( bool terminated ) {
     const LayerIndexResult result = task->result();
@@ -429,6 +477,7 @@ void QgsAiLayerIndexCoordinator::flushDirty()
 
     if ( mEnabled && !mDirtyLayers.isEmpty() && mIndex ) // provider availability is re-checked when the flush fires
       scheduleNextFlush();
+    emit queueChanged();
   };
 
   connect( task, &QgsTask::taskCompleted, this, [finishTask]() { finishTask( false ); } );

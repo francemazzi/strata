@@ -70,3 +70,10 @@ the Windows reference machine measurements are still to be done.
   on OK in the AI settings, after the layers were already processed). Each turn of chat
   adds at most 16 KB of retrieved context, and matches much weaker than the best are left
   out.
+- The chat header shows what indexing is doing ("Indexing · files 42% · layer 8 of 20"),
+  with Pause and Resume, a tooltip with the details, and a click to the indexing
+  settings; it also says when indexing waits for mains power or cannot run (model not
+  downloaded, consent missing, network folder skipped). The indexing settings add the
+  speed, pausing on battery, reading features of remote layers, folders not to index, the
+  number of files, the size of the index and a Clear index button. "Rebuild now" walks the
+  workspace in its task instead of the dialog.

@@ -665,9 +665,10 @@ void TestQgsAiWorkspaceIndex::e5EmbeddingsDoNotDependOnTheSpeed()
     QSKIP( "STRATA_AI_EMBEDDING_MODEL_DIR is not set; skipping optional E5 ONNX integration test." );
 
   const QStringList texts { u"strade comunali e civici"_s, u"uso del suolo agricolo, particelle catastali"_s, u"alberi monumentali del parco"_s };
-  const auto embedAtSpeed = [&texts]( const QString &speed, QList<QVector<float>> &vectors ) {
+  // One provider: a new speed applies to the next call, which makes the session again.
+  QgsAiE5EmbeddingProvider provider;
+  const auto embedAtSpeed = [&texts, &provider]( const QString &speed, QList<QVector<float>> &vectors ) {
     QgsSettings().setValue( QgsAiIndexingThrottle::speedSettingsKey(), speed );
-    QgsAiE5EmbeddingProvider provider;
     QString error;
     const bool ok = provider.embed( texts, QgsAiEmbeddingRole::Passage, vectors, &error );
     if ( !ok )

@@ -25,6 +25,7 @@
 
 #include "ai/index/qgsaicloudindexclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingactivity.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "ai/tools/qgsaitaskrunner.h"
@@ -776,6 +777,30 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
 
   topBar->addStretch( 1 );
   layout->addLayout( topBar );
+
+  // Background indexing, visible whenever it runs, waits, is paused or cannot run.
+  mIndexingIndicator = new QFrame( container );
+  mIndexingIndicator->setObjectName( u"aiIndexingIndicator"_s );
+  QHBoxLayout *indicatorLayout = new QHBoxLayout( mIndexingIndicator );
+  indicatorLayout->setContentsMargins( 4, 0, 4, 0 );
+  indicatorLayout->setSpacing( 4 );
+  mIndexingStatusButton = new QToolButton( mIndexingIndicator );
+  mIndexingStatusButton->setObjectName( u"aiIndexingStatusButton"_s );
+  mIndexingStatusButton->setAutoRaise( true );
+  mIndexingStatusButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
+  mIndexingStatusButton->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
+  indicatorLayout->addWidget( mIndexingStatusButton, 1 );
+  mIndexingPauseButton = new QToolButton( mIndexingIndicator );
+  mIndexingPauseButton->setObjectName( u"aiIndexingPauseButton"_s );
+  mIndexingPauseButton->setAutoRaise( true );
+  indicatorLayout->addWidget( mIndexingPauseButton );
+  mIndexingIndicator->setVisible( false );
+  layout->addWidget( mIndexingIndicator );
+  connect( mIndexingStatusButton, &QToolButton::clicked, this, [this]() { openProviderSettingsSection( u"indexing"_s ); } );
+  connect( mIndexingPauseButton, &QToolButton::clicked, this, [this]() {
+    if ( mIndexingActivity )
+      mIndexingActivity->setPaused( !mIndexingActivity->isPaused() );
+  } );
 
   mTranscriptScrollArea = new QgsScrollArea( container );
   mTranscriptScrollArea->setObjectName( u"aiTranscriptScrollArea"_s );
@@ -3534,6 +3559,37 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
 void QgsAiChatDockWidget::setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *coordinator )
 {
   mLayerIndexCoordinator = coordinator;
+}
+
+void QgsAiChatDockWidget::setIndexingActivity( QgsAiIndexingActivity *activity )
+{
+  if ( mIndexingActivity )
+    disconnect( mIndexingActivity, nullptr, this, nullptr );
+  mIndexingActivity = activity;
+  if ( mIndexingActivity )
+    connect( mIndexingActivity, &QgsAiIndexingActivity::changed, this, &QgsAiChatDockWidget::refreshIndexingIndicator );
+  refreshIndexingIndicator();
+}
+
+void QgsAiChatDockWidget::refreshIndexingIndicator()
+{
+  if ( !mIndexingIndicator )
+    return;
+  if ( !mIndexingActivity )
+  {
+    mIndexingIndicator->setVisible( false );
+    return;
+  }
+  const QgsAiIndexingActivity::State state = mIndexingActivity->state();
+  const QString summary = QgsAiIndexingActivity::summaryText( state );
+  mIndexingIndicator->setVisible( !summary.isEmpty() );
+  if ( summary.isEmpty() )
+    return;
+  mIndexingStatusButton->setText( summary );
+  mIndexingStatusButton->setToolTip( QgsAiIndexingActivity::detailText( state ) );
+  mIndexingPauseButton->setVisible( state.active || state.paused );
+  mIndexingPauseButton->setText( state.paused ? tr( "Resume" ) : tr( "Pause" ) );
+  mIndexingPauseButton->setToolTip( state.paused ? tr( "Resume indexing" ) : tr( "Pause indexing until you resume it" ) );
 }
 
 void QgsAiChatDockWidget::setDiscoveryController( QgsAiDiscoveryController *controller )

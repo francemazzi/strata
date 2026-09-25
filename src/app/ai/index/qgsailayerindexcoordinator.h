@@ -43,6 +43,8 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
 
   public:
     explicit QgsAiLayerIndexCoordinator( QgsAiWorkspaceIndex *index, QObject *parent = nullptr );
+    //! Cancels the running layer and waits for it: the task reads the index, which may go next.
+    ~QgsAiLayerIndexCoordinator() override;
 
     bool isEnabled() const { return mEnabled; }
     void setEnabled( bool enabled );
@@ -69,6 +71,19 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     //! True while a layer is being indexed in the background.
     bool isRunning() const;
 
+    /**
+     * Holds layer indexing back until resumed. The running layer stops within one batch and is
+     * indexed again on resume, with every layer that changed meanwhile.
+     */
+    void setPaused( bool paused );
+    bool isPaused() const { return mPaused; }
+
+    //! Layers waiting to be indexed, the running one included.
+    int pendingLayerCount() const;
+
+    //! Name of the layer being indexed, empty when none.
+    QString runningLayerName() const;
+
     //! Stops indexing for good (Strata is quitting): disconnects and cancels the running layer.
     void shutdown();
 
@@ -83,6 +98,8 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     void setProject( QgsProject *project );
 
   signals:
+    //! The set of layers waiting to be indexed changed.
+    void queueChanged();
     void reindexStarted( const QString &layerId );
     void reindexFinished( const QString &layerId, bool success, const QString &errorMessage );
 
@@ -117,6 +134,7 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     QSet<QString> mRemovedWhileRunning;
     bool mEnabled = false;
     bool mShutdown = false;
+    bool mPaused = false;
     bool mUseBulkDebounce = false;
     int mDebounceMs = 5000;
     int mBulkDebounceMs = 15000;

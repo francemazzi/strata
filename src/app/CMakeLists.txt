@@ -317,6 +317,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/index/qgsaiembeddingprovider.cpp
     ai/index/qgsaicloudindexclient.cpp
     ai/index/qgsaifilesummarizer.cpp
+    ai/index/qgsaiindexingactivity.cpp
     ai/index/qgsaiindexingscheduler.cpp
     ai/index/qgsaiindexingthrottle.cpp
     ai/index/qgsailayerchunker.cpp

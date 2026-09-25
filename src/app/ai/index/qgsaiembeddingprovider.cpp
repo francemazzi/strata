@@ -252,6 +252,8 @@ struct QgsAiE5EmbeddingProvider::Runtime
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
     int outputIndex = 0;
+    //! Intra-op threads of the session, from the "Indexing speed" setting.
+    int threads = 0;
 };
 #else
 struct QgsAiE5EmbeddingProvider::Runtime
@@ -569,7 +571,8 @@ bool QgsAiE5EmbeddingProvider::ensureRuntimeLocked( QString *errorMessage ) cons
     // for minutes, and the user keeps working meanwhile.
     Ort::SessionOptions sessionOptions;
     sessionOptions.SetGraphOptimizationLevel( GraphOptimizationLevel::ORT_ENABLE_ALL );
-    sessionOptions.SetIntraOpNumThreads( QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() ) );
+    runtime->threads = QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() );
+    sessionOptions.SetIntraOpNumThreads( runtime->threads );
     sessionOptions.SetInterOpNumThreads( 1 );
     sessionOptions.SetExecutionMode( ExecutionMode::ORT_SEQUENTIAL );
     // Idle threads wait for work instead of spinning at full CPU between batches.
@@ -772,6 +775,13 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
 #else
   // One lock for loading and running, so releaseIdleResources() cannot unload in between.
   QMutexLocker locker( &mRuntimeMutex );
+  // A new "Indexing speed" applies from the next call: the session is made again with its threads.
+  if ( mRuntime && mRuntime->threads != QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() ) )
+  {
+    mRuntime.reset();
+    mRuntimeReady = false;
+    mRuntimeLoadAttempted = false;
+  }
   if ( !ensureRuntimeLocked( errorMessage ) )
     return false;
   const auto markUsed = qScopeGuard( [this]() { mLastUseMs = QDateTime::currentMSecsSinceEpoch(); } );

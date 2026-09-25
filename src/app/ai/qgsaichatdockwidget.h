@@ -41,6 +41,7 @@ class QVBoxLayout;
 
 class QgsAiChatPromptEdit;
 class QgsAiDiscoveryController;
+class QgsAiIndexingActivity;
 class QgsAiLayerIndexCoordinator;
 class QgsAiModelRouter;
 class QgsAiPlanClient;
@@ -56,6 +57,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
     void setDiscoveryController( QgsAiDiscoveryController *controller );
     void setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *coordinator );
+    //! Shows what background indexing is doing in the chat header, with pause and resume.
+    void setIndexingActivity( QgsAiIndexingActivity *activity );
 
   signals:
     void embeddingProviderSettingsChanged();
@@ -151,6 +154,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void sendGisSuggestionToChat( const QgsAiGisSuggestion &suggestion );
     void dismissGisSuggestion( const QString &suggestionId );
     void showGisSuggestions( const QList<QgsAiGisSuggestion> &suggestions );
+    void refreshIndexingIndicator();
 
     struct AttachedFile
     {
@@ -166,6 +170,10 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QPointer<QgsAiPlanClient> mPlanClient;
     QPointer<QgsAiReviewPatchEngine> mReviewEngine;
     QPointer<QgsAiLayerIndexCoordinator> mLayerIndexCoordinator;
+    QPointer<QgsAiIndexingActivity> mIndexingActivity;
+    QFrame *mIndexingIndicator = nullptr;
+    QToolButton *mIndexingStatusButton = nullptr;
+    QToolButton *mIndexingPauseButton = nullptr;
 
     QgsScrollArea *mTranscriptScrollArea = nullptr;
     QWidget *mTranscriptContainer = nullptr;

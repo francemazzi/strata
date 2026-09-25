@@ -61,6 +61,8 @@ class APP_EXPORT QgsAiFileContextProvider : public QObject
         int timeBudgetMs = 0;
         //! Keep only files whose relative path contains this text (case-insensitive).
         QString query;
+        //! More folder names to leave out at any depth, with * as wildcard (case-insensitive).
+        QStringList excludedFolders;
     };
 
     struct WorkspaceScanResult
