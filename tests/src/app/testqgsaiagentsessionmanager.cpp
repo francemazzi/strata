@@ -27,6 +27,8 @@
 #include "qgstaskmanager.h"
 #include "qgstest.h"
 
+#include <QAbstractButton>
+#include <QApplication>
 #include <QAtomicInt>
 #include <QByteArray>
 #include <QDir>
@@ -36,6 +38,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPdfWriter>
 #include <QScopeGuard>
@@ -251,6 +254,36 @@ namespace
       std::function<void()> mOnStart;
   };
 
+  //! Runs onExecute inside execute() (while the round is active), records that it ran and succeeds.
+  class CallbackTool : public QgsAiTool
+  {
+    public:
+      CallbackTool( const QString &name, bool requiresApproval, std::function<void()> onExecute, bool *ran = nullptr )
+        : mName( name )
+        , mRequiresApproval( requiresApproval )
+        , mOnExecute( std::move( onExecute ) )
+        , mRan( ran )
+      {}
+      QString name() const override { return mName; }
+      QString description() const override { return u"callback tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        if ( mRan )
+          *mRan = true;
+        if ( mOnExecute )
+          mOnExecute();
+        return QgsAiToolResult::ok( QJsonObject() );
+      }
+      bool requiresApproval() const override { return mRequiresApproval; }
+
+    private:
+      QString mName;
+      bool mRequiresApproval = false;
+      std::function<void()> mOnExecute;
+      bool *mRan = nullptr;
+  };
+
   //! Points the OpenRouter provider of \a router at the loopback \a port.
   void configureOpenRouterLoopback( QgsAiModelRouter &router, quint16 port )
   {
@@ -419,6 +452,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void emptyAssistantAfterSuccessfulToolsUsesLocalSummary();
     void emptyReplyWithoutToolsIsRequestError();
     void streamErrorAfterToolsIsRequestError();
+    void modeSwitchDuringToolKeepsRoundApproval();
     void agentBehaviorTogglePropagatesToRouter();
     void planModeDoesNotAdvertiseTools();
     void unresolvedPlanToolsNormalizesNearMissNames();
@@ -1561,6 +1595,75 @@ void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
   QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
   QVERIFY2( last.content.contains( u"Insufficient credits"_s ), qPrintable( last.content ) );
   QVERIFY( !historyContains( manager.history(), u"Here is what I ran"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::modeSwitchDuringToolKeepsRoundApproval()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s, u"approval_tool"_s } ) )
+                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiAgentSessionManager *managerPtr = nullptr;
+  bool approvalToolRan = false;
+  QgsAiToolRegistry registry;
+  // The user switches to Agent mode while the first (read-only) tool of the round runs.
+  registry.registerTool( std::make_unique<CallbackTool>( u"echo"_s, false, [&managerPtr]() {
+    if ( managerPtr )
+      managerPtr->setActiveAgent( u"editor"_s );
+  } ) );
+  registry.registerTool( std::make_unique<CallbackTool>( u"approval_tool"_s, true, std::function<void()>(), &approvalToolRan ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  managerPtr = &manager;
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"ask_before_edits"_s );
+
+  // Decline the approval dialog as soon as it opens. A native macOS alert has no widget to click.
+  const bool nativeDialogsWereDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
+  QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
+  const auto restoreNativeDialogs = qScopeGuard( [nativeDialogsWereDisabled]() { QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsWereDisabled ); } );
+  bool approvalAsked = false;
+  QTimer approvalCloser;
+  approvalCloser.setInterval( 20 );
+  connect( &approvalCloser, &QTimer::timeout, this, [&approvalAsked]() {
+    if ( QMessageBox *box = qobject_cast<QMessageBox *>( QApplication::activeModalWidget() ) )
+    {
+      approvalAsked = true;
+      if ( QAbstractButton *no = box->button( QMessageBox::No ) )
+        no->click();
+    }
+  } );
+  approvalCloser.start();
+
+  manager.sendUserMessage( u"inspect, then edit"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  approvalCloser.stop();
+
+  QVERIFY( approvalAsked );
+  QVERIFY( !approvalToolRan );
+  QCOMPARE( manager.activeAgent(), u"editor"_s );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorTogglePropagatesToRouter()

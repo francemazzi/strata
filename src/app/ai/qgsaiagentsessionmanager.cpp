@@ -3028,6 +3028,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   if ( requestId != mActiveRequestId )
     return;
 
+  // The whole round runs under the mode it was filtered for. Tools pump the event loop, so the
+  // user can switch mode meanwhile: that switch applies from the next round, never to approvals
+  // of calls already accepted under the old mode.
+  const QString roundAgent = mActiveAgent;
+
   // Surface a short status to the UI: which tools the model wants to use.
   QStringList summary;
   summary.reserve( calls.size() );
@@ -3051,7 +3056,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     if ( !isToolAllowedForActiveAgent( call.name ) )
     {
       QJsonObject metadata;
-      metadata.insert( u"agent_mode"_s, mActiveAgent );
+      metadata.insert( u"agent_mode"_s, roundAgent );
       metadata.insert( u"tool_call_id"_s, call.id );
       metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
       QString risk = u"unknown"_s;
@@ -3063,17 +3068,17 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       bool modeAllowsTool = false;
       if ( toolAvailable )
       {
-        if ( mActiveAgent == "editor"_L1 )
+        if ( roundAgent == "editor"_L1 )
         {
           modeAllowsTool = true;
         }
-        else if ( mActiveAgent == "reviewer"_L1 )
+        else if ( roundAgent == "reviewer"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
         }
-        else if ( mActiveAgent == "ask_before_edits"_L1 )
+        else if ( roundAgent == "ask_before_edits"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
         }
       }
       const bool applyManagedPolicy = mRouter
@@ -3081,10 +3086,10 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
                                       && mManagedAgentPolicy.toolCatalogVersion >= MIN_MANAGED_TOOL_CATALOG_VERSION
                                       && !mManagedAgentPolicy.isEmpty()
                                       && !managedPolicyReferencesUnknownTools( mManagedAgentPolicy, mToolRegistry );
-      const QStringList managedAllowed = applyManagedPolicy ? ( mActiveAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
-                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( mActiveAgent ) ) )
+      const QStringList managedAllowed = applyManagedPolicy ? ( roundAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
+                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
                                                             : QStringList();
-      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
       const QString blockedReason = blockedByManagedPolicy ? u"managed_policy"_s : ( toolAvailable ? u"agent_mode"_s : u"tool_unavailable"_s );
       metadata.insert( u"blocked_reason"_s, blockedReason );
       QgsAiAuditLog::appendToolEvent( u"blocked_by_policy"_s, call.name, risk, false, metadata );
@@ -3093,15 +3098,15 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       memory.insert( u"risk_level"_s, risk );
       memory.insert( u"reason"_s, blockedReason );
       rememberAgentEvent( u"tool_blocked"_s, memory );
-      QgsMessageLog::logMessage( u"Blocked disallowed tool call in %1 mode: %2"_s.arg( mActiveAgent, call.name ), u"AI"_s, Qgis::MessageLevel::Warning, false );
+      QgsMessageLog::logMessage( u"Blocked disallowed tool call in %1 mode: %2"_s.arg( roundAgent, call.name ), u"AI"_s, Qgis::MessageLevel::Warning, false );
       QString message;
-      if ( mActiveAgent == "planner"_L1 )
+      if ( roundAgent == "planner"_L1 )
       {
         message = u"Plan mode does not execute tools or change workspace state. No tool was run."_s;
       }
       else if ( blockedByManagedPolicy )
       {
-        message = u"The managed Strata Plan policy for this tier does not allow the requested tool '%1' in %2 mode. No tool was run."_s.arg( call.name, QgsAiRuntimeModeForAgent( mActiveAgent ) );
+        message = u"The managed Strata Plan policy for this tier does not allow the requested tool '%1' in %2 mode. No tool was run."_s.arg( call.name, QgsAiRuntimeModeForAgent( roundAgent ) );
       }
       else if ( !toolAvailable )
       {
@@ -3109,7 +3114,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       }
       else
       {
-        message = u"The active mode '%1' does not allow the requested tool '%2'. No tool was run."_s.arg( QgsAiRuntimeModeForAgent( mActiveAgent ), call.name );
+        message = u"The active mode '%1' does not allow the requested tool '%2'. No tool was run."_s.arg( QgsAiRuntimeModeForAgent( roundAgent ), call.name );
       }
       const QgsAiChatMessage error = buildAssistantMessage( message );
       recordHistoryMessage( error );
@@ -3244,12 +3249,12 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       QgsAiToolResult result;
       const QgsAiTool *calledTool = mToolRegistry->find( call.name );
       const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
-      const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+      const bool needsGenericApproval = roundAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
       const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
       if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
       {
         QJsonObject metadata;
-        metadata.insert( u"agent_mode"_s, mActiveAgent );
+        metadata.insert( u"agent_mode"_s, roundAgent );
         metadata.insert( u"tool_call_id"_s, call.id );
         metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
         QgsAiAuditLog::appendToolEvent( u"rejected_by_user"_s, call.name, QgsAiToolRiskLevelName( approvalRisk ), false, metadata );

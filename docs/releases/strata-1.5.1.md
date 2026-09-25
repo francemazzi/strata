@@ -28,6 +28,8 @@ signed assets and receipts match this tag.
   code that edits features one by one.
 - Dropping only sidecar files explains why nothing opened, and plugins still
   receive `.qml` and `.qmd` drops.
+- While a turn runs, the mode and model selectors are locked, and each tool
+  round keeps the approval rules of the mode it started in.
 
 ## Known limitations
 
