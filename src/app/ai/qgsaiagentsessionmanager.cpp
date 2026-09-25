@@ -602,8 +602,12 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       Q_UNUSED( retryCount )
       Q_UNUSED( retriable )
 
-      const bool emptyHttpCompletion = httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
-      if ( success || emptyHttpCompletion )
+      // An empty reply after this turn's tools ran is recovered below (retry prompt or a local
+      // summary of the tool results). Any other failure, including an empty reply before any
+      // tool or a provider error delivered inside a 200 stream, takes the error path.
+      const bool emptyReplyAfterTools = !success && httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty() && mTotalToolIterations > 0
+                                        && ( errorMessage.isEmpty() || errorMessage == QgsAiModelRouter::emptyCompletionErrorMessage() );
+      if ( success || emptyReplyAfterTools )
       {
         QString finalText = !responseText.isEmpty() ? responseText : mStreamedText;
         if ( finalText.trimmed().isEmpty() && mLastToolRoundHadError && !mEmptyErrorRecoveryAttempted )

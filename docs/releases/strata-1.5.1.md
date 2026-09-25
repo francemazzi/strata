@@ -13,8 +13,10 @@ signed assets and receipts match this tag.
   sibling dataset and explains that `.qml` is a style.
 - `run_python` times out after a configurable budget (default 120 s) and hints
   at slow feature loops instead of refusing them.
-- Empty HTTP 2xx assistant replies still recover; pre-dispatch configuration
-  failures keep the error path.
+- An empty assistant reply after tools ran is summarized from the tool results.
+  An empty reply before any tool, or a provider error inside the stream (such as
+  402 or overloaded), shows the error and tries the fallback provider again, as
+  in 1.5.0. Pre-dispatch configuration failures keep the error path.
 - Stop also interrupts web search, web fetch, MCP calls, downloads, DataHub
   extraction and tree detection within about a second. A Stop or a new chat
   during a tool no longer leaves the chat locked or cancels the next request.

@@ -140,6 +140,12 @@ class APP_EXPORT QgsAiModelRouter : public QObject
      */
     static QString resolvedPlanEndpoint( const QString &persistedEndpoint );
 
+    /**
+     * Error reported by requestFinished() when a 2xx reply carried neither text nor tool calls
+     * and no provider error. Callers compare against it to tell an empty reply from a real error.
+     */
+    static QString emptyCompletionErrorMessage();
+
     QString providerDisplayName( Provider provider ) const;
     QByteArray buildRequestPayload( Provider provider, const QList<QgsAiChatMessage> &messages, bool stream ) const;
     QString sanitizeErrorText( const QString &errorText ) const;

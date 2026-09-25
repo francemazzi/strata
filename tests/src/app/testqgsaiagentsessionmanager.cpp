@@ -4,6 +4,7 @@
   begin                : April 2026
 ***************************************************************************/
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 
@@ -250,6 +251,41 @@ namespace
       std::function<void()> mOnStart;
   };
 
+  //! Points the OpenRouter provider of \a router at the loopback \a port.
+  void configureOpenRouterLoopback( QgsAiModelRouter &router, quint16 port )
+  {
+    QgsSettings().setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+    QgsSettings().setValue( u"ai/network/maxRetries"_s, 0 );
+    router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+    QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+    providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( port );
+    providerSettings.model = u"test/model"_s;
+    providerSettings.enabled = true;
+    router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+    router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  }
+
+  QByteArray toolCallsResponseBody( const QStringList &toolNames )
+  {
+    QJsonArray calls;
+    for ( const QString &toolName : toolNames )
+    {
+      calls.append( QJsonObject {
+        { u"id"_s, u"call_%1"_s.arg( toolName ) },
+        { u"type"_s, u"function"_s },
+        { u"function"_s, QJsonObject { { u"name"_s, toolName }, { u"arguments"_s, u"{}"_s } } },
+      } );
+    }
+    const QJsonObject message { { u"role"_s, u"assistant"_s }, { u"content"_s, QJsonValue() }, { u"tool_calls"_s, calls } };
+    const QJsonObject choice { { u"message"_s, message }, { u"finish_reason"_s, u"tool_calls"_s } };
+    return QJsonDocument( QJsonObject { { u"choices"_s, QJsonArray { choice } } } ).toJson( QJsonDocument::Compact );
+  }
+
+  bool historyContains( const QList<QgsAiChatMessage> &history, const QString &text )
+  {
+    return std::any_of( history.cbegin(), history.cend(), [&text]( const QgsAiChatMessage &message ) { return message.content.contains( text ); } );
+  }
+
   void clearProviderSettings()
   {
     QgsSettings settings;
@@ -381,6 +417,8 @@ class TestQgsAiAgentSessionManager : public QObject
     void unverifiedSuccessClaimTriggersCompletionGate();
     void emptyAssistantAfterToolErrorTriggersRecovery();
     void emptyAssistantAfterSuccessfulToolsUsesLocalSummary();
+    void emptyReplyWithoutToolsIsRequestError();
+    void streamErrorAfterToolsIsRequestError();
     void agentBehaviorTogglePropagatesToRouter();
     void planModeDoesNotAdvertiseTools();
     void unresolvedPlanToolsNormalizesNearMissNames();
@@ -1436,6 +1474,93 @@ void TestQgsAiAgentSessionManager::emptyAssistantAfterSuccessfulToolsUsesLocalSu
   QVERIFY( last.contains( u"native:serviceareafromlayer"_s ) );
   QVERIFY( last.contains( u"Service area (from layer)"_s ) );
   QVERIFY( last.contains( u"visual evidence"_s, Qt::CaseInsensitive ) );
+}
+
+void TestQgsAiAgentSessionManager::emptyReplyWithoutToolsIsRequestError()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  // An empty 200 before any tool ran is a failed request (e.g. a swallowed upstream 402),
+  // not a completion to summarize.
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiToolRegistry registry;
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"editor"_s );
+
+  manager.sendUserMessage( u"hello"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 1 );
+  const QgsAiChatMessage last = manager.history().last();
+  QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QVERIFY( !last.content.contains( u"empty reply"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  // A provider error delivered inside a 200 stream after a tool round must reach the user,
+  // not be replaced by a local summary of the tools.
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s } ) )
+                   << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}\n\n" ), QByteArrayLiteral( "data: [DONE]\n\n" ) } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"editor"_s );
+
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+
+  manager.sendUserMessage( u"echo something"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 2 );
+  const QgsAiChatMessage last = manager.history().last();
+  QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QVERIFY2( last.content.contains( u"Insufficient credits"_s ), qPrintable( last.content ) );
+  QVERIFY( !historyContains( manager.history(), u"Here is what I ran"_s ) );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorTogglePropagatesToRouter()
