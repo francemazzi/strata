@@ -62,6 +62,7 @@
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
 #include "qgsvectordataprovider.h"
+#include "qgslayertree.h"
 #include "qgsvectorlayer.h"
 #include "qgswkbtypes.h"
 
@@ -148,12 +149,12 @@ namespace
   QString attachmentStateLabel( const QString &state )
   {
     if ( state == "sent"_L1 )
-      return QObject::tr( "inviato" );
+      return QObject::tr( "sent" );
     if ( state == "omitted"_L1 )
-      return QObject::tr( "omesso" );
+      return QObject::tr( "left out" );
     if ( state == "added"_L1 )
-      return QObject::tr( "aggiunto a KB" );
-    return QObject::tr( "richiede consenso" );
+      return QObject::tr( "added to the knowledge base" );
+    return QObject::tr( "needs consent" );
   }
 
   QString cappedFileText( const QString &path, qint64 maxBytes )
@@ -1134,6 +1135,19 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
     connect( mSessionManager, &QgsAiAgentSessionManager::toolProgress, this, &QgsAiChatDockWidget::updateLiveToolProgress );
     connect( mSessionManager, &QgsAiAgentSessionManager::toolFinished, this, [this]( const QString &callId, bool, qint64 ) { closeLiveToolCard( callId ); } );
     connect( mSessionManager, &QgsAiAgentSessionManager::toolCallsUndone, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
+    // The suggested prompts follow the layers of the open project, once a burst of changes
+    // (a project with 100 layers opening) is over, and only while the chat is visible.
+    QTimer *emptyStateTimer = new QTimer( this );
+    emptyStateTimer->setSingleShot( true );
+    emptyStateTimer->setInterval( 300 );
+    connect( emptyStateTimer, &QTimer::timeout, this, [this]() {
+      if ( isVisible() )
+        refreshEmptyState();
+    } );
+    const auto scheduleEmptyState = [emptyStateTimer]() { emptyStateTimer->start(); };
+    connect( QgsProject::instance(), &QgsProject::layersAdded, this, scheduleEmptyState );
+    connect( QgsProject::instance(), &QgsProject::layersRemoved, this, scheduleEmptyState );
+    connect( QgsProject::instance(), &QgsProject::cleared, this, scheduleEmptyState );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionUsageChanged, this, &QgsAiChatDockWidget::updateSessionUsage );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionListChanged, this, &QgsAiChatDockWidget::rebuildHistoryMenu );
   }
@@ -1567,6 +1581,12 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
   }
 
   const bool follow = message.role == QgsAiChatRole::User || isTranscriptAtBottom();
+  if ( mEmptyState )
+  {
+    mTranscriptLayout->removeWidget( mEmptyState );
+    mEmptyState->deleteLater();
+    mEmptyState = nullptr;
+  }
   const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
   mTranscriptLayout->insertWidget( insertIndex, messageWidget );
   if ( message.role == QgsAiChatRole::Tool )
@@ -2737,6 +2757,95 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
     appendTranscriptMessage( m );
   }
   refreshUndoTurnButtons();
+  refreshEmptyState();
+}
+
+QStringList QgsAiChatDockWidget::suggestedPrompts( QgsProject *project )
+{
+  QStringList prompts;
+  if ( project )
+  {
+    // What the project health checks would fix first.
+    const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( project );
+    for ( const QgsAiGisSuggestion &suggestion : suggestions )
+    {
+      if ( prompts.size() >= 2 )
+        break;
+      if ( !suggestion.actionPrompt.trimmed().isEmpty() )
+        prompts << suggestion.actionPrompt.trimmed();
+    }
+    const QgsVectorLayer *vector = nullptr;
+    for ( QgsMapLayer *layer : project->layerTreeRoot()->checkedLayers() )
+    {
+      vector = qobject_cast<QgsVectorLayer *>( layer );
+      if ( vector )
+        break;
+    }
+    if ( vector )
+    {
+      prompts << tr( "Describe the layers of this project and what they contain." );
+      if ( vector->geometryType() != Qgis::GeometryType::Null && vector->geometryType() != Qgis::GeometryType::Unknown )
+        prompts << tr( "Buffer %1 by 100 m and add the result to the map." ).arg( vector->name() );
+      prompts << tr( "Summarize the attributes of %1." ).arg( vector->name() );
+    }
+  }
+  if ( prompts.size() < 3 )
+  {
+    prompts << tr( "Find open data for my area and add it to the map." );
+    prompts << tr( "Open a GeoPackage from my workspace and summarize its layers." );
+    prompts << tr( "Create a print layout of the current map view." );
+  }
+  prompts.removeDuplicates();
+  return prompts.mid( 0, 4 );
+}
+
+void QgsAiChatDockWidget::refreshEmptyState()
+{
+  const bool empty = !mSessionManager || mSessionManager->history().isEmpty();
+  if ( !empty || !mTranscriptLayout )
+  {
+    if ( mEmptyState )
+    {
+      mTranscriptLayout->removeWidget( mEmptyState );
+      mEmptyState->deleteLater();
+      mEmptyState = nullptr;
+    }
+    return;
+  }
+  if ( mEmptyState )
+  {
+    mTranscriptLayout->removeWidget( mEmptyState );
+    mEmptyState->deleteLater();
+  }
+  mEmptyState = new QFrame( mTranscriptContainer );
+  mEmptyState->setObjectName( u"aiEmptyState"_s );
+  applyTranscriptWidthPolicy( mEmptyState );
+  QVBoxLayout *layout = new QVBoxLayout( mEmptyState );
+  layout->setContentsMargins( 8, 12, 8, 8 );
+  layout->setSpacing( 6 );
+  QLabel *title = new QLabel( tr( "What should we do?" ), mEmptyState );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  layout->addWidget( title );
+  QLabel *hint = new QLabel( tr( "The assistant works on the open project. Changes can be undone from the chat." ), mEmptyState );
+  hint->setWordWrap( true );
+  hint->setStyleSheet( u"color: palette(mid);"_s );
+  layout->addWidget( hint );
+  for ( const QString &prompt : suggestedPrompts( QgsProject::instance() ) )
+  {
+    QPushButton *button = new QPushButton( prompt, mEmptyState );
+    button->setObjectName( u"aiSuggestedPrompt"_s );
+    button->setStyleSheet(
+      u"QPushButton#aiSuggestedPrompt { text-align: left; background: palette(alternate-base); border: 0; border-radius: 6px; padding: 6px 8px; } QPushButton#aiSuggestedPrompt:hover { background: palette(button); }"_s
+    );
+    connect( button, &QPushButton::clicked, this, [this, prompt]() {
+      if ( !mInputTextEdit )
+        return;
+      mInputTextEdit->setPlainText( prompt );
+      sendMessage();
+    } );
+    layout->addWidget( button );
+  }
+  mTranscriptLayout->insertWidget( 0, mEmptyState );
 }
 
 void QgsAiChatDockWidget::rebuildHistoryMenu()
@@ -3918,6 +4027,7 @@ void QgsAiChatDockWidget::showEvent( QShowEvent *event )
 {
   QgsDockWidget::showEvent( event );
   maybeShowWelcomeBanner();
+  refreshEmptyState();
 }
 
 void QgsAiChatDockWidget::maybeShowWelcomeBanner()

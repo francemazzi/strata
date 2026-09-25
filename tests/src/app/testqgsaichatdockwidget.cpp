@@ -240,6 +240,7 @@ class TestQgsAiChatDockWidget : public QObject
     void pickedModeIsRemembered();
     void toolCardsShowLiveStateAndUndo();
     void messagesTypedDuringATurnAreQueued();
+    void emptyChatSuggestsPromptsForTheProject();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -1166,6 +1167,55 @@ void TestQgsAiChatDockWidget::messagesTypedDuringATurnAreQueued()
   QVERIFY( queueBar->isHidden() );
 }
 
+void TestQgsAiChatDockWidget::emptyChatSuggestsPromptsForTheProject()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+
+  // An empty chat offers prompts that work, even without a project.
+  QTRY_VERIFY( dock.findChild<QFrame *>( u"aiEmptyState"_s ) );
+  QVERIFY( dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s ).size() >= 3 );
+
+  // With a layer, the prompts name it.
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:3003"_s, u"Parcels"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto hasPrompt = [&dock]( const QString &text ) {
+    const QList<QPushButton *> prompts = dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s );
+    return std::any_of( prompts.cbegin(), prompts.cend(), [&text]( QPushButton *button ) { return button->text() == text; } );
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( hasPrompt( u"Buffer Parcels by 100 m and add the result to the map."_s ), 5000 );
+
+  // A click sends the prompt, and the suggestions go away.
+  const QString trustRoot = QgsAiWorkspaceTrust::currentWorkspaceRoot();
+  const QgsAiWorkspaceTrust::State savedTrust = trustRoot.isEmpty() ? QgsAiWorkspaceTrust::State::Unknown : QgsAiWorkspaceTrust::state( trustRoot );
+  if ( !trustRoot.isEmpty() )
+    QgsAiWorkspaceTrust::setState( trustRoot, QgsAiWorkspaceTrust::State::Trusted );
+  const auto restoreTrust = qScopeGuard( [trustRoot, savedTrust]() {
+    if ( !trustRoot.isEmpty() )
+      QgsAiWorkspaceTrust::setState( trustRoot, savedTrust );
+  } );
+  const QList<QPushButton *> prompts = dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s );
+  for ( QPushButton *button : prompts )
+  {
+    if ( button->text().startsWith( "Buffer Parcels"_L1 ) )
+    {
+      button->click();
+      break;
+    }
+  }
+  QVERIFY( !manager.history().isEmpty() );
+  QCOMPARE( manager.history().first().content, u"Buffer Parcels by 100 m and add the result to the map."_s );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiEmptyState"_s ) );
+}
+
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()
 {
   QTemporaryDir tempDir;
@@ -1842,7 +1892,7 @@ void TestQgsAiChatDockWidget::dropLocalFileCreatesAttachmentChip()
   QLabel *stateLabel = dock.findChild<QLabel *>( u"aiAttachmentStateLabel"_s );
   QToolButton *knowledgeButton = dock.findChild<QToolButton *>( u"aiAttachmentKnowledgeButton"_s );
   QVERIFY( stateLabel );
-  QCOMPARE( stateLabel->text(), u"richiede consenso"_s );
+  QCOMPARE( stateLabel->text(), u"needs consent"_s );
   QVERIFY( knowledgeButton );
   QCOMPARE( knowledgeButton->text(), u"Add to Knowledge Base"_s );
 }

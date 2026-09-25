@@ -2875,7 +2875,12 @@ QWidget *QgsAiSettingsDialog::buildOnboardingPage()
   createDemoProjectButton->setObjectName( u"aiCreateDemoProjectButton"_s );
 
   contentLayout->addWidget( settingRow( tr( "Demo project" ), tr( "Creates a small in-memory sample project to try the assistant." ), createDemoProjectButton, page ) );
-  contentLayout->addWidget( settingRow( tr( "Release dry-run" ), tr( "Stores only a local readiness manifest checksum." ), releaseDryRunButton, page ) );
+  // A check for whoever prepares a release, not for users.
+  const bool developerMode = productSettings.value( u"strata/developer_mode"_s, false ).toBool() || qEnvironmentVariableIsSet( "STRATA_DEVELOPER" );
+  QWidget *releaseDryRunRow = settingRow( tr( "Release dry-run" ), tr( "Stores only a local readiness manifest checksum." ), releaseDryRunButton, page );
+  releaseDryRunRow->setVisible( developerMode );
+  mReleaseDryRunStatus->setVisible( developerMode );
+  contentLayout->addWidget( releaseDryRunRow );
   contentLayout->addWidget( mReleaseDryRunStatus );
 
   refreshOnboardingStatus();

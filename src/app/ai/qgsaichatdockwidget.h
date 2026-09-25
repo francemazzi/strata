@@ -114,6 +114,10 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles );
     void sendNextQueuedMessage();
     void refreshQueueBar();
+    //! Suggested first prompts for the open project while the chat is empty.
+    void refreshEmptyState();
+    //! Prompts that work on the open project (its health checks first, then its layers).
+    static QStringList suggestedPrompts( QgsProject *project );
     void retryFromChat();
     //! TRUE when the transcript is scrolled to (or near) its end.
     bool isTranscriptAtBottom() const;
@@ -260,6 +264,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
         QList<QgsAiChatContextFile> contextFiles;
     };
     QList<QueuedMessage> mQueuedMessages;
+    QPointer<QFrame> mEmptyState;
     QWidget *mQueueBar = nullptr;
     QLabel *mQueueLabel = nullptr;
 

@@ -143,3 +143,9 @@ the Windows reference machine measurements are still to be done.
   Ctrl+Shift+K (Cmd+Shift+K on macOS) opens the chat with the cursor in the message box;
   Ctrl+L stays the Data Source Manager. The shortcut can be changed with the other QGIS
   keyboard shortcuts.
+- An empty chat suggests prompts that work on the open project: what its health checks
+  would fix first, then prompts naming its layers ("Buffer Parcels by 100 m and add the
+  result to the map."), or starting points when no project is open. A click sends it.
+- One language in the chat: the attachment states were in Italian among English labels.
+  The release dry-run of the AI settings is only shown with `strata/developer_mode` or the
+  `STRATA_DEVELOPER` environment variable.
