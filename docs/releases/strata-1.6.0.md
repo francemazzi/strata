@@ -95,3 +95,13 @@ the Windows reference machine measurements are still to be done.
   the window keeps drawing; Stop while writing leaves the layer as it was. Saving a layer the
   tool put in edit mode is still one step, to stay atomic: about 0.25 s for 200 polygons of
   20,000 vertices in a GeoPackage.
+- Database tools: `query_sql` and `execute_sql` run in the background and Stop cancels the
+  query on the server. A read runs in a read-only transaction, so a function that writes
+  is refused by PostgreSQL itself, and calls such as `pg_terminate_backend`, `nextval` or
+  `dblink_exec` count as changes that need approval. Queries stop after 30 seconds on the
+  server (`strata/ai/sql_timeout_s`, approved writes at least 5 minutes), and a SELECT only
+  returns the rows the tool can show instead of the whole table. `describe_database_schema`
+  reads the catalog in the background with estimated metadata. `export_layer_to_postgis`
+  writes the rows in the background into a new table that replaces the old one only once
+  the export succeeded, so a failed or stopped export leaves the existing table intact; it
+  no longer runs `VACUUM FULL`, which locked and rewrote the table.
