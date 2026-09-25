@@ -33,11 +33,21 @@ signed assets and receipts match this tag.
   round keeps the approval rules of the mode it started in.
 - The project suggestion Analyze buttons are disabled while a turn runs, and a
   message sent meanwhile no longer breaks the running tool round.
-- Processing runs started by the assistant or by `run_python` protect their
-  input layers: QGIS refuses to remove them or close the project until the run
-  ends. Outputs are never loaded into a project opened meanwhile.
+- `run_processing_algorithm` protects its input layers, and `run_python` every
+  project layer while it waits on Processing: QGIS refuses to remove them or
+  close the project until the run ends. Outputs are never loaded into a project
+  opened meanwhile. If a plugin removes a layer from code, the snippet stops
+  with an error instead of using the deleted layer.
 - Removing a layer that an AI tool is reading is reported to the assistant as an
   error it can react to, not as a Stop that ends the turn.
+- `run_python` runs the Processing algorithms shipped with Strata (native, GDAL,
+  and models built from them) in the background. Script and plugin algorithms
+  run on the interface thread, like in the Python console.
+- The `run_python` time budget and Stop only interrupt the snippet's own code,
+  never a plugin that runs while the snippet waits.
+- Expressions that use aggregates (`sum`, `mean`, `aggregate`, …), `overlay_*`,
+  `represent_value`, `eval` or functions registered from Python are evaluated
+  on the interface thread, since they read the live layer.
 
 ## Known limitations
 
@@ -47,8 +57,14 @@ signed assets and receipts match this tag.
 - `calculate_field` and `batch_update_attributes` compute values in the
   background, but writing them into the layer and saving still happen on the
   interface thread.
-- `run_python` cannot interrupt a single long C++ call; the time budget applies
-  when control returns to Python.
+- In `calculate_field`, `select_features` and `batch_update_attributes`, an
+  expression or filter that uses aggregates, `overlay_*`, `represent_value`,
+  `eval` or Python functions pauses the window while it is computed.
+- `run_python` cannot interrupt a single long C++ or library call; the time
+  budget applies when control returns to the snippet's own code.
+- With Python older than 3.12, the `run_python` time budget and Stop can still
+  land in a plugin that runs while the snippet waits, and a snippet can catch
+  the error raised when a plugin removes a layer during `processing.run`.
 
 ## Packages
 
