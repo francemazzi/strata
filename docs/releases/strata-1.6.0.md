@@ -138,3 +138,8 @@ the Windows reference machine measurements are still to be done.
   (also from the error banner, with Retry): the answer after it is dropped and its changes
   are undone first; an answer that changed something for good is kept, since asking again
   would change it twice.
+- The message box stays open while the assistant works: a message sent meanwhile waits in
+  a queue (shown above the box, with Cancel) and leaves when the answer is complete.
+  Ctrl+Shift+K (Cmd+Shift+K on macOS) opens the chat with the cursor in the message box;
+  Ctrl+L stays the Data Source Manager. The shortcut can be changed with the other QGIS
+  keyboard shortcuts.

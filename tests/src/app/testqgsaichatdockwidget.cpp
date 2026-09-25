@@ -239,6 +239,7 @@ class TestQgsAiChatDockWidget : public QObject
     void acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks();
     void pickedModeIsRemembered();
     void toolCardsShowLiveStateAndUndo();
+    void messagesTypedDuringATurnAreQueued();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -1091,6 +1092,78 @@ void TestQgsAiChatDockWidget::toolCardsShowLiveStateAndUndo()
   QCOMPARE( undone, QStringList( { u"tok_1"_s } ) );
   QTRY_VERIFY( dock.findChild<QLabel *>( u"aiToolUndoneLabel"_s ) );
   QTRY_VERIFY( !dock.findChild<QPushButton *>( u"aiUndoToolButton"_s ) );
+}
+
+void TestQgsAiChatDockWidget::messagesTypedDuringATurnAreQueued()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse slow
+    = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"First answer"},"finish_reason":"stop"}]})" ) );
+  slow.responseDelayMs = 800;
+  server.responses << slow << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Second answer"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+  const QString trustRoot = QgsAiWorkspaceTrust::currentWorkspaceRoot();
+  const QgsAiWorkspaceTrust::State savedTrust = trustRoot.isEmpty() ? QgsAiWorkspaceTrust::State::Unknown : QgsAiWorkspaceTrust::state( trustRoot );
+  if ( !trustRoot.isEmpty() )
+    QgsAiWorkspaceTrust::setState( trustRoot, QgsAiWorkspaceTrust::State::Trusted );
+  const auto restoreTrust = qScopeGuard( [trustRoot, savedTrust]() {
+    if ( !trustRoot.isEmpty() )
+      QgsAiWorkspaceTrust::setState( trustRoot, savedTrust );
+  } );
+
+  QgsAiChatPromptEdit *input = dock.findChild<QgsAiChatPromptEdit *>( u"aiPromptInput"_s );
+  QWidget *queueBar = dock.findChild<QWidget *>( u"aiQueueBar"_s );
+  QVERIFY( input && queueBar );
+  input->setPlainText( u"first question"_s );
+  QVERIFY( QMetaObject::invokeMethod( &dock, "sendMessage", Qt::DirectConnection ) );
+  QTRY_VERIFY_WITH_TIMEOUT( manager.hasActiveRequest(), 10000 );
+
+  // The message box stays open while the assistant works; what is sent now waits in a queue.
+  QVERIFY( input->isEnabled() );
+  input->setPlainText( u"second question"_s );
+  QVERIFY( QMetaObject::invokeMethod( &dock, "sendMessage", Qt::DirectConnection ) );
+  QCOMPARE( dock.queuedMessageCount(), 1 );
+  QVERIFY( !queueBar->isHidden() );
+  QVERIFY( input->toPlainText().isEmpty() );
+
+  const auto contents = [&manager]() {
+    QStringList texts;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      texts << message.content;
+    return texts;
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( contents().contains( u"Second answer"_s ), 60000 );
+  QCOMPARE( contents(), QStringList( { u"first question"_s, u"First answer"_s, u"second question"_s, u"Second answer"_s } ) );
+  QCOMPARE( dock.queuedMessageCount(), 0 );
+  QVERIFY( queueBar->isHidden() );
 }
 
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()

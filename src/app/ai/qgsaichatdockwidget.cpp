@@ -939,6 +939,27 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mFileContextChipRow->setVisible( false );
   layout->addWidget( mFileContextChipRow );
 
+  // Messages typed while the assistant works wait here and leave when it finishes.
+  mQueueBar = new QWidget( container );
+  mQueueBar->setObjectName( u"aiQueueBar"_s );
+  QHBoxLayout *queueLayout = new QHBoxLayout( mQueueBar );
+  queueLayout->setContentsMargins( 0, 0, 0, 0 );
+  mQueueLabel = new QLabel( mQueueBar );
+  mQueueLabel->setObjectName( u"aiQueueLabel"_s );
+  mQueueLabel->setStyleSheet( u"color: palette(mid);"_s );
+  queueLayout->addWidget( mQueueLabel, 1 );
+  QToolButton *cancelQueue = new QToolButton( mQueueBar );
+  cancelQueue->setObjectName( u"aiQueueCancelButton"_s );
+  cancelQueue->setText( tr( "Cancel" ) );
+  cancelQueue->setAutoRaise( true );
+  connect( cancelQueue, &QToolButton::clicked, this, [this]() {
+    mQueuedMessages.clear();
+    refreshQueueBar();
+  } );
+  queueLayout->addWidget( cancelQueue );
+  mQueueBar->setVisible( false );
+  layout->addWidget( mQueueBar );
+
   mInputTextEdit = new QgsAiChatPromptEdit( container );
   mInputTextEdit->setObjectName( u"aiPromptInput"_s );
   mInputTextEdit->setPlaceholderText( tr( "Ask a question, tag project files with @, or send /patch…  (Shift+Enter for newline)" ) );
@@ -3030,8 +3051,13 @@ void QgsAiChatDockWidget::setRequestRunning( bool running )
     mSendButton->setText( running ? u"◼"_s : u"↑"_s );
     mSendButton->setToolTip( running ? tr( "Stop" ) : tr( "Send (Enter)" ) );
   }
+  // The message box stays open: what is typed now is queued (sendMessage()).
   if ( mInputTextEdit )
-    mInputTextEdit->setEnabled( !running );
+    mInputTextEdit->setPlaceholderText(
+      running ? tr( "Type your next message; it is sent when the assistant finishes." ) : tr( "Ask a question, tag project files with @, or send /patch…  (Shift+Enter for newline)" )
+    );
+  if ( !running && !mQueuedMessages.isEmpty() )
+    QTimer::singleShot( 0, this, &QgsAiChatDockWidget::sendNextQueuedMessage );
   if ( mCancelButton )
     mCancelButton->setEnabled( running );
   // Tools pump the event loop: keep mode and model fixed until the turn ends, so approvals and
@@ -3138,10 +3164,6 @@ void QgsAiChatDockWidget::sendMessage()
   if ( input.isEmpty() && contextFiles.isEmpty() )
     return;
 
-  // First AI interaction with an undecided workspace: ask for the trust decision.
-  // Never blocks sending — untrusted just restricts rules/skills and risky tools.
-  ensureWorkspaceTrustDecision();
-
   mInputTextEdit->clear();
   hideMentionPopup();
   for ( AttachedFile &file : mAttachedFiles )
@@ -3162,7 +3184,55 @@ void QgsAiChatDockWidget::sendMessage()
     const QString gisBlock = QgsAiGisSuggestionEngine::formatHealthBlock( QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject::instance() ), true );
     outgoing += u"\n\n"_s + ( gisBlock.isEmpty() ? tr( "(No GIS suggestions for the current project right now.)" ) : gisBlock );
   }
-  mSessionManager->sendUserMessage( outgoing, contextFiles );
+  // The assistant is still working: the message waits for the end of the turn.
+  if ( mRequestRunning )
+  {
+    mQueuedMessages.append( { outgoing, contextFiles } );
+    refreshQueueBar();
+    return;
+  }
+  dispatchMessage( outgoing, contextFiles );
+}
+
+void QgsAiChatDockWidget::dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles )
+{
+  if ( !mSessionManager )
+    return;
+  // First AI interaction with an undecided workspace: ask for the trust decision.
+  // Never blocks sending — untrusted just restricts rules/skills and risky tools.
+  ensureWorkspaceTrustDecision();
+  mSessionManager->sendUserMessage( text, contextFiles );
+}
+
+void QgsAiChatDockWidget::sendNextQueuedMessage()
+{
+  if ( mRequestRunning || mQueuedMessages.isEmpty() )
+    return;
+  const QueuedMessage next = mQueuedMessages.takeFirst();
+  refreshQueueBar();
+  dispatchMessage( next.text, next.contextFiles );
+}
+
+void QgsAiChatDockWidget::refreshQueueBar()
+{
+  if ( !mQueueBar || !mQueueLabel )
+    return;
+  mQueueBar->setVisible( !mQueuedMessages.isEmpty() );
+  if ( mQueuedMessages.isEmpty() )
+    return;
+  QString first = mQueuedMessages.constFirst().text.simplified();
+  if ( first.size() > 50 )
+    first = first.left( 47 ) + u"…"_s;
+  mQueueLabel->setText( mQueuedMessages.size() == 1 ? tr( "Queued: %1" ).arg( first ) : tr( "Queued: %1 (+%2 more)" ).arg( first ).arg( mQueuedMessages.size() - 1 ) );
+}
+
+void QgsAiChatDockWidget::focusPrompt()
+{
+  if ( !mInputTextEdit )
+    return;
+  raise();
+  mInputTextEdit->setFocus( Qt::ShortcutFocusReason );
+  mInputTextEdit->moveCursor( QTextCursor::End );
 }
 
 void QgsAiChatDockWidget::cancelRunningRequest()

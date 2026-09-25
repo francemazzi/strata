@@ -1637,6 +1637,18 @@ QgisApp::QgisApp(
   connect( mActionAiAssistant, &QAction::toggled, mAiChatDock, &QgsDockWidget::setUserVisible );
   connect( mAiChatDock, &QgsDockWidget::visibilityChanged, mActionAiAssistant, &QAction::setChecked );
   mPluginMenu->addAction( mActionAiAssistant );
+  // Opens the chat with the cursor in the message box. Ctrl+L and Ctrl+Shift+L already belong
+  // to the Data Source Manager and SpatiaLite; the shortcut can be changed in the settings.
+  QAction *askAiAction = new QAction( tr( "Ask the AI Assistant" ), this );
+  askAiAction->setObjectName( u"mActionAskAiAssistant"_s );
+  askAiAction->setShortcut( QKeySequence( tr( "Ctrl+Shift+K" ) ) );
+  askAiAction->setToolTip( tr( "Open the AI Assistant and type a message (%1)" ).arg( askAiAction->shortcut().toString( QKeySequence::NativeText ) ) );
+  connect( askAiAction, &QAction::triggered, this, [this]() {
+    mAiChatDock->setUserVisible( true );
+    mAiChatDock->focusPrompt();
+  } );
+  addAction( askAiAction );
+  mPluginMenu->addAction( askAiAction );
   mFileToolBar->addAction( mActionAiAssistant );
   endProfile();
 #endif

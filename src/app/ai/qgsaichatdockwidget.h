@@ -61,6 +61,12 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     //! Shows what background indexing is doing in the chat header, with pause and resume.
     void setIndexingActivity( QgsAiIndexingActivity *activity );
 
+    //! Puts the cursor in the message box, ready to type (the keyboard shortcut of the chat).
+    void focusPrompt();
+
+    //! Messages typed while the assistant works, sent in order when it finishes.
+    int queuedMessageCount() const { return static_cast<int>( mQueuedMessages.size() ); }
+
   signals:
     void embeddingProviderSettingsChanged();
 
@@ -104,6 +110,10 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     //! Copy on assistant messages; Copy, Edit and Retry on user messages.
     QHBoxLayout *createMessageActionsRow( const QgsAiChatMessage &message, QWidget *card );
     void editAndResendFromChat( const QString &messageId, const QString &text );
+    //! Sends a prepared message now (after the workspace trust question when still undecided).
+    void dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles );
+    void sendNextQueuedMessage();
+    void refreshQueueBar();
     void retryFromChat();
     //! TRUE when the transcript is scrolled to (or near) its end.
     bool isTranscriptAtBottom() const;
@@ -243,6 +253,15 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QString mStreamingText;
     QTimer *mStreamingRenderTimer = nullptr;
     bool mRequestRunning = false;
+
+    struct QueuedMessage
+    {
+        QString text;
+        QList<QgsAiChatContextFile> contextFiles;
+    };
+    QList<QueuedMessage> mQueuedMessages;
+    QWidget *mQueueBar = nullptr;
+    QLabel *mQueueLabel = nullptr;
 
     QPointer<QFrame> mLiveToolCard;
     QLabel *mLiveToolElapsed = nullptr;
