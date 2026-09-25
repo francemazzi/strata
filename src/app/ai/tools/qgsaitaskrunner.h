@@ -137,6 +137,8 @@ struct APP_EXPORT QgsAiTaskWaitResult
     bool canceled = false;
     //! The wait ended before the task finished because Strata is quitting. The task's results are unavailable.
     bool abandoned = false;
+    //! A layer the task depended on was removed while it ran. That is a tool error, not a Stop.
+    bool layerRemoved = false;
     QString error;
 };
 

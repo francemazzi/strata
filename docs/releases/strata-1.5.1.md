@@ -33,6 +33,8 @@ signed assets and receipts match this tag.
   round keeps the approval rules of the mode it started in.
 - The project suggestion Analyze buttons are disabled while a turn runs, and a
   message sent meanwhile no longer breaks the running tool round.
+- Removing a layer that an AI tool is reading is reported to the assistant as an
+  error it can react to, not as a Stop that ends the turn.
 
 ## Known limitations
 

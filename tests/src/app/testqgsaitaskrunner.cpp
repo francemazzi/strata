@@ -63,6 +63,7 @@ class TestQgsAiTaskRunner : public QObject
     void failedWorkIsNotCanceled();
     void abandonedWaitLeavesTaskSafe();
     void dependentLayerRemovalStopsTask();
+    void stopWinsOverLayerRemoval();
     void waitForActiveTasksReturnsWhenWorkersStop();
     void waitForActiveTasksTimesOut();
     void guiThreadWorkRunsInline();
@@ -205,7 +206,37 @@ void TestQgsAiTaskRunner::dependentLayerRemovalStopsTask()
     options
   );
   QVERIFY( !result.succeeded );
+  // Removing the layer is a tool error the model can react to, not a Stop that ends the turn.
+  QVERIFY( !result.canceled );
+  QVERIFY( result.layerRemoved );
+  QVERIFY( !result.error.isEmpty() );
   QVERIFY( !QgsProject::instance()->mapLayer( layerId ) );
+}
+
+void TestQgsAiTaskRunner::stopWinsOverLayerRemoval()
+{
+  auto *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"dependent"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsProject::instance()->addMapLayer( layer );
+  const QString layerId = layer->id();
+
+  QgsAiBackgroundRunOptions options;
+  options.dependentLayers = { layer };
+  QTimer::singleShot( 0, [layerId]() {
+    qgsAiCancelActiveBackgroundTool();
+    QgsProject::instance()->removeMapLayer( layerId );
+  } );
+  const QgsAiTaskWaitResult result = qgsAiRunFunction(
+    u"stop-and-remove"_s,
+    []( QgsFeedback *feedback ) {
+      while ( !feedback->isCanceled() )
+        QThread::msleep( 5 );
+      return false;
+    },
+    options
+  );
+  QVERIFY( result.canceled );
+  QVERIFY( !result.layerRemoved );
 }
 
 void TestQgsAiTaskRunner::waitForActiveTasksReturnsWhenWorkersStop()

@@ -258,6 +258,13 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsAiBackgroundTask *task, const 
   // its worker. Either way the handler runs here, and before the completion that quits the loop.
   QObject::connect( task, &QgsTask::progressChanged, &loop, [label]( double progress ) { reportProgress( label, progress ); } );
 
+  // The task manager cancels the task when one of these layers is removed. Remember them to
+  // report that as a tool error instead of a Stop.
+  QList<QPointer<QgsMapLayer>> dependentLayers;
+  const QList<QgsMapLayer *> taskDependentLayers = task->dependentLayers();
+  for ( QgsMapLayer *layer : taskDependentLayers )
+    dependentLayers << layer;
+
   const QPointer<QgsAiBackgroundTask> taskGuard( task );
   task->armUserCancel();
   QgsApplication::taskManager()->addTask( task, AI_TASK_PRIORITY );
@@ -273,6 +280,14 @@ QgsAiTaskWaitResult qgsAiRunTaskWithEventLoop( QgsAiBackgroundTask *task, const 
     result.canceled = true;
     result.abandoned = true;
     result.error = u"Strata is closing; the background task was stopped."_s;
+    return result;
+  }
+
+  const bool layerRemoved = std::any_of( dependentLayers.cbegin(), dependentLayers.cend(), []( const QPointer<QgsMapLayer> &layer ) { return layer.isNull(); } );
+  if ( layerRemoved && !registration->canceledByUser )
+  {
+    result.layerRemoved = true;
+    result.error = u"A layer used by the task was removed while it was running."_s;
     return result;
   }
 

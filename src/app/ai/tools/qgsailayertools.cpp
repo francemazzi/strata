@@ -1193,6 +1193,12 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
       project->removeMapLayer( addedGuard->id() );
     return QgsAiToolResult::canceledResult( u"Adding the layer was canceled."_s );
   }
+  if ( !addedGuard )
+  {
+    // Removed by the user while its values were checked: the checks above describe a layer that is gone.
+    rollbackStore().remove( token );
+    return QgsAiToolResult::error( u"The added layer was removed while it was being checked."_s );
+  }
   output.insert( u"quality_checks"_s, qualityChecks );
   return QgsAiToolResult::ok( output );
 }
@@ -1358,6 +1364,12 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     if ( addedGuard )
       project->removeMapLayer( addedGuard->id() );
     return QgsAiToolResult::canceledResult( u"Adding the layer was canceled."_s );
+  }
+  if ( !addedGuard )
+  {
+    // Removed by the user while its values were checked: the checks above describe a layer that is gone.
+    rollbackStore().remove( token );
+    return QgsAiToolResult::error( u"The added layer was removed while it was being checked."_s );
   }
   output.insert( u"quality_checks"_s, qualityChecks );
   return QgsAiToolResult::ok( output );
