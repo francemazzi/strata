@@ -20,12 +20,14 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "qgsaiembeddingclient.h"
 #include "qgsaiindexingthrottle.h"
 #include "qgsapplication.h"
+#include "qgsfeedback.h"
 #include "qgssettings.h"
 
 #include <QString>
@@ -40,12 +42,14 @@
 #include <QByteArray>
 #include <QChar>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
 #include <QMutexLocker>
 #include <QObject>
+#include <QScopeGuard>
 #include <QThread>
 
 using namespace Qt::StringLiterals;
@@ -480,8 +484,12 @@ bool QgsAiE5EmbeddingProvider::fileMatchesSha256( const QString &path, const QSt
 
 bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 {
-  QMutexLocker locker( &mRuntimeMutex );
+  const QMutexLocker locker( &mRuntimeMutex );
+  return ensureRuntimeLocked( errorMessage );
+}
 
+bool QgsAiE5EmbeddingProvider::ensureRuntimeLocked( QString *errorMessage ) const
+{
 #ifndef HAVE_AI_E5_EMBEDDINGS
   mRuntimeError = u"Local multilingual E5 embedding support was not compiled because ONNX Runtime and/or SentencePiece were not found."_s;
   mRuntimeLoadAttempted = true;
@@ -615,6 +623,52 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 #endif
 }
 
+void QgsAiE5EmbeddingProvider::releaseIdleResources( qint64 idleMs )
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  std::unique_ptr<Runtime> released;
+  // Busy embedding: not idle.
+  if ( !mRuntimeMutex.tryLock() )
+    return;
+  if ( mRuntime && QDateTime::currentMSecsSinceEpoch() - mLastUseMs.load() >= idleMs )
+  {
+    released = std::move( mRuntime );
+    mRuntimeReady = false;
+    mRuntimeLoadAttempted = false;
+  }
+  mRuntimeMutex.unlock();
+  // The session and its memory go outside the lock.
+  released.reset();
+#else
+  Q_UNUSED( idleMs )
+#endif
+}
+
+QList<QList<int>> QgsAiE5EmbeddingProvider::planBatches( const QVector<int> &tokenCounts, int maxBatch, int tokenBudget )
+{
+  QVector<int> order( tokenCounts.size() );
+  std::iota( order.begin(), order.end(), 0 );
+  std::stable_sort( order.begin(), order.end(), [&tokenCounts]( int a, int b ) { return tokenCounts.at( a ) < tokenCounts.at( b ); } );
+
+  const int limit = std::max( 1, maxBatch );
+  QList<QList<int>> batches;
+  QList<int> current;
+  for ( const int index : std::as_const( order ) )
+  {
+    // Sorted by length: this text is the longest of the batch, and every text is padded to it.
+    const int length = tokenCounts.at( index );
+    if ( !current.isEmpty() && ( current.size() >= limit || ( current.size() + 1 ) * length > tokenBudget ) )
+    {
+      batches.append( current );
+      current.clear();
+    }
+    current.append( index );
+  }
+  if ( !current.isEmpty() )
+    batches.append( current );
+  return batches;
+}
+
 void QgsAiE5EmbeddingProvider::setLoadFailure( const QString &error ) const
 {
   const QMutexLocker locker( &mLoadFailureMutex );
@@ -662,46 +716,64 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
   if ( texts.isEmpty() )
     return true;
 
-  if ( !ensureRuntime( errorMessage ) )
-    return false;
-
 #ifndef HAVE_AI_E5_EMBEDDINGS
   Q_UNUSED( role )
   Q_UNUSED( options )
+  ensureRuntime( errorMessage );
   return false;
 #else
+  // One lock for loading and running, so releaseIdleResources() cannot unload in between.
   QMutexLocker locker( &mRuntimeMutex );
-  const int requestedBatch = options.maxBatch > 0 ? options.maxBatch : 1;
-  const int batchLimit = std::max( 1, requestedBatch );
-  const int textCount = static_cast<int>( texts.size() );
-  out.reserve( texts.size() );
+  if ( !ensureRuntimeLocked( errorMessage ) )
+    return false;
+  const auto markUsed = qScopeGuard( [this]() { mLastUseMs = QDateTime::currentMSecsSinceEpoch(); } );
+
+  // Every text is tokenized first, so that batches group similar lengths within a token budget:
+  // short chunks are not padded to the longest one, and the memory peak stays bounded.
+  QVector<QVector<qint64>> allTokenIds;
+  QVector<int> tokenCounts;
+  allTokenIds.reserve( texts.size() );
+  tokenCounts.reserve( texts.size() );
+  for ( const QString &text : texts )
+  {
+    std::vector<int> pieceIds;
+    const QString formatted = formatInputForRole( text, role );
+    const auto encodeStatus = mRuntime->tokenizer->Encode( formatted.toStdString(), &pieceIds );
+    if ( !encodeStatus.ok() )
+    {
+      if ( errorMessage )
+        *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings."_s;
+      return false;
+    }
+
+    QVector<int> qPieceIds;
+    qPieceIds.reserve( static_cast<int>( pieceIds.size() ) );
+    for ( const int pieceId : pieceIds )
+      qPieceIds.append( pieceId );
+    allTokenIds.append( tokenIdsWithSpecials( qPieceIds, E5_MAX_SEQUENCE_LENGTH ) );
+    tokenCounts.append( static_cast<int>( allTokenIds.constLast().size() ) );
+  }
+  const int batchLimit = std::max( 1, options.maxBatch > 0 ? options.maxBatch : 1 );
+  const QList<QList<int>> batches = planBatches( tokenCounts, batchLimit );
+  QVector<QVector<float>> results( texts.size() );
 
   Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu( OrtArenaAllocator, OrtMemTypeDefault );
 
-  for ( int start = 0; start < textCount; start += batchLimit )
+  for ( const QList<int> &batch : batches )
   {
-    const int batchSize = std::min( batchLimit, textCount - start );
+    if ( options.feedback && options.feedback->isCanceled() )
+    {
+      if ( errorMessage )
+        *errorMessage = u"Embedding canceled."_s;
+      return false;
+    }
+    const int batchSize = static_cast<int>( batch.size() );
     QVector<QVector<qint64>> batchTokenIds;
     batchTokenIds.reserve( batchSize );
     int sequenceLength = 0;
-
-    for ( int i = 0; i < batchSize; ++i )
+    for ( const int index : batch )
     {
-      std::vector<int> pieceIds;
-      const QString formatted = formatInputForRole( texts.at( start + i ), role );
-      const auto encodeStatus = mRuntime->tokenizer->Encode( formatted.toStdString(), &pieceIds );
-      if ( !encodeStatus.ok() )
-      {
-        if ( errorMessage )
-          *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings."_s;
-        return false;
-      }
-
-      QVector<int> qPieceIds;
-      qPieceIds.reserve( static_cast<int>( pieceIds.size() ) );
-      for ( const int pieceId : pieceIds )
-        qPieceIds.append( pieceId );
-      batchTokenIds.append( tokenIdsWithSpecials( qPieceIds, E5_MAX_SEQUENCE_LENGTH ) );
+      batchTokenIds.append( allTokenIds.at( index ) );
       sequenceLength = std::max( sequenceLength, static_cast<int>( batchTokenIds.constLast().size() ) );
     }
 
@@ -793,10 +865,13 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
       for ( int col = 0; col < outputSequenceLength && col < sequenceLength; ++col )
         sampleMask[col] = static_cast<qint64>( attentionMask.at( static_cast<size_t>( row * sequenceLength + col ) ) );
 
-      out.append( meanPoolAndNormalize( sampleStates, sampleMask, hiddenSize ) );
+      results[batch.at( row )] = meanPoolAndNormalize( sampleStates, sampleMask, hiddenSize );
     }
   }
 
+  out.reserve( texts.size() );
+  for ( const QVector<float> &vector : std::as_const( results ) )
+    out.append( vector );
   return out.size() == texts.size();
 #endif
 }

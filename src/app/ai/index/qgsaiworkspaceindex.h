@@ -31,6 +31,7 @@
 #include <QRecursiveMutex>
 #include <QSet>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 
 class QgsAiEmbeddingProvider;
@@ -79,6 +80,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     static constexpr int SCHEMA_VERSION = 4;
     //! Index databases of other workspaces unused for this many days are deleted.
     static constexpr int STALE_DATABASE_DAYS = 30;
+    //! The local model is unloaded after this many seconds without embedding (strata/index/model_idle_unload_s).
+    static constexpr int DEFAULT_MODEL_IDLE_UNLOAD_S = 180;
 
     //! Discriminates between workspace-file chunks and layer-data chunks.
     static constexpr const char *SOURCE_TYPE_FILE = "file";
@@ -301,6 +304,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
 
   private slots:
     void onWorkspaceRootChanged();
+    //! Asks the embedding provider, off the interface thread, to free a model left unused.
+    void releaseIdleEmbeddingModel();
 
   private:
     struct CachedChunk
@@ -385,6 +390,7 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     mutable QMutex mStatusMutex;
     Status mStatus;
     QPointer<QgsTask> mLoadTask;
+    QTimer mIdleReleaseTimer;
     //! Layers waiting to be deleted from each database by flushLayerRemovals().
     QHash<QString, QSet<QString>> mPendingLayerRemovals;
     bool mRemovalScheduled = false;

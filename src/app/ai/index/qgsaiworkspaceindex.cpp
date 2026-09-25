@@ -413,6 +413,24 @@ QgsAiWorkspaceIndex::QgsAiWorkspaceIndex( QgsAiFileContextProvider *contextProvi
     connect( mContextProvider, &QgsAiFileContextProvider::workspaceRootChanged, this, &QgsAiWorkspaceIndex::onWorkspaceRootChanged );
   }
   updateStatusSnapshot();
+
+  // A loaded local model holds about 300 MB: give it back when indexing and search are idle.
+  const int idleSeconds = QgsSettings().value( u"strata/index/model_idle_unload_s"_s, DEFAULT_MODEL_IDLE_UNLOAD_S ).toInt();
+  if ( idleSeconds > 0 )
+  {
+    connect( &mIdleReleaseTimer, &QTimer::timeout, this, &QgsAiWorkspaceIndex::releaseIdleEmbeddingModel );
+    mIdleReleaseTimer.start( std::clamp( idleSeconds * 250, 1000, 30000 ) );
+  }
+}
+
+void QgsAiWorkspaceIndex::releaseIdleEmbeddingModel()
+{
+  const int idleSeconds = QgsSettings().value( u"strata/index/model_idle_unload_s"_s, DEFAULT_MODEL_IDLE_UNLOAD_S ).toInt();
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  if ( idleSeconds <= 0 || !provider )
+    return;
+  // Freeing a model takes a moment: never on the interface thread.
+  indexDatabaseWorkPool()->start( [provider, idleMs = static_cast<qint64>( idleSeconds ) * 1000]() { provider->releaseIdleResources( idleMs ); } );
 }
 
 QgsAiWorkspaceIndex::~QgsAiWorkspaceIndex()

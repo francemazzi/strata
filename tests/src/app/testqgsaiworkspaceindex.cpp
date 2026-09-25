@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <numeric>
 #include <thread>
 #include <utility>
 
@@ -242,6 +243,9 @@ class TestQgsAiWorkspaceIndex : public QObject
     void e5ProviderAvailabilityHonorsEnvironmentModelDir();
     void e5ProviderIntegrationWhenModelDirIsConfigured();
     void e5EmbeddingsDoNotDependOnTheSpeed();
+    void e5BatchesStayWithinTheTokenBudget();
+    void e5ModelIsReleasedWhenIdle();
+    void indexReleasesAnIdleModel();
     void embeddingClientDefaultsToOpenAi();
     void embeddingClientUsesOpenRouterSettings();
     void schemaMigrationDropsOldDb();
@@ -681,6 +685,95 @@ void TestQgsAiWorkspaceIndex::e5EmbeddingsDoNotDependOnTheSpeed()
     for ( int d = 0; d < oneThread.at( i ).size(); ++d )
       QVERIFY( std::abs( oneThread.at( i ).at( d ) - fourThreads.at( i ).at( d ) ) < 1e-4f );
   }
+}
+
+void TestQgsAiWorkspaceIndex::e5BatchesStayWithinTheTokenBudget()
+{
+  const QVector<int> tokens { 512, 10, 20, 512, 300, 15, 512, 40, 512, 512, 512, 512, 512, 60, 8, 700 };
+  const int budget = QgsAiE5EmbeddingProvider::BATCH_TOKEN_BUDGET;
+  const QList<QList<int>> batches = QgsAiE5EmbeddingProvider::planBatches( tokens, 16, budget );
+
+  QList<int> seen;
+  int previousLongest = 0;
+  for ( const QList<int> &batch : batches )
+  {
+    QVERIFY( !batch.isEmpty() );
+    QVERIFY( batch.size() <= 16 );
+    int longest = 0;
+    for ( const int index : batch )
+      longest = std::max( longest, tokens.at( index ) );
+    // Padded to its longest text, a batch stays within the budget (a longer text goes alone).
+    QVERIFY( batch.size() * longest <= budget || batch.size() == 1 );
+    // Shortest first: short texts are not padded to long ones.
+    QVERIFY( longest >= previousLongest );
+    previousLongest = longest;
+    seen.append( batch );
+  }
+  std::sort( seen.begin(), seen.end() );
+  QList<int> all( tokens.size() );
+  std::iota( all.begin(), all.end(), 0 );
+  QCOMPARE( seen, all );
+
+  // Short texts share one batch up to the batch size.
+  QCOMPARE( QgsAiE5EmbeddingProvider::planBatches( QVector<int>( 40, 20 ), 16, budget ).size(), 3 );
+  QVERIFY( QgsAiE5EmbeddingProvider::planBatches( {}, 16, budget ).isEmpty() );
+}
+
+void TestQgsAiWorkspaceIndex::e5ModelIsReleasedWhenIdle()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings were not compiled because ONNX Runtime and/or SentencePiece were not found." );
+  if ( qgetenv( "STRATA_AI_EMBEDDING_MODEL_DIR" ).trimmed().isEmpty() )
+    QSKIP( "STRATA_AI_EMBEDDING_MODEL_DIR is not set; skipping optional E5 ONNX integration test." );
+
+  QgsAiE5EmbeddingProvider provider;
+  QList<QVector<float>> first;
+  QString error;
+  QVERIFY2( provider.embed( { u"strade comunali"_s }, QgsAiEmbeddingRole::Passage, first, &error ), error.toUtf8().constData() );
+  QVERIFY( provider.runtimeLoaded() );
+
+  // Used a moment ago: kept.
+  provider.releaseIdleResources( 60000 );
+  QVERIFY( provider.runtimeLoaded() );
+
+  provider.releaseIdleResources( 0 );
+  QVERIFY( !provider.runtimeLoaded() );
+  QVERIFY( provider.isAvailable( &error ) );
+
+  // Loaded again on demand, with the same result.
+  QList<QVector<float>> second;
+  QVERIFY2( provider.embed( { u"strade comunali"_s }, QgsAiEmbeddingRole::Passage, second, &error ), error.toUtf8().constData() );
+  QVERIFY( provider.runtimeLoaded() );
+  QCOMPARE( second.size(), 1 );
+  for ( int d = 0; d < first.first().size(); ++d )
+    QVERIFY( std::abs( first.first().at( d ) - second.first().at( d ) ) < 1e-5f );
+}
+
+void TestQgsAiWorkspaceIndex::indexReleasesAnIdleModel()
+{
+  class ReleaseCountingProvider : public FakeEmbeddingProvider
+  {
+    public:
+      void releaseIdleResources( qint64 idleMs ) override
+      {
+        lastIdleMs = idleMs;
+        ++releases;
+      }
+      std::atomic_int releases { 0 };
+      std::atomic<qint64> lastIdleMs { 0 };
+  };
+
+  QgsSettings settings;
+  settings.setValue( u"strata/index/model_idle_unload_s"_s, 2 );
+  const auto restore = qScopeGuard( []() { QgsSettings().remove( u"strata/index/model_idle_unload_s"_s ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  ReleaseCountingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QTRY_VERIFY_WITH_TIMEOUT( provider.releases > 0, 5000 );
+  QCOMPARE( provider.lastIdleMs.load(), 2000 );
 }
 
 void TestQgsAiWorkspaceIndex::embeddingClientDefaultsToOpenAi()

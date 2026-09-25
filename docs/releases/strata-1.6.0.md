@@ -53,3 +53,7 @@ the Windows reference machine measurements are still to be done.
   threads run at low priority and wait without spinning, and indexing pauses between
   batches, while the map is being panned or zoomed, and while the computer runs on battery
   (`strata/index/pause_on_battery`). Indexing asked for explicitly runs at full speed.
+- The local model gives its memory back (about 300 MB) after 3 minutes without indexing or
+  search (`strata/index/model_idle_unload_s`), and loads again when needed. Texts are
+  embedded in batches of similar length within a token budget, so short chunks are not
+  padded to the longest one and the memory peak stays lower.

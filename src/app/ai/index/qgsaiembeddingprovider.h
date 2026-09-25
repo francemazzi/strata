@@ -87,6 +87,12 @@ class APP_EXPORT QgsAiEmbeddingProvider
       Q_UNUSED( role )
       return embed( texts, out, errorMessage, options.maxBatch );
     }
+
+    /**
+     * Frees what the provider keeps loaded (a local model) if it has not embedded anything for
+     * \a idleMs. The next embed() loads it again. Never waits: skipped while embedding.
+     */
+    virtual void releaseIdleResources( qint64 idleMs ) { Q_UNUSED( idleMs ) }
 };
 
 /**
@@ -184,10 +190,25 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     //! True once the ONNX session is loaded.
     bool runtimeLoaded() const { return mRuntimeReady; }
 
+    //! Unloads the ONNX session and its roughly 300 MB when unused for \a idleMs.
+    void releaseIdleResources( qint64 idleMs ) override;
+
+    //! Tokens a batch may hold, padding included: eight texts of the maximum length.
+    static constexpr int BATCH_TOKEN_BUDGET = 4096;
+
+    /**
+     * Groups texts of \a tokenCounts tokens into batches of at most \a maxBatch texts, shortest
+     * first, so that a batch padded to its longest text stays within \a tokenBudget tokens
+     * (a single longer text makes its own batch). Returns the indexes of each batch.
+     */
+    static QList<QList<int>> planBatches( const QVector<int> &tokenCounts, int maxBatch, int tokenBudget = BATCH_TOKEN_BUDGET );
+
   private:
     struct Runtime;
 
     bool ensureRuntime( QString *errorMessage = nullptr ) const;
+    //! ensureRuntime() with mRuntimeMutex already held.
+    bool ensureRuntimeLocked( QString *errorMessage ) const;
     //! Records a load failure so isAvailable() reports it without touching the runtime lock.
     void setLoadFailure( const QString &error ) const;
 
@@ -198,6 +219,8 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     //! Read by isAvailable() without mRuntimeMutex, which embed() holds for a whole batch.
     mutable std::atomic_bool mRuntimeReady { false };
     mutable std::atomic_bool mRuntimeFailed { false };
+    //! When the runtime last embedded something, in milliseconds since the epoch.
+    std::atomic<qint64> mLastUseMs { 0 };
     mutable QMutex mLoadFailureMutex;
     mutable QString mLoadFailure;
 };
