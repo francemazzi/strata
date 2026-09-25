@@ -185,6 +185,7 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
     void addLayerFromFileLoadsInBackgroundAndStops();
+    void processingOutputsCanBeUndone();
     void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
     void addLayerFromFileContextQualityCheckFindsInvalidValue();
     void addLayerFromFileStopDuringQualityCheckRemovesLayer();
@@ -1179,6 +1180,39 @@ void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"Unknown Processing algorithm"_s ) || result.errorMessage.contains( u"not available"_s ) );
+}
+
+void TestQgsAiToolRegistry::processingOutputsCanBeUndone()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+  QgsProject project;
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:3857"_s, u"points"_s, u"memory"_s );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project.addMapLayer( points );
+
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:buffer"_s );
+  args.insert( u"parameters"_s, QJsonObject { { u"INPUT"_s, points->id() }, { u"DISTANCE"_s, 100 } } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 2 );
+  const QJsonObject output = result.output.toObject();
+  // "Buffer by 100 m" can be undone from the chat: the output layer leaves the project.
+  QVERIFY( output.value( u"diff"_s ).toObject().value( u"rollback_supported"_s ).toBool() );
+  const QString token = output.value( u"rollback_token"_s ).toString();
+  QVERIFY( !token.isEmpty() );
+  QVERIFY( project.mapLayer( output.value( u"layer_id"_s ).toString() ) );
+
+  const QgsAiToolResult undone = tool.execute( QJsonObject { { u"rollback_token"_s, token } } );
+  QVERIFY2( undone.success, qPrintable( undone.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  QVERIFY( project.mapLayer( points->id() ) );
+  // A token undoes once.
+  QVERIFY( !tool.execute( QJsonObject { { u"rollback_token"_s, token } } ).success );
 }
 
 void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()

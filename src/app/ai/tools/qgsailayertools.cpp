@@ -112,6 +112,7 @@ namespace
   enum class RollbackType
   {
     RemoveLayer,
+    RemoveLoadedLayers,
     RestoreLayerStyle,
     RemoveLayout,
     RestoreLayoutEdit,
@@ -130,6 +131,8 @@ namespace
       int pageCountBefore = 0;
       QString filePath;
       QString description;
+      //! Layers a Processing run loaded into the project.
+      QStringList layerIds;
   };
 
   QHash<QString, RollbackEntry> &rollbackStore()
@@ -955,6 +958,32 @@ namespace
     return QgsAiToolResult::ok( output );
   }
 
+  QgsAiToolResult rollbackLoadedLayers( QgsProject *project, const QString &token )
+  {
+    if ( !rollbackStore().contains( token ) || rollbackStore().value( token ).type != RollbackType::RemoveLoadedLayers )
+      return QgsAiToolResult::error( u"Unknown or expired rollback token."_s );
+    const RollbackEntry entry = rollbackStore().take( token );
+    if ( !project )
+      return QgsAiToolResult::error( u"No active QgsProject available."_s );
+    QStringList removed;
+    for ( const QString &layerId : entry.layerIds )
+    {
+      if ( project->mapLayer( layerId ) )
+      {
+        project->removeMapLayer( layerId );
+        removed << layerId;
+      }
+    }
+    QJsonObject diff;
+    diff.insert( u"summary"_s, u"Removed the %1 output layers of a Processing run from the project."_s.arg( removed.size() ) );
+    diff.insert( u"layer_ids"_s, QJsonArray::fromStringList( removed ) );
+    QJsonObject output;
+    output.insert( u"status"_s, u"rolled_back"_s );
+    output.insert( u"rollback_token"_s, token );
+    output.insert( u"diff"_s, diff );
+    return QgsAiToolResult::ok( output );
+  }
+
   QgsAiToolResult rollbackLayerStyle( QgsProject *project, const QString &token )
   {
     if ( !rollbackStore().contains( token ) )
@@ -1643,6 +1672,7 @@ QJsonObject QgsAiRunProcessingAlgorithmTool::schema() const
   properties.insert( u"parameters"_s, prop( u"object"_s, u"Algorithm parameters as a JSON object. Use dry_run first if unsure. Layer destinations such as OUTPUT or OUTPUT_LINES default to TEMPORARY_OUTPUT and are loaded into the project."_s ) );
   properties.insert( u"configuration"_s, prop( u"object"_s, u"Optional Processing algorithm configuration map."_s ) );
   properties.insert( u"dry_run"_s, prop( u"boolean"_s, u"If true, returns algorithm parameter/output metadata without executing it."_s ) );
+  properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous run. If set, removes the output layers that run loaded into the project (files it wrote stay)."_s ) );
   return schemaObject( properties, QJsonArray { u"algorithm_id"_s } );
 }
 
@@ -1798,6 +1828,10 @@ namespace
 
 QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &args )
 {
+  const QString rollbackToken = args.value( u"rollback_token"_s ).toString().trimmed();
+  if ( !rollbackToken.isEmpty() )
+    return rollbackLoadedLayers( mProject ? mProject : QgsProject::instance(), rollbackToken );
+
   QgsProcessingRegistry *registry = QgsApplication::processingRegistry();
   if ( !registry )
     return QgsAiToolResult::error( availabilityReason() );
@@ -1912,7 +1946,21 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   QJsonObject diff;
   diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
   diff.insert( u"algorithm_id"_s, resolvedAlgorithmId );
-  diff.insert( u"rollback_supported"_s, false );
+  // Undo takes the loaded outputs out of the project; files the algorithm wrote stay on disk.
+  diff.insert( u"rollback_supported"_s, !loadedLayers.isEmpty() );
+  if ( !loadedLayers.isEmpty() )
+  {
+    RollbackEntry rollback;
+    rollback.type = RollbackType::RemoveLoadedLayers;
+    for ( const QJsonValue &layer : loadedLayers )
+      rollback.layerIds << layer.toObject().value( u"id"_s ).toString();
+    rollback.description = u"Remove the output layers loaded by a Processing run."_s;
+    const QString token = storeRollback( rollback );
+    output.insert( u"rollback_token"_s, token );
+    output.insert( u"rollback"_s, rollbackJson( token, u"remove_loaded_layers"_s ) );
+    // "Show on map" goes to the first output.
+    output.insert( u"layer_id"_s, loadedLayers.at( 0 ).toObject().value( u"id"_s ).toString() );
+  }
   output.insert( u"dry_run"_s, false );
   output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
   output.insert( u"loaded_layers"_s, loadedLayers );

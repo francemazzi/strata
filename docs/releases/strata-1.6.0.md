@@ -131,7 +131,8 @@ the Windows reference machine measurements are still to be done.
   user message has "Undo this turn", which undoes every change of that answer, newest first.
   Strata runs the tool's own rollback directly, without asking the model, and tells the
   model in the chat which changes were undone. Changes Strata cannot undo say so on their
-  card.
+  card. A Processing run ("buffer this layer by 100 m") can be undone too: its output layers
+  leave the project, while files it wrote stay on disk.
 - Messages: answers are formatted while they stream instead of only at the end, and the
   chat no longer jumps to the bottom while you read higher up. Every message can be copied,
   and so can code blocks without opening them. A question can be edited or asked again
