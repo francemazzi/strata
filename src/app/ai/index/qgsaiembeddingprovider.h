@@ -93,6 +93,16 @@ class APP_EXPORT QgsAiEmbeddingProvider
      * \a idleMs. The next embed() loads it again. Never waits: skipped while embedding.
      */
     virtual void releaseIdleResources( qint64 idleMs ) { Q_UNUSED( idleMs ) }
+
+    //! Longest input the model reads, in tokens: the rest of a longer text is lost. 0 when there is no practical limit.
+    virtual int maxInputTokens() const { return 0; }
+
+    //! Tokens of \a text for this model, or -1 when unknown. Safe on any thread; never loads the model.
+    virtual int tokenCount( const QString &text ) const
+    {
+      Q_UNUSED( text )
+      return -1;
+    }
 };
 
 /**
@@ -193,6 +203,10 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     //! Unloads the ONNX session and its roughly 300 MB when unused for \a idleMs.
     void releaseIdleResources( qint64 idleMs ) override;
 
+    int maxInputTokens() const override;
+    //! Counts with the model's SentencePiece tokenizer, loaded apart from the model (5 MB).
+    int tokenCount( const QString &text ) const override;
+
     //! Tokens a batch may hold, padding included: eight texts of the maximum length.
     static constexpr int BATCH_TOKEN_BUDGET = 4096;
 
@@ -205,6 +219,7 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
 
   private:
     struct Runtime;
+    struct CountingTokenizer;
 
     bool ensureRuntime( QString *errorMessage = nullptr ) const;
     //! ensureRuntime() with mRuntimeMutex already held.
@@ -221,6 +236,10 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     mutable std::atomic_bool mRuntimeFailed { false };
     //! When the runtime last embedded something, in milliseconds since the epoch.
     std::atomic<qint64> mLastUseMs { 0 };
+    //! Tokenizer for tokenCount(), apart from mRuntime so counting never waits for an embedding batch.
+    mutable QMutex mCountingTokenizerMutex;
+    mutable std::unique_ptr<CountingTokenizer> mCountingTokenizer;
+    mutable bool mCountingTokenizerFailed = false;
     mutable QMutex mLoadFailureMutex;
     mutable QString mLoadFailure;
 };

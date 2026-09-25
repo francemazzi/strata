@@ -87,8 +87,10 @@ class APP_EXPORT QgsAiLayerChunker
     /**
      * Builds the chunks of a prepared layer. Safe on any thread: it only reads the prepared
      * data and its feature source. Returns what was built so far when \a feedback is canceled.
+     * With \a tokenCount, each chunk holds at most \a maxTokens tokens; otherwise chunks are
+     * sized in characters (QgsAiWorkspaceIndex::CHUNK_TARGET_CHARS).
      */
-    static QList<QgsAiWorkspaceIndex::Chunk> chunk( const QgsAiPreparedLayer &prepared, QgsFeedback *feedback = nullptr );
+    static QList<QgsAiWorkspaceIndex::Chunk> chunk( const QgsAiPreparedLayer &prepared, QgsFeedback *feedback = nullptr, const QgsAiWorkspaceIndex::TokenCounter &tokenCount = {}, int maxTokens = 0 );
 
     //! True if \a layer reads its data from a remote service or database.
     static bool isRemoteLayer( const QgsMapLayer *layer );

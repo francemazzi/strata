@@ -24,6 +24,7 @@
 #include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiembeddingprovider.h"
 #include "qgsaifilecontextprovider.h"
+#include "qgsaifilesummarizer.h"
 #include "qgsaiindexingthrottle.h"
 #include "qgsailayerchunker.h"
 #include "qgsapplication.h"
@@ -367,6 +368,17 @@ namespace
       QFile::remove( path + suffix );
   }
 
+  /**
+   * How chunks are sized for \a provider: its token counter and the tokens a chunk may hold, or no
+   * counter when the provider has no input limit or cannot count (chunks are then sized in characters).
+   */
+  std::pair<QgsAiWorkspaceIndex::TokenCounter, int> indexTokenBudget( QgsAiEmbeddingProvider *provider )
+  {
+    if ( !provider || provider->maxInputTokens() <= QgsAiWorkspaceIndex::CHUNK_TOKEN_MARGIN || provider->tokenCount( u"probe"_s ) < 0 )
+      return { {}, 0 };
+    return { [provider]( const QString &text ) { return provider->tokenCount( text ); }, provider->maxInputTokens() - QgsAiWorkspaceIndex::CHUNK_TOKEN_MARGIN };
+  }
+
   //! Serial pool for index database work that must not block the interface thread.
   QThreadPool *indexDatabaseWorkPool()
   {
@@ -628,6 +640,71 @@ QStringList QgsAiWorkspaceIndex::chunkText( const QString &content )
       chunks.append( slice );
     pos = end;
   }
+  return chunks;
+}
+
+QString QgsAiWorkspaceIndex::truncateToTokens( const QString &text, const TokenCounter &tokenCount, int maxTokens )
+{
+  if ( !tokenCount || maxTokens <= 0 || tokenCount( text ) <= maxTokens )
+    return text;
+  // Binary search on the length: tokens grow with characters.
+  int low = 0;
+  int high = static_cast<int>( text.size() );
+  while ( low < high )
+  {
+    const int middle = ( low + high + 1 ) / 2;
+    if ( tokenCount( text.left( middle ) ) <= maxTokens )
+      low = middle;
+    else
+      high = middle - 1;
+  }
+  return text.left( low );
+}
+
+QStringList QgsAiWorkspaceIndex::chunkTextByTokens( const QString &content, const TokenCounter &tokenCount, int maxTokens )
+{
+  if ( !tokenCount || maxTokens <= 0 )
+    return chunkText( content );
+
+  QStringList chunks;
+  QString current;
+  int currentTokens = 0;
+  const auto flush = [&]() {
+    const QString chunk = current.trimmed();
+    if ( !chunk.isEmpty() )
+      chunks.append( chunk );
+    current.clear();
+    currentTokens = 0;
+  };
+
+  const QStringList lines = content.split( '\n' );
+  for ( const QString &line : lines )
+  {
+    const int count = tokenCount( line );
+    const int lineTokens = ( count < 0 ? static_cast<int>( line.size() ) : count ) + 1;
+    if ( lineTokens > maxTokens )
+    {
+      // A line longer than a chunk becomes pieces of its own.
+      flush();
+      QString rest = line;
+      while ( !rest.trimmed().isEmpty() )
+      {
+        QString piece = truncateToTokens( rest, tokenCount, maxTokens - 1 );
+        if ( piece.isEmpty() )
+          piece = rest.left( 1 );
+        chunks.append( piece.trimmed() );
+        rest = rest.mid( piece.size() );
+      }
+      continue;
+    }
+    if ( currentTokens + lineTokens > maxTokens )
+      flush();
+    current += line;
+    current += '\n';
+    currentTokens += lineTokens;
+  }
+  flush();
+  chunks.removeAll( QString() );
   return chunks;
 }
 
@@ -1381,9 +1458,14 @@ bool QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( const QString &workspaceRoo
   const int cap = maxFiles > 0 ? maxFiles : DEFAULT_MAX_FILES;
   for ( const QgsAiFileContextProvider::WorkspaceFile &file : scan.files )
   {
-    if ( !isTextFile( file.relativePath ) || file.size > MAX_FILE_BYTES )
+    if ( !isTextFile( file.relativePath ) )
       continue;
-    snapshot.append( { file.relativePath, file.absolutePath, file.lastModifiedMs } );
+    // A large table is still worth a summary of its first rows; other large files are skipped.
+    const QString suffix = QFileInfo( file.relativePath ).suffix().toLower();
+    const bool table = suffix == "csv"_L1 || suffix == "tsv"_L1;
+    if ( file.size > ( table ? MAX_SUMMARIZED_FILE_BYTES : MAX_FILE_BYTES ) )
+      continue;
+    snapshot.append( { file.relativePath, file.absolutePath, file.lastModifiedMs, file.size } );
     if ( snapshot.size() >= cap )
       break;
   }
@@ -1440,6 +1522,8 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
       feedback->setProgress( percent );
   };
 
+  const auto [tokenCounter, chunkTokens] = indexTokenBudget( provider.get() );
+
   // Only files that changed since they were indexed are read and written again.
   QList<CachedChunk> built;
   QList<CachedChunk> unchangedChunks;
@@ -1475,7 +1559,9 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
       if ( fileText.isEmpty() )
         continue;
 
-      const QStringList chunks = chunkText( fileText );
+      // Structured files are indexed from a summary, chunks are sized for the model's input.
+      const QString summary = QgsAiFileSummarizer::summarize( file.relativePath, fileText, file.size > MAX_FILE_BYTES );
+      const QStringList chunks = chunkTextByTokens( summary.isEmpty() ? fileText : summary, tokenCounter, chunkTokens );
       for ( int ci = 0; ci < chunks.size(); ++ci )
       {
         CachedChunk c;
@@ -1733,14 +1819,14 @@ bool QgsAiWorkspaceIndex::createWorkspaceLayerSnapshotForLayer( const QString &l
   return true;
 }
 
-bool QgsAiWorkspaceIndex::materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback )
+bool QgsAiWorkspaceIndex::materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback, const TokenCounter &tokenCount, int maxTokens )
 {
   for ( const std::shared_ptr<const QgsAiPreparedLayer> &prepared : std::as_const( snapshot.preparedLayers ) )
   {
     if ( feedback && feedback->isCanceled() )
       return false;
     if ( prepared )
-      snapshot.chunks.append( QgsAiLayerChunker::chunk( *prepared, feedback ) );
+      snapshot.chunks.append( QgsAiLayerChunker::chunk( *prepared, feedback, tokenCount, maxTokens ) );
   }
   snapshot.preparedLayers.clear();
   return !( feedback && feedback->isCanceled() );
@@ -1826,7 +1912,8 @@ bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &pr
   if ( !snapshot.preparedLayers.isEmpty() )
   {
     const QgsAiPerfScope chunkPerf( u"index_task"_s, u"read_layer"_s );
-    if ( !materializeLayerSnapshot( snapshot, feedback ) )
+    const auto [tokenCounter, chunkTokens] = indexTokenBudget( provider.get() );
+    if ( !materializeLayerSnapshot( snapshot, feedback, tokenCounter, chunkTokens ) )
     {
       if ( errorMessage )
         *errorMessage = indexCanceledMessage();

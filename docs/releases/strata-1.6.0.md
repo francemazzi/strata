@@ -57,3 +57,9 @@ the Windows reference machine measurements are still to be done.
   search (`strata/index/model_idle_unload_s`), and loads again when needed. Texts are
   embedded in batches of similar length within a token budget, so short chunks are not
   padded to the longest one and the memory peak stays lower.
+- Chunks fit the local model: they are sized with its own tokenizer (at most 450 of its 512
+  tokens) instead of 1200 characters, which cut numeric CSV and project XML in half. CSV,
+  TSV, GeoJSON, QGIS project and XML files are indexed from a summary (columns and types,
+  row count and sample rows; features, geometry types and extent; project layers, CRS and
+  layouts, without credentials) instead of their raw text; CSV files larger than 256 KB are
+  summarized from their start instead of skipped. The index is rebuilt once after updating.

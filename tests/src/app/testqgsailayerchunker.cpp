@@ -42,6 +42,7 @@ class TestQgsAiLayerChunker : public QObject
     void rasterMetadataSkipsBandStatistics();
     void preparedLayerChunksAfterLayerIsGone();
     void remoteLayersAreIndexedFromMetadata();
+    void chunksFitATokenBudget();
 };
 
 void TestQgsAiLayerChunker::initTestCase()
@@ -204,4 +205,26 @@ void TestQgsAiLayerChunker::remoteLayersAreIndexedFromMetadata()
 }
 
 QGSTEST_MAIN( TestQgsAiLayerChunker )
+void TestQgsAiLayerChunker::chunksFitATokenBudget()
+{
+  auto layer = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326&field=name:string&field=value:double"_s, u"points"_s, u"memory"_s );
+  QgsFeatureList features;
+  for ( int i = 0; i < 120; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, u"feature %1"_s.arg( i ) );
+    feature.setAttribute( 1, 1234.5678 * i );
+    feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 9 + i * 0.001, 45 + i * 0.001 ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+
+  // One token per character keeps the arithmetic visible.
+  const QgsAiWorkspaceIndex::TokenCounter perCharacter = []( const QString &text ) { return static_cast<int>( text.size() ); };
+  const QList<QgsAiWorkspaceIndex::Chunk> chunks = QgsAiLayerChunker::chunk( QgsAiLayerChunker::prepare( layer.get() ), nullptr, perCharacter, 600 );
+  QVERIFY( chunks.size() > 3 );
+  for ( const QgsAiWorkspaceIndex::Chunk &chunk : chunks )
+    QVERIFY2( chunk.text.size() <= 600, QString::number( chunk.text.size() ).toUtf8().constData() );
+}
+
 #include "testqgsailayerchunker.moc"

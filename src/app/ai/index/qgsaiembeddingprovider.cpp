@@ -258,6 +258,16 @@ struct QgsAiE5EmbeddingProvider::Runtime
 {};
 #endif
 
+#ifdef HAVE_AI_E5_EMBEDDINGS
+struct QgsAiE5EmbeddingProvider::CountingTokenizer
+{
+    sentencepiece::SentencePieceProcessor processor;
+};
+#else
+struct QgsAiE5EmbeddingProvider::CountingTokenizer
+{};
+#endif
+
 QgsAiE5EmbeddingProvider::QgsAiE5EmbeddingProvider() = default;
 
 QgsAiE5EmbeddingProvider::~QgsAiE5EmbeddingProvider() = default;
@@ -641,6 +651,44 @@ void QgsAiE5EmbeddingProvider::releaseIdleResources( qint64 idleMs )
   released.reset();
 #else
   Q_UNUSED( idleMs )
+#endif
+}
+
+int QgsAiE5EmbeddingProvider::maxInputTokens() const
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  return E5_MAX_SEQUENCE_LENGTH;
+#else
+  return 0;
+#endif
+}
+
+int QgsAiE5EmbeddingProvider::tokenCount( const QString &text ) const
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  const QMutexLocker locker( &mCountingTokenizerMutex );
+  if ( !mCountingTokenizer )
+  {
+    if ( mCountingTokenizerFailed )
+      return -1;
+    const QString modelDir = activeModelDirectory();
+    const QString path = tokenizerPath( modelDir );
+    // Same rule as the model: a damaged tokenizer must never reach SentencePiece.
+    auto tokenizer = std::make_unique<CountingTokenizer>();
+    if ( !modelFilesAvailable( modelDir ) || !fileMatchesSha256( path, QString::fromLatin1( E5_SENTENCEPIECE_SHA256 ) ) || !tokenizer->processor.Load( QFile::encodeName( path ).toStdString() ).ok() )
+    {
+      mCountingTokenizerFailed = true;
+      return -1;
+    }
+    mCountingTokenizer = std::move( tokenizer );
+  }
+  std::vector<int> pieceIds;
+  if ( !mCountingTokenizer->processor.Encode( text.toStdString(), &pieceIds ).ok() )
+    return -1;
+  return static_cast<int>( pieceIds.size() );
+#else
+  Q_UNUSED( text )
+  return -1;
 #endif
 }
 

@@ -17,6 +17,7 @@
 #define QGSAIWORKSPACEINDEX_H
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -76,8 +77,16 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     static constexpr int SEARCH_LOCK_TIMEOUT_MS = 2000;
     //! Time budget of a workspace file scan.
     static constexpr int FILE_SCAN_TIME_BUDGET_MS = 5000;
-    //! Bumped when the on-disk SQLite schema changes; older DBs are dropped on first load.
-    static constexpr int SCHEMA_VERSION = 4;
+
+    /**
+     * Bumped when the on-disk SQLite schema or the chunk text changes; older DBs are dropped on first load.
+     * 5: chunks sized in tokens, structured files summarized.
+     */
+    static constexpr int SCHEMA_VERSION = 5;
+    //! Tokens kept free below the model's input limit for the "passage: " prefix and special tokens.
+    static constexpr int CHUNK_TOKEN_MARGIN = 62;
+    //! Tables (CSV, TSV) larger than MAX_FILE_BYTES are indexed from a summary of their start, up to this size.
+    static constexpr qint64 MAX_SUMMARIZED_FILE_BYTES = 512LL * 1024 * 1024;
     //! Index databases of other workspaces unused for this many days are deleted.
     static constexpr int STALE_DATABASE_DAYS = 30;
     //! The local model is unloaded after this many seconds without embedding (strata/index/model_idle_unload_s).
@@ -141,7 +150,20 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
         QString relativePath;
         QString absolutePath;
         qint64 sourceMTime = 0;
+        qint64 size = 0;
     };
+
+    //! Counts the tokens of a text for the embedding model, or returns -1 when it cannot.
+    using TokenCounter = std::function<int( const QString &text )>;
+
+    /**
+     * Splits \a content into chunks of at most \a maxTokens tokens, at line ends where possible.
+     * A line longer than that is cut into pieces.
+     */
+    static QStringList chunkTextByTokens( const QString &content, const TokenCounter &tokenCount, int maxTokens );
+
+    //! The longest start of \a text within \a maxTokens tokens.
+    static QString truncateToTokens( const QString &text, const TokenCounter &tokenCount, int maxTokens );
 
     struct WorkspaceLayerSnapshot
     {
@@ -204,8 +226,11 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     //! Prepares one layer on the calling (interface) thread. Cheap.
     bool createWorkspaceLayerSnapshotForLayer( const QString &layerId, WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr ) const;
 
-    //! Reads the prepared layers of \a snapshot into chunks. Safe on any thread. Returns false if canceled.
-    static bool materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback = nullptr );
+    /**
+     * Reads the prepared layers of \a snapshot into chunks, of at most \a maxTokens tokens when
+     * \a tokenCount is set. Safe on any thread. Returns false if canceled.
+     */
+    static bool materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback = nullptr, const TokenCounter &tokenCount = {}, int maxTokens = 0 );
 
     //! Chunks (if still needed), embeds and persists a prepared layer snapshot. Meant for a worker thread.
     virtual bool reindexLayerSnapshot( const WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );

@@ -292,15 +292,16 @@ QgsAiPreparedLayer QgsAiLayerChunker::prepareUnfingerprinted( QgsMapLayer *layer
   return prepared;
 }
 
-QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedLayer &prepared, QgsFeedback *feedback )
+QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedLayer &prepared, QgsFeedback *feedback, const QgsAiWorkspaceIndex::TokenCounter &tokenCount, int maxTokens )
 {
   QList<QgsAiWorkspaceIndex::Chunk> chunks;
   if ( prepared.layerId.isEmpty() )
     return chunks;
 
+  const bool byTokens = tokenCount && maxTokens > 0;
   if ( !prepared.metadataText.isEmpty() || !prepared.source )
   {
-    chunks.append( layerChunk( prepared, 0, prepared.metadataText ) );
+    chunks.append( layerChunk( prepared, 0, byTokens ? QgsAiWorkspaceIndex::truncateToTokens( prepared.metadataText, tokenCount, maxTokens ) : prepared.metadataText ) );
     return chunks;
   }
 
@@ -313,7 +314,13 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedL
                            .arg( MAX_VECTOR_CHUNKS )
                            .arg( extentText, fieldsSummary( prepared.fields ) );
 
+  const auto countTokens = [&tokenCount]( const QString &text ) {
+    const int count = tokenCount( text );
+    return count < 0 ? static_cast<int>( text.size() ) : count;
+  };
+  const int headerTokens = byTokens ? countTokens( header ) : 0;
   QString currentText = header;
+  int currentTokens = headerTokens;
   QByteArray currentWkts;
   qint64 firstFid = -1;
   qint64 lastFid = -1;
@@ -332,6 +339,7 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedL
     chunks.append( c );
 
     currentText = header;
+    currentTokens = headerTokens;
     currentWkts.clear();
     firstFid = -1;
     lastFid = -1;
@@ -349,11 +357,19 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedL
     if ( feedback && feedback->isCanceled() )
       return chunks;
 
-    const QString line = serializeFeatureLine( feature, prepared.fields, prepared.geometryType );
+    QString line = serializeFeatureLine( feature, prepared.fields, prepared.geometryType );
+    int lineTokens = 0;
+    if ( byTokens )
+    {
+      // A feature with many attributes may not fit a chunk even alone: keep its start.
+      line = QgsAiWorkspaceIndex::truncateToTokens( line, tokenCount, std::max( 1, maxTokens - headerTokens - 1 ) );
+      lineTokens = countTokens( line ) + 1;
+    }
 
     // Flush before adding if appending would exceed the target *and* the chunk
     // already has at least one feature (avoid empty/header-only chunks).
-    if ( firstFid >= 0 && currentText.size() + line.size() + 1 > QgsAiWorkspaceIndex::CHUNK_TARGET_CHARS )
+    const bool full = byTokens ? currentTokens + lineTokens > maxTokens : currentText.size() + line.size() + 1 > QgsAiWorkspaceIndex::CHUNK_TARGET_CHARS;
+    if ( firstFid >= 0 && full )
     {
       flush();
       if ( chunks.size() >= MAX_VECTOR_CHUNKS )
@@ -366,6 +382,7 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedL
 
     currentText += line;
     currentText += '\n';
+    currentTokens += lineTokens;
 
     if ( prepared.includeWkt )
     {
