@@ -34,6 +34,8 @@
 #include <QMutex>
 #include <QObject>
 #include <QPointer>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -204,6 +206,62 @@ bool qgsAiWaitForActiveTasks( int timeoutMs )
   QTimer::singleShot( std::max( 0, timeoutMs ), &loop, &QEventLoop::quit );
   loop.exec( QEventLoop::ExcludeUserInputEvents );
   return manager->countActiveTasks() == 0;
+}
+
+QgsAiProcessResult qgsAiRunProcess( const QString &label, const QString &program, const QStringList &arguments, int timeoutMs, const QStringList &unsetVariables )
+{
+  QgsAiProcessResult result;
+  QProcess process;
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  for ( const QString &variable : unsetVariables )
+    environment.remove( variable );
+  process.setProcessEnvironment( environment );
+
+  QEventLoop loop;
+  QObject::connect( &process, &QProcess::finished, &loop, &QEventLoop::quit );
+  QObject::connect( &process, &QProcess::errorOccurred, &loop, [&loop, &process]( QProcess::ProcessError error ) {
+    if ( error == QProcess::FailedToStart || process.state() == QProcess::NotRunning )
+      loop.quit();
+  } );
+  // Keep the pipes drained: a verbose process must never block on a full pipe.
+  QObject::connect( &process, &QProcess::readyReadStandardOutput, &loop, [&result, &process]() { result.standardOutput += QString::fromUtf8( process.readAllStandardOutput() ); } );
+  QObject::connect( &process, &QProcess::readyReadStandardError, &loop, [&result, &process]() { result.standardError += QString::fromUtf8( process.readAllStandardError() ); } );
+  QTimer timeout;
+  timeout.setSingleShot( true );
+  QObject::connect( &timeout, &QTimer::timeout, &loop, [&result, &loop]() {
+    result.timedOut = true;
+    loop.quit();
+  } );
+
+  process.start( program, arguments );
+  if ( !process.waitForStarted( 10000 ) )
+  {
+    result.error = process.errorString();
+    return result;
+  }
+  result.started = true;
+  {
+    const QgsAiCancelHookScope cancelScope( label, [&loop]() { loop.quit(); } );
+    timeout.start( std::max( 1, timeoutMs ) );
+    if ( process.state() != QProcess::NotRunning )
+      loop.exec();
+    result.canceled = cancelScope.canceledByUser();
+  }
+  if ( process.state() != QProcess::NotRunning )
+  {
+    // Stopped or timed out: end the process, politely first.
+    process.terminate();
+    if ( !process.waitForFinished( 1000 ) )
+    {
+      process.kill();
+      process.waitForFinished( 1000 );
+    }
+  }
+  result.standardOutput += QString::fromUtf8( process.readAllStandardOutput() );
+  result.standardError += QString::fromUtf8( process.readAllStandardError() );
+  if ( !result.canceled && !result.timedOut )
+    result.exitCode = process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
+  return result;
 }
 
 void qgsAiQuitBackgroundWaitLoopsForTesting()

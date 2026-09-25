@@ -57,6 +57,7 @@
 #include "qgsvectorlayerlabeling.h"
 
 #include <QColor>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -176,6 +177,7 @@ class TestQgsAiToolRegistry : public QObject
     void captureMapCanvasCreatesCappedPng();
     void captureMapCanvasStopsWaitingForASlowLayer();
     void captureMapCanvasStopsOnStop();
+    void fileToolsSkipExcludedFoldersAndReportTruncation();
     void runPythonDiagnosticsAreConservative();
     void runPythonFeatureLoopHintDoesNotChangeDiagnosis();
     void setCanvasExtentSetsZoomsAndRollsBack();
@@ -441,6 +443,47 @@ void TestQgsAiToolRegistry::captureMapCanvasStopsOnStop()
   QVERIFY2( clock.elapsed() < 1500, QString::number( clock.elapsed() ).toUtf8().constData() );
   QVERIFY( result.canceled );
   QTest::qWait( 300 );
+}
+
+void TestQgsAiToolRegistry::fileToolsSkipExcludedFoldersAndReportTruncation()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QDir dir( root.path() );
+  for ( const QString &path : { u"a.txt"_s, u"b.txt"_s, u".git/c.txt"_s, u"sub/node_modules/d.txt"_s, u"sub/e.txt"_s } )
+  {
+    QVERIFY( dir.mkpath( QFileInfo( dir.filePath( path ) ).path() ) );
+    QFile file( dir.filePath( path ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "a needle in the file\n" );
+  }
+  QgsAiFileContextProvider provider( root.path() );
+
+  QgsAiSearchFilesTool search( &provider );
+  QgsAiToolResult result = search.execute( QJsonObject { { u"query"_s, u"needle"_s } } );
+  QVERIFY2( result.success, result.errorMessage.toUtf8().constData() );
+  QJsonObject output = result.output.toObject();
+  QStringList paths;
+  for ( const QJsonValue &match : output.value( u"matches"_s ).toArray() )
+    paths << match.toObject().value( u"path"_s ).toString();
+  paths.sort();
+  QCOMPARE( paths, QStringList( { u"a.txt"_s, u"b.txt"_s, u"sub/e.txt"_s } ) );
+  QVERIFY( !output.value( u"truncated"_s ).toBool() );
+
+  result = search.execute( QJsonObject { { u"query"_s, u"needle"_s }, { u"max_results"_s, 2 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 2 );
+  QVERIFY( output.value( u"truncated"_s ).toBool() );
+
+  QgsAiListFilesTool list( &provider );
+  result = list.execute( QJsonObject { { u"max"_s, 10 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 3 );
+  QVERIFY( !output.value( u"truncated"_s ).toBool() );
+  result = list.execute( QJsonObject { { u"max"_s, 2 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 2 );
+  QVERIFY( output.value( u"truncated"_s ).toBool() );
 }
 
 void TestQgsAiToolRegistry::captureMapCanvasRequiresConsent()

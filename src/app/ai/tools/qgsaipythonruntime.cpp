@@ -18,6 +18,7 @@
 #include "qgsapplication.h"
 
 #include <QDir>
+#include <QString>
 
 using namespace Qt::StringLiterals;
 
@@ -159,6 +160,8 @@ __qgsai_already_available = []
 __qgsai_cached = []
 __qgsai_retryable = True
 __qgsai_error_code = ""
+__qgsai_command = []
+__qgsai_pending = []
 
 try:
     os.makedirs(__qgsai_target_path, exist_ok=True)
@@ -167,10 +170,19 @@ try:
     importlib.invalidate_caches()
 
     with open(__qgsai_args_path, "r", encoding="utf-8") as args_file:
-        __qgsai_packages = json.load(args_file)
+        __qgsai_arguments = json.load(args_file)
+    # A list of specs, or {"packages": [...], "known_python": path, "prepare_only": bool}: with
+    # prepare_only the pip command is returned for Strata to run in the background.
+    if isinstance(__qgsai_arguments, dict):
+        __qgsai_packages = __qgsai_arguments.get("packages", [])
+        __qgsai_known_python = __qgsai_arguments.get("known_python", "")
+        __qgsai_prepare_only = bool(__qgsai_arguments.get("prepare_only", False))
+    else:
+        __qgsai_packages = __qgsai_arguments
+        __qgsai_known_python = ""
+        __qgsai_prepare_only = False
 
     __qgsai_cache = __qgsai_read_cache()
-    __qgsai_pending = []
     for __qgsai_spec in __qgsai_packages:
         __qgsai_name = __qgsai_package_name(__qgsai_spec)
         __qgsai_available = __qgsai_module_available(__qgsai_name)
@@ -190,7 +202,10 @@ try:
         __qgsai_returncode = 0
         __qgsai_write_cache(__qgsai_cache)
     else:
-        __qgsai_python_used, __qgsai_python_candidates = __qgsai_bundled_python()
+        if __qgsai_known_python and os.path.isfile(__qgsai_known_python):
+            __qgsai_python_used, __qgsai_python_candidates = __qgsai_known_python, [__qgsai_known_python]
+        else:
+            __qgsai_python_used, __qgsai_python_candidates = __qgsai_bundled_python()
         if not __qgsai_python_used:
             __qgsai_error_code = "bundled_python_unavailable"
             __qgsai_retryable = False
@@ -209,6 +224,9 @@ try:
         __qgsai_environment = os.environ.copy()
         __qgsai_environment.pop("PIP_BREAK_SYSTEM_PACKAGES", None)
         __qgsai_environment.pop("PYTHONUSERBASE", None)
+    if __qgsai_pending and __qgsai_prepare_only:
+        __qgsai_write_cache(__qgsai_cache)
+    elif __qgsai_pending:
         __qgsai_process = subprocess.run(
             __qgsai_command,
             capture_output=True,
@@ -248,6 +266,8 @@ with open(__qgsai_out_path, "w", encoding="utf-8") as output_file:
         "installed": __qgsai_installed,
         "already_available": __qgsai_already_available,
         "cached": __qgsai_cached,
+        "pending": __qgsai_pending,
+        "command": __qgsai_command if __qgsai_prepare_only else [],
     }, output_file)
 )PYTHON";
 } // namespace

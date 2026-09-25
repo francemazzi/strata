@@ -83,3 +83,8 @@ the Windows reference machine measurements are still to be done.
 - `capture_map_canvas` draws in the background and returns after 20 seconds at most, with
   what was drawn so far and a warning naming the slow layers; Stop ends the drawing. It used
   to wait for every layer, so an unresponsive WMS froze Strata.
+- `search_files` and `list_files` walk the workspace in the background with the same
+  exclusions as indexing and say when the result was cut; `list_project_layers` counts the
+  features of local layers only ("unknown" for remote ones, which would otherwise query the
+  server). `install_python_package` runs pip as a separate process that Stop ends, checks
+  the interpreter once per session, and makes new packages importable at once.

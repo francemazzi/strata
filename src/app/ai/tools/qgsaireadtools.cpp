@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ai/index/qgsailayerchunker.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
@@ -69,6 +70,10 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  //! Files search_files looks into at most, and how long the folder walk of a search may take.
+  constexpr int READ_TOOLS_SEARCH_MAX_CANDIDATES = 5000;
+  constexpr int READ_TOOLS_SCAN_BUDGET_MS = 10000;
+
   QJsonObject readToolsExtentJson( const QgsRectangle &extent )
   {
     QJsonObject e;
@@ -439,41 +444,66 @@ QgsAiToolResult QgsAiSearchFilesTool::execute( const QJsonObject &args )
   const int requestedMax = args.value( u"max_results"_s ).toInt( 50 );
   const int maxResults = std::clamp( requestedMax, 1, 200 );
 
-  // Walk all workspace candidates, filter by glob substring on relative path, then grep each file.
-  // workspaceFileCandidates already excludes noise dirs (.git, build, external, …).
-  const QStringList allFiles = mContextProvider->workspaceFileCandidates( glob, /*maxResults=*/5000 );
-
-  QJsonArray matches;
-  int collected = 0;
-  for ( const QString &relative : allFiles )
+  // The walk and the reading run in the background, with Stop: a large or network workspace
+  // never freezes Strata. Excluded folders (.git, build, …) are pruned during the walk.
+  struct SearchJob
   {
-    if ( collected >= maxResults )
-      break;
-    const QStringList hits = mContextProvider->searchInFile( relative, query, maxResults - collected );
-    for ( const QString &hit : hits )
+      QJsonArray matches;
+      int collected = 0;
+      bool truncated = false;
+  };
+  auto job = std::make_shared<SearchJob>();
+  const QString workspaceRoot = mContextProvider->workspaceRoot();
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Searching workspace files"_s, [job, workspaceRoot, glob, query, maxResults]( QgsFeedback *feedback ) {
+    QgsAiFileContextProvider provider( workspaceRoot );
+    QgsAiFileContextProvider::WorkspaceScanOptions options;
+    options.maxResults = READ_TOOLS_SEARCH_MAX_CANDIDATES;
+    options.query = glob;
+    options.timeBudgetMs = READ_TOOLS_SCAN_BUDGET_MS;
+    const QgsAiFileContextProvider::WorkspaceScanResult scan = QgsAiFileContextProvider::scanWorkspace( workspaceRoot, options, feedback );
+    QStringList files;
+    for ( const QgsAiFileContextProvider::WorkspaceFile &file : scan.files )
+      files << file.relativePath;
+    files.sort( Qt::CaseInsensitive );
+    // Stopped early: some files were never looked at.
+    job->truncated = scan.truncated;
+    for ( int i = 0; i < files.size(); ++i )
     {
-      // searchInFile returns "<line>:<text>" — split once.
-      const int sep = hit.indexOf( ':' );
-      if ( sep <= 0 )
-        continue;
-      const int lineNo = hit.left( sep ).toInt();
-      const QString text = hit.mid( sep + 1 );
-      QJsonObject match;
-      match.insert( u"path"_s, relative );
-      match.insert( u"line"_s, lineNo );
-      match.insert( u"text"_s, text );
-      matches.push_back( match );
-      ++collected;
-      if ( collected >= maxResults )
+      if ( feedback->isCanceled() )
+        return false;
+      feedback->setProgress( 100.0 * i / files.size() );
+      if ( job->collected >= maxResults )
+      {
+        job->truncated = true;
         break;
+      }
+      const QStringList hits = provider.searchInFile( files.at( i ), query, maxResults - job->collected );
+      for ( const QString &hit : hits )
+      {
+        // searchInFile returns "<line>:<text>" — split once.
+        const int sep = hit.indexOf( ':' );
+        if ( sep <= 0 )
+          continue;
+        QJsonObject match;
+        match.insert( u"path"_s, files.at( i ) );
+        match.insert( u"line"_s, hit.left( sep ).toInt() );
+        match.insert( u"text"_s, hit.mid( sep + 1 ) );
+        job->matches.push_back( match );
+        ++job->collected;
+      }
     }
-  }
+    return true;
+  } );
+  if ( wait.abandoned || wait.canceled )
+    return QgsAiToolResult::canceledResult( u"File search was stopped."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"File search failed."_s : wait.error );
 
   QJsonObject output;
   output.insert( u"query"_s, query );
-  output.insert( u"matches"_s, matches );
-  output.insert( u"count"_s, collected );
-  output.insert( u"truncated"_s, collected >= maxResults );
+  output.insert( u"matches"_s, job->matches );
+  output.insert( u"count"_s, job->collected );
+  output.insert( u"truncated"_s, job->truncated );
   return QgsAiToolResult::ok( output );
 }
 
@@ -510,16 +540,39 @@ QgsAiToolResult QgsAiListFilesTool::execute( const QJsonObject &args )
   const int requestedMax = args.value( u"max"_s ).toInt( 200 );
   const int maxResults = std::clamp( requestedMax, 1, 2000 );
 
-  const QStringList files = mContextProvider->workspaceFileCandidates( glob, maxResults );
+  // The walk runs in the background, with Stop.
+  auto scan = std::make_shared<QgsAiFileContextProvider::WorkspaceScanResult>();
+  const QString workspaceRoot = mContextProvider->workspaceRoot();
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Listing workspace files"_s, [scan, workspaceRoot, glob, maxResults]( QgsFeedback *feedback ) {
+    QgsAiFileContextProvider::WorkspaceScanOptions options;
+    // One more than asked: finding it means the list is cut.
+    options.maxResults = maxResults + 1;
+    options.query = glob;
+    options.timeBudgetMs = READ_TOOLS_SCAN_BUDGET_MS;
+    *scan = QgsAiFileContextProvider::scanWorkspace( workspaceRoot, options, feedback );
+    return !feedback->isCanceled();
+  } );
+  if ( wait.abandoned || wait.canceled )
+    return QgsAiToolResult::canceledResult( u"File listing was stopped."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"File listing failed."_s : wait.error );
+
+  QStringList files;
+  for ( const QgsAiFileContextProvider::WorkspaceFile &file : std::as_const( scan->files ) )
+    files << file.relativePath;
+  files.sort( Qt::CaseInsensitive );
+  const bool truncated = scan->truncated || files.size() > maxResults;
+  while ( files.size() > maxResults )
+    files.removeLast();
 
   QJsonArray array;
-  for ( const QString &f : files )
+  for ( const QString &f : std::as_const( files ) )
     array.push_back( f );
 
   QJsonObject output;
   output.insert( u"files"_s, array );
   output.insert( u"count"_s, files.size() );
-  output.insert( u"truncated"_s, files.size() >= maxResults );
+  output.insert( u"truncated"_s, truncated );
   return QgsAiToolResult::ok( output );
 }
 
@@ -555,20 +608,16 @@ QgsAiToolResult QgsAiListProjectLayersTool::execute( const QJsonObject &args )
 
   QJsonArray layers;
   const QMap<QString, QgsMapLayer *> projectLayers = project->mapLayers();
+  QgsLayerTree *root = project->layerTreeRoot();
+  const QList<QgsMapLayer *> order = root ? root->layerOrder() : QList<QgsMapLayer *>();
   for ( auto it = projectLayers.constBegin(); it != projectLayers.constEnd(); ++it )
   {
     QgsMapLayer *layer = it.value();
     if ( !layer )
       continue;
 
-    QgsLayerTree *root = project->layerTreeRoot();
     QgsLayerTreeLayer *treeNode = root ? root->findLayer( layer->id() ) : nullptr;
-    int renderOrder = -1;
-    if ( root )
-    {
-      const QList<QgsMapLayer *> order = root->layerOrder();
-      renderOrder = order.indexOf( layer );
-    }
+    const int renderOrder = root ? static_cast<int>( order.indexOf( layer ) ) : -1;
 
     QJsonObject entry;
     entry.insert( u"id"_s, layer->id() );
@@ -581,7 +630,12 @@ QgsAiToolResult QgsAiListProjectLayersTool::execute( const QJsonObject &args )
     if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
     {
       entry.insert( u"geometry_type"_s, QgsWkbTypes::geometryDisplayString( vector->geometryType() ) );
-      entry.insert( u"feature_count"_s, static_cast<qint64>( vector->featureCount() ) );
+      // Counting a database table or a web service means a query on this thread: only local
+      // layers, which know their count, report it here.
+      if ( QgsAiLayerChunker::isRemoteLayer( vector ) )
+        entry.insert( u"feature_count"_s, u"unknown (remote layer)"_s );
+      else
+        entry.insert( u"feature_count"_s, static_cast<qint64>( vector->featureCount() ) );
     }
     else if ( QgsRasterLayer *raster = qobject_cast<QgsRasterLayer *>( layer ) )
     {

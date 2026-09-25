@@ -20,6 +20,7 @@
 #include "qgstest.h"
 #include "qgsvectorlayer.h"
 
+#include <QElapsedTimer>
 #include <QPointer>
 #include <QScopeGuard>
 #include <QString>
@@ -91,6 +92,9 @@ class TestQgsAiTaskRunner : public QObject
     void guiThreadExpressionFunction_data();
     void guiThreadExpressionFunction();
     void registeredFunctionNeedsGuiThread();
+    void processRunsWithoutFreezingAndCollectsOutput();
+    void stopEndsAProcess();
+    void processTimeoutEndsIt();
 };
 
 void TestQgsAiTaskRunner::initTestCase()
@@ -422,6 +426,57 @@ void TestQgsAiTaskRunner::guiStallMonitorNamesOverlappingScope()
 
   QVERIFY( hasLine( u"test block elapsedMs="_s, QString() ) );
   QVERIFY( !hasLine( u"test quick"_s, QString() ) );
+}
+
+void TestQgsAiTaskRunner::processRunsWithoutFreezingAndCollectsOutput()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  // The interface keeps turning while the process runs.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 20 );
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 0.4; echo out; echo err 1>&2; exit 3"_s }, 10000 );
+  ticker.stop();
+  QVERIFY( result.started );
+  QVERIFY( !result.canceled );
+  QVERIFY( !result.timedOut );
+  QCOMPARE( result.exitCode, 3 );
+  QCOMPARE( result.standardOutput.trimmed(), u"out"_s );
+  QCOMPARE( result.standardError.trimmed(), u"err"_s );
+  QVERIFY( ticks >= 10 );
+
+  const QgsAiProcessResult missing = qgsAiRunProcess( u"test process"_s, u"/nonexistent/program"_s, {}, 1000 );
+  QVERIFY( !missing.started );
+  QVERIFY( !missing.error.isEmpty() );
+}
+
+void TestQgsAiTaskRunner::stopEndsAProcess()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 30"_s }, 60000 );
+  QVERIFY( result.canceled );
+  QVERIFY2( clock.elapsed() < 2000, QString::number( clock.elapsed() ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::processTimeoutEndsIt()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 30"_s }, 300 );
+  QVERIFY( result.timedOut );
+  QVERIFY( !result.canceled );
+  QVERIFY2( clock.elapsed() < 2500, QString::number( clock.elapsed() ).toUtf8().constData() );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )

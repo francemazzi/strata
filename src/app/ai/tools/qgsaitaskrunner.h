@@ -26,6 +26,7 @@
 #include <QList>
 #include <QMetaObject>
 #include <QString>
+#include <QStringList>
 
 class QgsFeedback;
 class QgsMapLayer;
@@ -176,6 +177,26 @@ APP_EXPORT void qgsAiCancelActiveBackgroundTool();
  * workers may still read project layers, so the project must not be closed before they return.
  */
 APP_EXPORT bool qgsAiWaitForActiveTasks( int timeoutMs );
+
+//! Outcome of qgsAiRunProcess().
+struct APP_EXPORT QgsAiProcessResult
+{
+    bool started = false;
+    bool canceled = false;
+    bool timedOut = false;
+    int exitCode = -1;
+    QString standardOutput;
+    QString standardError;
+    //! Why the process could not start.
+    QString error;
+};
+
+/**
+ * Runs \a program with \a arguments and waits for it with an event loop: the interface stays
+ * responsive, Stop kills the process within a moment, and so does \a timeoutMs. \a unsetVariables
+ * are removed from the environment the process inherits. \a label names the work for Stop.
+ */
+APP_EXPORT QgsAiProcessResult qgsAiRunProcess( const QString &label, const QString &program, const QStringList &arguments, int timeoutMs, const QStringList &unsetVariables = QStringList() );
 
 /**
  * Quits the nested event loops of the background waits in progress, like QCoreApplication::exit()
