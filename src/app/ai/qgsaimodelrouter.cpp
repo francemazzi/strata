@@ -2385,7 +2385,7 @@ void QgsAiModelRouter::onReplyFinished()
   bool success = httpOk && context->midStreamError.isEmpty() && !noCompletion;
   if ( httpOk && noCompletion && context->midStreamError.isEmpty() )
   {
-    context->midStreamError = tr( "The managed model provider closed the stream without text or tool calls. This is often a temporary upstream limit — wait a minute and send the request again." );
+    context->midStreamError = emptyCompletionErrorMessage();
   }
   const bool emptyCompletion = httpOk && noCompletion;
 
@@ -2512,6 +2512,11 @@ void QgsAiModelRouter::onReplyFinished()
   errorMessage = sanitizeErrorText( errorMessage );
 
   finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );
+}
+
+QString QgsAiModelRouter::emptyCompletionErrorMessage()
+{
+  return tr( "The managed model provider closed the stream without text or tool calls. This is often a temporary upstream limit — wait a minute and send the request again." );
 }
 
 QString QgsAiModelRouter::defaultPlanEndpoint()

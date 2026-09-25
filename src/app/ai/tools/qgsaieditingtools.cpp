@@ -15,6 +15,9 @@
 
 #include "qgsaieditingtools.h"
 
+#include <algorithm>
+#include <memory>
+
 #include "qgis.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
@@ -43,8 +46,6 @@
 #include <QString>
 #include <QUuid>
 #include <QVariant>
-#include <algorithm>
-#include <memory>
 
 using namespace Qt::StringLiterals;
 
@@ -76,39 +77,6 @@ namespace
   {
     static QHash<QString, EditingRollbackEntry> store;
     return store;
-  }
-
-  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
-  {
-    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
-  }
-
-  struct LayerChangeWatch
-  {
-      bool changed = false;
-      QList<QMetaObject::Connection> connections;
-
-      explicit LayerChangeWatch( QgsVectorLayer *layer )
-      {
-        const auto mark = [this]() { changed = true; };
-        connections << QObject::connect( layer, &QgsVectorLayer::layerModified, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::editingStarted, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::editingStopped, mark );
-        connections << QObject::connect( layer, &QgsMapLayer::dataChanged, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::updatedFields, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::subsetStringChanged, mark );
-      }
-
-      ~LayerChangeWatch()
-      {
-        for ( const QMetaObject::Connection &connection : connections )
-          QObject::disconnect( connection );
-      }
-  };
-
-  bool providerUsesTransaction( const QgsVectorLayer *layer )
-  {
-    return layer && layer->dataProvider() && layer->dataProvider()->transaction();
   }
 
   QString storeEditingRollback( const EditingRollbackEntry &entry )
@@ -846,9 +814,10 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   if ( expression.hasParserError() )
     return QgsAiToolResult::error( u"Expression parser error: %1"_s.arg( expression.parserErrorString() ) );
 
+  // Only parse here: prepare() can already evaluate constant parts, such as an aggregate
+  // over another layer, so it runs with the rest of the evaluation.
   QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
   context.setFields( layer->fields() );
-  expression.prepare( &context );
 
   QgsFeatureRequest request;
   QSet<int> attributeIndexes = expression.referencedAttributeIndexes( layer->fields() );
@@ -859,7 +828,6 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     QgsExpression filter( filterExpression );
     if ( filter.hasParserError() )
       return QgsAiToolResult::error( u"Filter expression parser error: %1"_s.arg( filter.parserErrorString() ) );
-    filter.prepare( &context );
     attributeIndexes.unite( filter.referencedAttributeIndexes( layer->fields() ) );
     needsGeometry = needsGeometry || filter.needsGeometry();
     request.setFilterExpression( filterExpression );
@@ -870,8 +838,17 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     attributeIndexes.insert( existingFieldIndex );
   if ( !attributeIndexes.isEmpty() )
     request.setSubsetOfAttributes( qgis::setToList( attributeIndexes ) );
+  else
+    request.setNoAttributes();
   if ( !needsGeometry )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
+
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  QString guiFunction = qgsAiGuiThreadExpressionFunction( expressionText );
+  if ( guiFunction.isEmpty() )
+    guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"calculate_field %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
 
   struct PendingValue
   {
@@ -879,72 +856,103 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
       QVariant oldValue;
       QVariant newValue;
   };
-  QList<PendingValue> pendingValues;
-  QString scanError;
-  auto source = std::make_shared<QgsVectorLayerFeatureSource>( layer );
-  auto feedback = std::make_unique<QgsFeedback>();
+  // Shared with the worker, which may outlive this call if Strata quits mid-run.
+  struct CalculationJob
+  {
+      std::unique_ptr<QgsVectorLayerFeatureSource> source;
+      QgsFeatureRequest request;
+      QgsExpressionContext context;
+      QString expressionText;
+      QgsField targetField;
+      QString fieldName;
+      int existingFieldIndex = -1;
+      long long total = 0;
+      QList<PendingValue> pendingValues;
+      QString error;
+  };
+  auto job = std::make_shared<CalculationJob>();
+  job->source = std::make_unique<QgsVectorLayerFeatureSource>( layer );
+  job->request = request;
+  job->context = context;
+  job->expressionText = expressionText;
+  job->targetField = targetField;
+  job->fieldName = fieldName;
+  job->existingFieldIndex = existingFieldIndex;
+  job->total = std::max( 0LL, layer->featureCount() );
   const QPointer<QgsVectorLayer> layerGuard( layer );
-  const long long total = std::max( 0LL, layer->featureCount() );
   QgsAiTaskWaitResult wait;
   bool layerChanged = false;
 
   QElapsedTimer phaseTimer;
   phaseTimer.start();
   {
-    LayerChangeWatch watcher( layer );
+    const QgsAiLayerChangeWatch watcher( layer );
+    QgsAiBackgroundRunOptions options;
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Calculating field values"_s,
-      feedback.get(),
-      [&]( QgsFeedback *workerFeedback ) {
-        QgsExpressionContext workerContext = context;
-        QgsExpression prepared( expression );
-        QgsFeatureRequest scanRequest = request;
-        QgsFeatureIterator it = source->getFeatures( scanRequest );
+      [job]( QgsFeedback *feedback ) {
+        QgsExpressionContext workerContext = job->context;
+        workerContext.setFeedback( feedback );
+        QgsExpression prepared( job->expressionText );
+        prepared.prepare( &workerContext );
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
         {
-          if ( workerFeedback->isCanceled() )
+          if ( feedback->isCanceled() )
             return false;
           workerContext.setFeature( feature );
           QVariant value = prepared.evaluate( &workerContext );
           if ( prepared.hasEvalError() )
           {
-            scanError = u"Expression evaluation error: %1"_s.arg( prepared.evalErrorString() );
+            job->error = u"Expression evaluation error: %1"_s.arg( prepared.evalErrorString() );
             return false;
           }
 
           QString conversionError;
-          if ( !targetField.convertCompatible( value, &conversionError ) )
+          if ( !job->targetField.convertCompatible( value, &conversionError ) )
           {
-            scanError = conversionError.isEmpty() ? u"Expression result is not compatible with field '%1'."_s.arg( fieldName )
-                                                  : u"Expression result is not compatible with field '%1': %2"_s.arg( fieldName, conversionError );
+            job->error = conversionError.isEmpty() ? u"Expression result is not compatible with field '%1'."_s.arg( job->fieldName )
+                                                   : u"Expression result is not compatible with field '%1': %2"_s.arg( job->fieldName, conversionError );
             return false;
           }
 
           PendingValue pending;
           pending.featureId = feature.id();
-          pending.oldValue = existingFieldIndex >= 0 ? feature.attribute( existingFieldIndex ) : QVariant();
+          pending.oldValue = job->existingFieldIndex >= 0 ? feature.attribute( job->existingFieldIndex ) : QVariant();
           pending.newValue = value;
-          pendingValues.push_back( pending );
+          job->pendingValues.push_back( pending );
           ++n;
-          if ( total > 0 )
-            workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+          if ( job->total > 0 )
+            feedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( job->total ) ) );
         }
         return true;
       },
-      providerUsesTransaction( layer )
+      options
     );
-    layerChanged = watcher.changed;
+    layerChanged = watcher.changed();
   }
-  logAiPerf( u"calculate_field"_s, u"read_calculate"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"calculate_field"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
+  if ( wait.abandoned )
+    return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Field calculation was canceled."_s );
   if ( !wait.succeeded )
-    return QgsAiToolResult::error( scanError.isEmpty() ? wait.error : scanError );
-  if ( layerGuard.isNull() || layerChanged )
+    return QgsAiToolResult::error( job->error.isEmpty() ? wait.error : job->error );
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
+  const QList<PendingValue> &pendingValues = job->pendingValues;
 
   const bool startedEditing = !layer->isEditable();
   if ( startedEditing && !layer->startEditing() )
@@ -987,12 +995,12 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     oldFieldValues.insert( pending.featureId, pending.oldValue );
   }
   layer->endEditCommand();
-  logAiPerf( u"calculate_field"_s, u"apply"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"calculate_field"_s, u"apply"_s, phaseTimer.elapsed() );
 
   phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
     return QgsAiToolResult::error( u"Could not commit field calculation: %1"_s.arg( layer->commitErrors().join( "; "_L1 ) ) );
-  logAiPerf( u"calculate_field"_s, u"save"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"calculate_field"_s, u"save"_s, phaseTimer.elapsed() );
 
   EditingRollbackEntry rollback;
   rollback.type = EditingRollbackType::RestoreFieldCalculation;

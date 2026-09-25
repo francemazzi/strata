@@ -71,39 +71,6 @@ namespace
     return store;
   }
 
-  void logAiPerf( const QString &tool, const QString &phase, qint64 elapsedMs )
-  {
-    QgsMessageLog::logMessage( u"%1 %2 elapsedMs=%3"_s.arg( tool, phase ).arg( elapsedMs ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
-  }
-
-  struct LayerChangeWatch
-  {
-      bool changed = false;
-      QList<QMetaObject::Connection> connections;
-
-      explicit LayerChangeWatch( QgsVectorLayer *layer )
-      {
-        const auto mark = [this]() { changed = true; };
-        connections << QObject::connect( layer, &QgsVectorLayer::layerModified, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::editingStarted, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::editingStopped, mark );
-        connections << QObject::connect( layer, &QgsMapLayer::dataChanged, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::updatedFields, mark );
-        connections << QObject::connect( layer, &QgsVectorLayer::subsetStringChanged, mark );
-      }
-
-      ~LayerChangeWatch()
-      {
-        for ( const QMetaObject::Connection &connection : connections )
-          QObject::disconnect( connection );
-      }
-  };
-
-  bool providerUsesTransaction( const QgsVectorLayer *layer )
-  {
-    return layer && layer->dataProvider() && layer->dataProvider()->transaction();
-  }
-
   QString storeRollback( const AttributeTableRollbackEntry &entry )
   {
     const QString token = QUuid::createUuid().toString( QUuid::WithoutBraces );
@@ -418,10 +385,10 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( !layer->fields().at( fieldIndex ).convertCompatible( convertedValue, &conversionError ) )
     return QgsAiToolResult::error( conversionError.isEmpty() ? u"Value is not compatible with field: %1"_s.arg( fieldName ) : conversionError );
 
+  // Only parse here: the iterator prepares and evaluates the filter in the worker.
   QgsExpressionContext context( QgsExpressionContextUtils::globalProjectLayerScopes( layer ) );
   context.setFields( layer->fields() );
-  QgsExpression filter( filterExpression );
-  filter.prepare( &context );
+  const QgsExpression filter( filterExpression );
 
   QgsFeatureRequest request;
   request.setFilterExpression( filterExpression );
@@ -432,57 +399,83 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( !filter.needsGeometry() )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  const QString guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"batch_update_attributes %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+
   struct PendingUpdate
   {
       QgsFeatureId featureId = FID_NULL;
       QVariant oldValue;
   };
-  QList<PendingUpdate> pendingUpdates;
-  auto source = std::make_shared<QgsVectorLayerFeatureSource>( layer );
-  auto feedback = std::make_unique<QgsFeedback>();
+  // Shared with the worker, which may outlive this call if Strata quits mid-run.
+  struct BatchScanJob
+  {
+      std::unique_ptr<QgsVectorLayerFeatureSource> source;
+      QgsFeatureRequest request;
+      int fieldIndex = -1;
+      long long total = 0;
+      QList<PendingUpdate> pendingUpdates;
+  };
+  auto job = std::make_shared<BatchScanJob>();
+  job->source = std::make_unique<QgsVectorLayerFeatureSource>( layer );
+  job->request = request;
+  job->fieldIndex = fieldIndex;
+  job->total = std::max( 0LL, layer->featureCount() );
   const QPointer<QgsVectorLayer> layerGuard( layer );
-  const long long total = std::max( 0LL, layer->featureCount() );
   QgsAiTaskWaitResult wait;
   bool layerChanged = false;
 
   QElapsedTimer phaseTimer;
   phaseTimer.start();
   {
-    LayerChangeWatch watcher( layer );
+    const QgsAiLayerChangeWatch watcher( layer );
+    QgsAiBackgroundRunOptions options;
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Updating attributes"_s,
-      feedback.get(),
-      [&]( QgsFeedback *workerFeedback ) {
-        QgsFeatureRequest scanRequest = request;
-        QgsFeatureIterator it = source->getFeatures( scanRequest );
+      [job]( QgsFeedback *feedback ) {
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
         {
-          if ( workerFeedback->isCanceled() )
+          if ( feedback->isCanceled() )
             return false;
           PendingUpdate pending;
           pending.featureId = feature.id();
-          pending.oldValue = feature.attribute( fieldIndex );
-          pendingUpdates.push_back( pending );
+          pending.oldValue = feature.attribute( job->fieldIndex );
+          job->pendingUpdates.push_back( pending );
           ++n;
-          if ( total > 0 )
-            workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+          if ( job->total > 0 )
+            feedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( job->total ) ) );
         }
         return true;
       },
-      providerUsesTransaction( layer )
+      options
     );
-    layerChanged = watcher.changed;
+    layerChanged = watcher.changed();
   }
-  logAiPerf( u"batch_update_attributes"_s, u"read_calculate"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"batch_update_attributes"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
+  if ( wait.abandoned )
+    return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Batch attribute update was canceled."_s );
   if ( !wait.succeeded )
     return QgsAiToolResult::error( wait.error );
-  if ( layerGuard.isNull() || layerChanged )
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
+  const QList<PendingUpdate> &pendingUpdates = job->pendingUpdates;
 
   const bool startedEditing = !layer->isEditable();
   if ( startedEditing && !layer->startEditing() )
@@ -503,12 +496,12 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
     }
   }
   layer->endEditCommand();
-  logAiPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
 
   phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
     return QgsAiToolResult::error( u"Could not commit batch update: %1"_s.arg( layer->commitErrors().join( "; "_L1 ) ) );
-  logAiPerf( u"batch_update_attributes"_s, u"save"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"batch_update_attributes"_s, u"save"_s, phaseTimer.elapsed() );
 
   AttributeTableRollbackEntry rollback;
   rollback.layerId = layer->id();
@@ -580,8 +573,7 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   bool needsGeometry = false;
   if ( !filterExpression.isEmpty() )
   {
-    QgsExpression filter( filterExpression );
-    filter.prepare( &context );
+    const QgsExpression filter( filterExpression );
     needsGeometry = filter.needsGeometry();
     const QSet<int> attributeIndexes = filter.referencedAttributeIndexes( layer->fields() );
     if ( !attributeIndexes.isEmpty() )
@@ -600,54 +592,80 @@ QgsAiToolResult QgsAiSelectFeaturesTool::execute( const QJsonObject &args )
   if ( !needsGeometry )
     request.setFlags( Qgis::FeatureRequestFlag::NoGeometry );
 
-  QgsFeatureIds ids;
-  auto source = std::make_shared<QgsVectorLayerFeatureSource>( layer );
-  auto feedback = std::make_unique<QgsFeedback>();
+  // Aggregates and other functions that read the live layer are evaluated on the GUI thread.
+  const QString guiFunction = qgsAiGuiThreadExpressionFunction( filterExpression );
+  if ( !guiFunction.isEmpty() )
+    QgsMessageLog::logMessage( u"select_features %1() is not thread safe, evaluating on the interface thread"_s.arg( guiFunction ), u"AI/Perf"_s, Qgis::MessageLevel::Info, false );
+
+  // Shared with the worker, which may outlive this call if Strata quits mid-run.
+  struct SelectionScanJob
+  {
+      std::unique_ptr<QgsVectorLayerFeatureSource> source;
+      QgsFeatureRequest request;
+      long long total = 0;
+      QgsFeatureIds ids;
+  };
+  auto job = std::make_shared<SelectionScanJob>();
+  job->source = std::make_unique<QgsVectorLayerFeatureSource>( layer );
+  job->request = request;
+  job->total = std::max( 0LL, layer->featureCount() );
   const QPointer<QgsVectorLayer> layerGuard( layer );
-  const long long total = std::max( 0LL, layer->featureCount() );
   QgsAiTaskWaitResult wait;
   bool layerChanged = false;
 
   QElapsedTimer phaseTimer;
   phaseTimer.start();
   {
-    LayerChangeWatch watcher( layer );
+    const QgsAiLayerChangeWatch watcher( layer );
+    QgsAiBackgroundRunOptions options;
+    options.forceGuiThread = qgsAiProviderUsesTransaction( layer ) || !guiFunction.isEmpty();
+    options.dependentLayers = { layer };
     wait = qgsAiRunFunction(
       u"Selecting features"_s,
-      feedback.get(),
-      [&]( QgsFeedback *workerFeedback ) {
-        QgsFeatureRequest scanRequest = request;
-        QgsFeatureIterator it = source->getFeatures( scanRequest );
+      [job]( QgsFeedback *feedback ) {
+        QgsFeatureRequest request = job->request;
+        request.setFeedback( feedback );
+        if ( QgsExpressionContext *filterContext = request.expressionContext() )
+          filterContext->setFeedback( feedback );
+        QgsFeatureIterator it = job->source->getFeatures( request );
         QgsFeature feature;
         int n = 0;
         while ( it.nextFeature( feature ) )
         {
-          if ( workerFeedback->isCanceled() )
+          if ( feedback->isCanceled() )
             return false;
-          ids.insert( feature.id() );
+          job->ids.insert( feature.id() );
           ++n;
-          if ( total > 0 )
-            workerFeedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( total ) ) );
+          if ( job->total > 0 )
+            feedback->setProgress( std::min( 100.0, 100.0 * static_cast<double>( n ) / static_cast<double>( job->total ) ) );
         }
         return true;
       },
-      providerUsesTransaction( layer )
+      options
     );
-    layerChanged = watcher.changed;
+    layerChanged = watcher.changed();
   }
-  logAiPerf( u"select_features"_s, u"read_calculate"_s, phaseTimer.elapsed() );
+  qgsAiLogPerf( u"select_features"_s, u"read_calculate"_s, phaseTimer.elapsed() );
 
+  if ( wait.abandoned )
+    return QgsAiToolResult::canceledResult( wait.error );
+  // Removing the layer also cancels its dependent task: report it as an error, not a Stop.
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while computing."_s );
   if ( wait.canceled )
     return QgsAiToolResult::canceledResult( u"Feature selection was canceled."_s );
   if ( !wait.succeeded )
     return QgsAiToolResult::error( wait.error );
-  if ( layerGuard.isNull() || layerChanged )
+  if ( layerChanged )
     return QgsAiToolResult::error( u"Layer changed while computing, retry."_s );
+  const QgsFeatureIds &ids = job->ids;
 
   const int beforeSelectedCount = layer->selectedFeatureCount();
   phaseTimer.restart();
-  layer->selectByIds( ids, behavior, layerChanged );
-  logAiPerf( u"select_features"_s, u"apply"_s, phaseTimer.elapsed() );
+  // The ids come from a snapshot of a layer that did not change meanwhile (checked above),
+  // so they are valid: skip the second, GUI-thread lookup that validateIds would run.
+  layer->selectByIds( ids, behavior, false );
+  qgsAiLogPerf( u"select_features"_s, u"apply"_s, phaseTimer.elapsed() );
 
   QJsonObject diff;
   diff.insert( u"summary"_s, u"Updated vector layer selection."_s );

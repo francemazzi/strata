@@ -58,7 +58,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
-#include <QScopeGuard>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -602,8 +602,12 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       Q_UNUSED( retryCount )
       Q_UNUSED( retriable )
 
-      const bool emptyHttpCompletion = httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty();
-      if ( success || emptyHttpCompletion )
+      // An empty reply after this turn's tools ran is recovered below (retry prompt or a local
+      // summary of the tool results). Any other failure, including an empty reply before any
+      // tool or a provider error delivered inside a 200 stream, takes the error path.
+      const bool emptyReplyAfterTools = !success && httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty() && mTotalToolIterations > 0
+                                        && ( errorMessage.isEmpty() || errorMessage == QgsAiModelRouter::emptyCompletionErrorMessage() );
+      if ( success || emptyReplyAfterTools )
       {
         QString finalText = !responseText.isEmpty() ? responseText : mStreamedText;
         if ( finalText.trimmed().isEmpty() && mLastToolRoundHadError && !mEmptyErrorRecoveryAttempted )
@@ -775,6 +779,7 @@ bool QgsAiAgentSessionManager::continueAfterToolLimit( const QString &messageId 
 
     mTotalToolIterations = std::max( mTotalToolIterations, message.metadata.value( u"tool_rounds_used"_s ).toInt() );
     mToolIterations = 0;
+    mToolRunCanceled = false;
     emit requestRunningChanged( true );
 
     // The cache is cold after a session reload/restart: recompute rather than
@@ -994,6 +999,7 @@ QStringList QgsAiAgentSessionManager::unresolvedPlanTools( const QStringList &re
 void QgsAiAgentSessionManager::resetCurrentSessionState( bool emitHistorySignal )
 {
   ++mSessionGeneration;
+  mToolRunCanceled = false;
   mHistory.clear();
   mActiveSessionId.clear();
   mNextMessageOrdering = 0;
@@ -1132,6 +1138,7 @@ void QgsAiAgentSessionManager::loadSession( const QString &sessionId )
     cancelActiveRequest();
 
   ++mSessionGeneration;
+  mToolRunCanceled = false;
   mHistory = mHistoryStore->loadMessages( sessionId );
   mActiveSessionId = sessionId;
   mNextMessageOrdering = mHistoryStore->lastOrdering( sessionId ) + 1;
@@ -1697,10 +1704,13 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
 {
   if ( hasActiveRequest() )
   {
-    const QgsAiChatMessage assistant = buildAssistantMessage( u"A request is already running. Please wait or cancel it first."_s );
-    recordHistoryMessage( assistant );
+    // Never write to the history here: during a tool round the notice would land between the
+    // tool call and its result, and the history clean-up would then drop the whole round.
+    QgsMessageLog::logMessage( u"Ignored a message sent while a request is running."_s, u"AI"_s, Qgis::MessageLevel::Info, false );
+    emit requestStateChanged( u"busy"_s, tr( "A request is already running. Please wait or stop it first." ) );
     return;
   }
+  mToolRunCanceled = false;
 
   // Create the persisted session up-front so the user message is the first row
   // and the title derives from the unmodified prompt (no file context noise).
@@ -3020,6 +3030,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   if ( requestId != mActiveRequestId )
     return;
 
+  // The whole round runs under the mode it was filtered for. Tools pump the event loop, so the
+  // user can switch mode meanwhile: that switch applies from the next round, never to approvals
+  // of calls already accepted under the old mode.
+  const QString roundAgent = mActiveAgent;
+
   // Surface a short status to the UI: which tools the model wants to use.
   QStringList summary;
   summary.reserve( calls.size() );
@@ -3043,7 +3058,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     if ( !isToolAllowedForActiveAgent( call.name ) )
     {
       QJsonObject metadata;
-      metadata.insert( u"agent_mode"_s, mActiveAgent );
+      metadata.insert( u"agent_mode"_s, roundAgent );
       metadata.insert( u"tool_call_id"_s, call.id );
       metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
       QString risk = u"unknown"_s;
@@ -3055,17 +3070,17 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       bool modeAllowsTool = false;
       if ( toolAvailable )
       {
-        if ( mActiveAgent == "editor"_L1 )
+        if ( roundAgent == "editor"_L1 )
         {
           modeAllowsTool = true;
         }
-        else if ( mActiveAgent == "reviewer"_L1 )
+        else if ( roundAgent == "reviewer"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
         }
-        else if ( mActiveAgent == "ask_before_edits"_L1 )
+        else if ( roundAgent == "ask_before_edits"_L1 )
         {
-          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+          modeAllowsTool = reviewerReadOnlyTools().contains( call.name ) || ( tool && tool->requiresApproval() ) || mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
         }
       }
       const bool applyManagedPolicy = mRouter
@@ -3073,10 +3088,10 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
                                       && mManagedAgentPolicy.toolCatalogVersion >= MIN_MANAGED_TOOL_CATALOG_VERSION
                                       && !mManagedAgentPolicy.isEmpty()
                                       && !managedPolicyReferencesUnknownTools( mManagedAgentPolicy, mToolRegistry );
-      const QStringList managedAllowed = applyManagedPolicy ? ( mActiveAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
-                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( mActiveAgent ) ) )
+      const QStringList managedAllowed = applyManagedPolicy ? ( roundAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
+                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
                                                             : QStringList();
-      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, mActiveAgent );
+      const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
       const QString blockedReason = blockedByManagedPolicy ? u"managed_policy"_s : ( toolAvailable ? u"agent_mode"_s : u"tool_unavailable"_s );
       metadata.insert( u"blocked_reason"_s, blockedReason );
       QgsAiAuditLog::appendToolEvent( u"blocked_by_policy"_s, call.name, risk, false, metadata );
@@ -3085,15 +3100,15 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       memory.insert( u"risk_level"_s, risk );
       memory.insert( u"reason"_s, blockedReason );
       rememberAgentEvent( u"tool_blocked"_s, memory );
-      QgsMessageLog::logMessage( u"Blocked disallowed tool call in %1 mode: %2"_s.arg( mActiveAgent, call.name ), u"AI"_s, Qgis::MessageLevel::Warning, false );
+      QgsMessageLog::logMessage( u"Blocked disallowed tool call in %1 mode: %2"_s.arg( roundAgent, call.name ), u"AI"_s, Qgis::MessageLevel::Warning, false );
       QString message;
-      if ( mActiveAgent == "planner"_L1 )
+      if ( roundAgent == "planner"_L1 )
       {
         message = u"Plan mode does not execute tools or change workspace state. No tool was run."_s;
       }
       else if ( blockedByManagedPolicy )
       {
-        message = u"The managed Strata Plan policy for this tier does not allow the requested tool '%1' in %2 mode. No tool was run."_s.arg( call.name, QgsAiRuntimeModeForAgent( mActiveAgent ) );
+        message = u"The managed Strata Plan policy for this tier does not allow the requested tool '%1' in %2 mode. No tool was run."_s.arg( call.name, QgsAiRuntimeModeForAgent( roundAgent ) );
       }
       else if ( !toolAvailable )
       {
@@ -3101,7 +3116,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       }
       else
       {
-        message = u"The active mode '%1' does not allow the requested tool '%2'. No tool was run."_s.arg( QgsAiRuntimeModeForAgent( mActiveAgent ), call.name );
+        message = u"The active mode '%1' does not allow the requested tool '%2'. No tool was run."_s.arg( QgsAiRuntimeModeForAgent( roundAgent ), call.name );
       }
       const QgsAiChatMessage error = buildAssistantMessage( message );
       recordHistoryMessage( error );
@@ -3155,11 +3170,9 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     const QString fingerprint = toolCallFingerprint( call );
     const int equivalentCount = mToolCallFingerprints.value( fingerprint ) + 1;
     const int toolCount = mToolCallCounts.value( call.name ) + 1;
-    if (
-      equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
-      || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
-      || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN )
-    )
+    if ( equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
+         || ( call.name == "run_python"_L1 && toolCount > MAX_RUN_PYTHON_CALLS_PER_TURN )
+         || ( call.name == "install_python_package"_L1 && toolCount > MAX_PACKAGE_INSTALL_CALLS_PER_TURN ) )
     {
       const QString message = equivalentCount > MAX_EQUIVALENT_TOOL_CALLS_PER_TURN
                                 ? tr( "Stopped a repeated tool loop: '%1' was requested with equivalent arguments more than %2 times. Use a materially different strategy or ask the user how to proceed." )
@@ -3191,78 +3204,112 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   bool roundHadNonRetryableError = false;
   QString nonRetryableToolName;
   const quint64 generation = mSessionGeneration;
-  mExecutingToolCalls = true;
-  const auto executingGuard = qScopeGuard( [this]() { mExecutingToolCalls = false; } );
 
-  // Execute every requested, mode-allowed tool synchronously and add its result to history.
-  for ( const QgsAiToolCall &call : calls )
+  // A new chat, another session or a project change replaced the session while a tool
+  // ran: drop the round without writing into the new session, and unlock the input.
+  const auto dropStaleRound = [this]() {
+    mToolRunCanceled = false;
+    mActiveRequestId.clear();
+    if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
+      completeManagedAgentRun();
+    emit requestStateChanged( u"cancelled"_s, tr( "Stopped: the chat changed while a tool was running." ) );
+    emit requestRunningChanged( false );
+  };
+  const auto stopCanceledRound = [this]() {
+    mToolRunCanceled = false;
+    const QString message = tr( "Stopped because the running tool was canceled." );
+    recordHistoryMessage( buildAssistantMessage( message ) );
+    mActiveRequestId.clear();
+    if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
+      completeManagedAgentRun();
+    emit requestStateChanged( u"cancelled"_s, message );
+    emit requestRunningChanged( false );
+  };
+
   {
-    if ( generation != mSessionGeneration )
-      return;
+    // While set, Stop cancels the running tool and skips the rest of the round instead of
+    // canceling a provider request. Cleared before the next provider attempt starts.
+    const QScopedValueRollback<bool> executingToolCalls( mExecutingToolCalls, true );
 
-    QgsMessageLog::
-      logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
-
-    QgsAiToolResult result;
-    const QgsAiTool *calledTool = mToolRegistry->find( call.name );
-    const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
-    const bool needsGenericApproval = mActiveAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
-    const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
-    if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
+    // Execute every requested, mode-allowed tool synchronously and add its result to history.
+    for ( const QgsAiToolCall &call : calls )
     {
-      QJsonObject metadata;
-      metadata.insert( u"agent_mode"_s, mActiveAgent );
-      metadata.insert( u"tool_call_id"_s, call.id );
-      metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
-      QgsAiAuditLog::appendToolEvent( u"rejected_by_user"_s, call.name, QgsAiToolRiskLevelName( approvalRisk ), false, metadata );
-      result = QgsAiToolResult::error( u"Tool call was rejected by the user before execution."_s );
-    }
-    else
-    {
-      QElapsedTimer toolTimer;
-      toolTimer.start();
-      result = mToolRegistry->execute( call.name, call.args );
-      QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
-    }
-
-    if ( generation != mSessionGeneration )
-      return;
-
-    QVariantMap memory;
-    memory.insert( u"tool_name"_s, call.name );
-    memory.insert( u"success"_s, result.success );
-    if ( const QgsAiTool *tool = calledTool )
-    {
-      memory.insert( u"risk_level"_s, QgsAiToolRiskLevelName( tool->riskLevel() ) );
-      memory.insert( u"requires_approval"_s, tool->requiresApproval() );
-    }
-    if ( result.output.isObject() )
-    {
-      const QJsonObject output = result.output.toObject();
-      memory.insert( u"has_diff"_s, output.contains( u"diff"_s ) );
-      memory.insert( u"rollback_available"_s, output.contains( u"rollback_token"_s ) || output.contains( u"rollback"_s ) );
-      if ( output.value( u"status"_s ).toString() == "error"_L1 && output.contains( u"retryable"_s ) && !output.value( u"retryable"_s ).toBool() )
+      if ( generation != mSessionGeneration )
       {
-        roundHadNonRetryableError = true;
-        nonRetryableToolName = call.name;
+        dropStaleRound();
+        return;
       }
-    }
-    rememberAgentEvent( u"tool_result"_s, memory );
-    const QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
-    if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
-      roundHadError = true;
-    recordHistoryMessage( resultMessage );
-    if ( result.canceled || mToolRunCanceled )
-    {
-      mToolRunCanceled = false;
-      const QString message = tr( "Stopped because the running tool was canceled." );
-      recordHistoryMessage( buildAssistantMessage( message ) );
-      mActiveRequestId.clear();
-      if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
-        completeManagedAgentRun();
-      emit requestStateChanged( u"cancelled"_s, message );
-      emit requestRunningChanged( false );
-      return;
+      if ( mToolRunCanceled )
+      {
+        stopCanceledRound();
+        return;
+      }
+
+      QgsMessageLog::
+        logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
+
+      QgsAiToolResult result;
+      const QgsAiTool *calledTool = mToolRegistry->find( call.name );
+      const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
+      const bool needsGenericApproval = roundAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+      const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
+      if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
+      {
+        QJsonObject metadata;
+        metadata.insert( u"agent_mode"_s, roundAgent );
+        metadata.insert( u"tool_call_id"_s, call.id );
+        metadata.insert( u"args_keys"_s, call.args.keys().join( ',' ) );
+        QgsAiAuditLog::appendToolEvent( u"rejected_by_user"_s, call.name, QgsAiToolRiskLevelName( approvalRisk ), false, metadata );
+        result = QgsAiToolResult::error( u"Tool call was rejected by the user before execution."_s );
+      }
+      else if ( mToolRunCanceled )
+      {
+        stopCanceledRound();
+        return;
+      }
+      else
+      {
+        QElapsedTimer toolTimer;
+        toolTimer.start();
+        result = mToolRegistry->execute( call.name, call.args );
+        QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
+      }
+
+      if ( generation != mSessionGeneration )
+      {
+        dropStaleRound();
+        return;
+      }
+
+      QVariantMap memory;
+      memory.insert( u"tool_name"_s, call.name );
+      memory.insert( u"success"_s, result.success );
+      if ( const QgsAiTool *tool = calledTool )
+      {
+        memory.insert( u"risk_level"_s, QgsAiToolRiskLevelName( tool->riskLevel() ) );
+        memory.insert( u"requires_approval"_s, tool->requiresApproval() );
+      }
+      if ( result.output.isObject() )
+      {
+        const QJsonObject output = result.output.toObject();
+        memory.insert( u"has_diff"_s, output.contains( u"diff"_s ) );
+        memory.insert( u"rollback_available"_s, output.contains( u"rollback_token"_s ) || output.contains( u"rollback"_s ) );
+        if ( output.value( u"status"_s ).toString() == "error"_L1 && output.contains( u"retryable"_s ) && !output.value( u"retryable"_s ).toBool() )
+        {
+          roundHadNonRetryableError = true;
+          nonRetryableToolName = call.name;
+        }
+      }
+      rememberAgentEvent( u"tool_result"_s, memory );
+      const QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
+      if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
+        roundHadError = true;
+      recordHistoryMessage( resultMessage );
+      if ( result.canceled || mToolRunCanceled )
+      {
+        stopCanceledRound();
+        return;
+      }
     }
   }
 

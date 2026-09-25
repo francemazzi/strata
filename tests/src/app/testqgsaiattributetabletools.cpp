@@ -7,6 +7,7 @@
 
 #include "ai/tools/qgsaiattributetabletools.h"
 #include "ai/tools/qgsailayertools.h"
+#include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgsfeature.h"
 #include "qgsgeometry.h"
@@ -20,7 +21,6 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
-#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -39,6 +39,10 @@ class TestQgsAiAttributeTableTools : public QObject
     void selectFeaturesUpdatesLayerSelection();
     void selectFeaturesSupportsModeAndBbox();
     void selectFeaturesKeepsInterfaceResponsive();
+    void batchUpdateAttributesCancelLeavesLayerUnchanged();
+    void selectFeaturesCancelKeepsSelection();
+    void selectFeaturesEvaluatesAggregatesOnInterfaceThread();
+    void batchUpdateAttributesEvaluatesAggregatesOnInterfaceThread();
     void identifyFeaturesAtReturnsMatchingFeature();
 };
 
@@ -264,7 +268,7 @@ void TestQgsAiAttributeTableTools::batchUpdateAttributesKeepsInterfaceResponsive
   for ( int i = 0; i < 2500; ++i )
   {
     QgsFeature feature( layer->fields() );
-    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setGeometry( QgsGeometry::fromWkt( u"Point(%1 %1)"_s.arg( i ) ) );
     feature.setAttribute( u"name"_s, u"row"_s );
     feature.setAttribute( u"value"_s, i );
     features.push_back( feature );
@@ -279,15 +283,11 @@ void TestQgsAiAttributeTableTools::batchUpdateAttributesKeepsInterfaceResponsive
   args.insert( u"field_name"_s, u"name"_s );
   args.insert( u"value"_s, u"updated"_s );
 
-  bool interfaceEventsRan = false;
-  QTimer interfaceTimer;
-  interfaceTimer.setSingleShot( true );
-  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
-  interfaceTimer.start( 0 );
-
+  const QgsAiTestBackgroundProbe probe;
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
-  QVERIFY2( interfaceEventsRan, "Batch update blocked the interface thread" );
+  QVERIFY2( probe.maxLoopLevel() >= 1, "Batch update blocked the interface thread" );
+  QCOMPARE( result.output.toObject().value( u"updated_feature_count"_s ).toInt(), 2500 );
 }
 
 void TestQgsAiAttributeTableTools::selectFeaturesKeepsInterfaceResponsive()
@@ -299,7 +299,7 @@ void TestQgsAiAttributeTableTools::selectFeaturesKeepsInterfaceResponsive()
   for ( int i = 0; i < 2500; ++i )
   {
     QgsFeature feature( layer->fields() );
-    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setGeometry( QgsGeometry::fromWkt( u"Point(%1 %1)"_s.arg( i ) ) );
     feature.setAttribute( u"value"_s, i );
     features.push_back( feature );
   }
@@ -311,15 +311,94 @@ void TestQgsAiAttributeTableTools::selectFeaturesKeepsInterfaceResponsive()
   args.insert( u"layer_id"_s, layer->id() );
   args.insert( u"filter_expression"_s, u"\"value\" >= 0"_s );
 
-  bool interfaceEventsRan = false;
-  QTimer interfaceTimer;
-  interfaceTimer.setSingleShot( true );
-  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
-  interfaceTimer.start( 0 );
-
+  const QgsAiTestBackgroundProbe probe;
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
-  QVERIFY2( interfaceEventsRan, "Feature selection blocked the interface thread" );
+  QVERIFY2( probe.maxLoopLevel() >= 1, "Feature selection blocked the interface thread" );
+  QCOMPARE( layer->selectedFeatureCount(), 2500 );
+}
+
+void TestQgsAiAttributeTableTools::batchUpdateAttributesCancelLeavesLayerUnchanged()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsAiBatchUpdateAttributesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= 1"_s );
+  args.insert( u"field_name"_s, u"name"_s );
+  args.insert( u"value"_s, u"updated"_s );
+
+  const QgsAiTestBackgroundProbe probe( []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QVERIFY( !layer->isEditable() );
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    QVERIFY( feature.attribute( u"name"_s ).toString() != "updated"_L1 );
+}
+
+void TestQgsAiAttributeTableTools::selectFeaturesCancelKeepsSelection()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsFeatureIds before;
+  QgsFeature first;
+  QVERIFY( layer->getFeatures().nextFeature( first ) );
+  before << first.id();
+  layer->selectByIds( before );
+
+  QgsAiSelectFeaturesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= 1"_s );
+
+  const QgsAiTestBackgroundProbe probe( []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QCOMPARE( layer->selectedFeatureIds(), before );
+}
+
+void TestQgsAiAttributeTableTools::selectFeaturesEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsAiSelectFeaturesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" > mean(\"value\")"_s );
+
+  // mean() reads the live layer, so the scan runs on the GUI thread, outside any nested event loop.
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+  QCOMPARE( layer->selectedFeatureCount(), 1 );
+}
+
+void TestQgsAiAttributeTableTools::batchUpdateAttributesEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makePlacesLayer( project );
+  QgsAiBatchUpdateAttributesTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"filter_expression"_s, u"\"value\" >= mean(\"value\")"_s );
+  args.insert( u"field_name"_s, u"name"_s );
+  args.insert( u"value"_s, u"above"_s );
+
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+  QCOMPARE( result.output.toObject().value( u"updated_feature_count"_s ).toInt(), 2 );
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    QCOMPARE( feature.attribute( u"name"_s ).toString() == "above"_L1, feature.attribute( u"value"_s ).toInt() >= 2 );
 }
 
 void TestQgsAiAttributeTableTools::identifyFeaturesAtReturnsMatchingFeature()

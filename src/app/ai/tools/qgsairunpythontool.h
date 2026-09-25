@@ -72,6 +72,9 @@ class APP_EXPORT QgsAiRunPythonTool : public QgsAiTool
     //! Advisory hint for GIS feature loops. Does not change approval or diagnosis status.
     static QStringList featureLoopHints( const QString &code );
 
+    //! Advice shown to the model for a hint code returned by featureLoopHints().
+    static QString hintMessage( const QString &hint );
+
   private:
     QWidget *mDialogParent = nullptr;
     bool mRememberApprovalsForSession = false;

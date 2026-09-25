@@ -7,6 +7,7 @@
 
 #include "ai/tools/qgsaieditingtools.h"
 #include "ai/tools/qgsaitaskrunner.h"
+#include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgsfeature.h"
 #include "qgsfeaturerequest.h"
@@ -16,11 +17,11 @@
 #include "qgstest.h"
 #include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
+#include "qgsvectorlayerjoininfo.h"
 
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
-#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -43,6 +44,10 @@ class TestQgsAiEditingTools : public QObject
     void calculateFieldUsesVirtualFields();
     void calculateFieldAbortsWhenLayerChangesDuringRun();
     void calculateFieldCancelLeavesLayerUnchanged();
+    void calculateFieldIncludesAddedFeatures();
+    void calculateFieldUsesJoinedFields();
+    void calculateFieldReportsRemovedLayer();
+    void calculateFieldEvaluatesAggregatesOnInterfaceThread();
 };
 
 void TestQgsAiEditingTools::initTestCase()
@@ -372,11 +377,14 @@ static QgsVectorLayer *makeCalculatedLayer( QgsProject &project, int featureCoun
   for ( int i = 0; i < featureCount; ++i )
   {
     QgsFeature feature( layer->fields() );
-    feature.setGeometry( QgsGeometry::fromWkt( QStringLiteral( "Point(%1 %1)" ).arg( i ) ) );
+    feature.setGeometry( QgsGeometry::fromWkt( u"Point(%1 %1)"_s.arg( i ) ) );
     feature.setAttribute( u"value"_s, static_cast<double>( i ) );
     features.push_back( feature );
   }
-  Q_ASSERT( layer->dataProvider()->addFeatures( features ) );
+  // Not inside Q_ASSERT: that would compile the insertion out of release builds.
+  const bool added = layer->dataProvider()->addFeatures( features );
+  Q_ASSERT( added );
+  Q_UNUSED( added )
   project.addMapLayer( layer );
   return layer;
 }
@@ -385,6 +393,7 @@ void TestQgsAiEditingTools::calculateFieldKeepsInterfaceResponsive()
 {
   QgsProject project;
   QgsVectorLayer *layer = makeCalculatedLayer( project, 2500 );
+  QCOMPARE( layer->featureCount(), 2500LL );
   QgsAiCalculateFieldTool tool( &project );
   QJsonObject args;
   args.insert( u"layer_id"_s, layer->id() );
@@ -392,15 +401,11 @@ void TestQgsAiEditingTools::calculateFieldKeepsInterfaceResponsive()
   args.insert( u"expression"_s, u"\"value\""_s );
   args.insert( u"create_field"_s, true );
 
-  bool interfaceEventsRan = false;
-  QTimer interfaceTimer;
-  interfaceTimer.setSingleShot( true );
-  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
-  interfaceTimer.start( 0 );
-
+  const QgsAiTestBackgroundProbe probe;
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
-  QVERIFY2( interfaceEventsRan, "Field calculation blocked the interface thread" );
+  QVERIFY2( probe.maxLoopLevel() >= 1, "Field calculation blocked the interface thread" );
+  QCOMPARE( result.output.toObject().value( u"updated_feature_count"_s ).toInt(), 2500 );
 }
 
 void TestQgsAiEditingTools::calculateFieldSeesUncommittedEdits()
@@ -488,7 +493,7 @@ void TestQgsAiEditingTools::calculateFieldAbortsWhenLayerChangesDuringRun()
   args.insert( u"expression"_s, u"\"value\""_s );
   args.insert( u"create_field"_s, true );
 
-  QTimer::singleShot( 0, layer, [layer]() { layer->startEditing(); } );
+  const QgsAiTestBackgroundProbe probe( [layer]() { layer->startEditing(); } );
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"Layer changed while computing"_s ) );
@@ -506,11 +511,130 @@ void TestQgsAiEditingTools::calculateFieldCancelLeavesLayerUnchanged()
   args.insert( u"expression"_s, u"\"value\""_s );
   args.insert( u"create_field"_s, true );
 
-  QTimer::singleShot( 0, []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiTestBackgroundProbe probe( []() { qgsAiCancelActiveBackgroundTool(); } );
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY( result.canceled );
   QVERIFY( !result.success );
   QCOMPARE( layer->fields().lookupField( u"copy"_s ), -1 );
+  QVERIFY( !layer->isEditable() );
+}
+
+void TestQgsAiEditingTools::calculateFieldIncludesAddedFeatures()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 3 );
+  QVERIFY( layer->startEditing() );
+  QgsFeature added( layer->fields() );
+  added.setGeometry( QgsGeometry::fromWkt( u"Point(9 9)"_s ) );
+  added.setAttribute( u"value"_s, 21.0 );
+  QVERIFY( layer->addFeature( added ) );
+  QVERIFY( added.id() < 0 );
+
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"value"_s );
+  args.insert( u"expression"_s, u"\"value\" * 2"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( result.output.toObject().value( u"updated_feature_count"_s ).toInt(), 4 );
+
+  // The uncommitted feature, with its temporary negative id, was calculated too.
+  QgsFeature calculated;
+  QVERIFY( layer->getFeatures( QgsFeatureRequest().setFilterFid( added.id() ) ).nextFeature( calculated ) );
+  QCOMPARE( calculated.attribute( u"value"_s ).toDouble(), 42.0 );
+  QVERIFY( layer->isEditable() );
+}
+
+void TestQgsAiEditingTools::calculateFieldUsesJoinedFields()
+{
+  QgsProject project;
+  QgsVectorLayer *target = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=code:integer"_s, u"Target"_s, u"memory"_s );
+  QVERIFY( target->isValid() );
+  QgsFeature targetFeature( target->fields() );
+  targetFeature.setGeometry( QgsGeometry::fromWkt( u"Point(1 1)"_s ) );
+  targetFeature.setAttribute( u"code"_s, 7 );
+  QVERIFY( target->dataProvider()->addFeatures( QgsFeatureList() << targetFeature ) );
+  project.addMapLayer( target );
+
+  QgsVectorLayer *lookup = new QgsVectorLayer( u"None?field=code:integer&field=rate:double"_s, u"Lookup"_s, u"memory"_s );
+  QVERIFY( lookup->isValid() );
+  QgsFeature lookupFeature( lookup->fields() );
+  lookupFeature.setAttribute( u"code"_s, 7 );
+  lookupFeature.setAttribute( u"rate"_s, 1.5 );
+  QVERIFY( lookup->dataProvider()->addFeatures( QgsFeatureList() << lookupFeature ) );
+  project.addMapLayer( lookup );
+
+  QgsVectorLayerJoinInfo join;
+  join.setJoinLayer( lookup );
+  join.setJoinFieldName( u"code"_s );
+  join.setTargetFieldName( u"code"_s );
+  join.setPrefix( u"lookup_"_s );
+  join.setUsingMemoryCache( true );
+  QVERIFY( target->addJoin( join ) );
+  QVERIFY( target->fields().lookupField( u"lookup_rate"_s ) >= 0 );
+
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, target->id() );
+  args.insert( u"field_name"_s, u"scaled"_s );
+  args.insert( u"expression"_s, u"\"lookup_rate\" * 10"_s );
+  args.insert( u"create_field"_s, true );
+  args.insert( u"field_type"_s, u"double"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+
+  QgsFeature stored;
+  QVERIFY( target->getFeatures().nextFeature( stored ) );
+  QCOMPARE( stored.attribute( u"scaled"_s ).toDouble(), 15.0 );
+}
+
+void TestQgsAiEditingTools::calculateFieldReportsRemovedLayer()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 2500 );
+  const QString layerId = layer->id();
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layerId );
+  args.insert( u"field_name"_s, u"copy"_s );
+  args.insert( u"expression"_s, u"\"value\""_s );
+  args.insert( u"create_field"_s, true );
+
+  // The user removes the layer while the scan runs: an error the model can react to, no crash.
+  const QgsAiTestBackgroundProbe probe( [&project, layerId]() { project.removeMapLayer( layerId ); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( !result.canceled );
+  QVERIFY2( result.errorMessage.contains( u"removed"_s ), qPrintable( result.errorMessage ) );
+  QVERIFY( !project.mapLayer( layerId ) );
+}
+
+void TestQgsAiEditingTools::calculateFieldEvaluatesAggregatesOnInterfaceThread()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = makeCalculatedLayer( project, 4 );
+  QgsAiCalculateFieldTool tool( &project );
+  QJsonObject args;
+  args.insert( u"layer_id"_s, layer->id() );
+  args.insert( u"field_name"_s, u"share"_s );
+  args.insert( u"expression"_s, u"\"value\" / sum(\"value\")"_s );
+  args.insert( u"create_field"_s, true );
+  args.insert( u"field_type"_s, u"double"_s );
+
+  // sum() reads the live layer, so the scan runs on the GUI thread: its progress arrives outside
+  // any nested event loop.
+  const QgsAiTestBackgroundProbe probe;
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( probe.maxLoopLevel(), 0 );
+
+  const int shareIndex = layer->fields().lookupField( u"share"_s );
+  QVERIFY( shareIndex >= 0 );
+  QgsFeature feature;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( feature ) )
+    QGSCOMPARENEAR( feature.attribute( shareIndex ).toDouble(), feature.attribute( u"value"_s ).toDouble() / 6.0, 1e-9 );
 }
 
 QGSTEST_MAIN( TestQgsAiEditingTools )

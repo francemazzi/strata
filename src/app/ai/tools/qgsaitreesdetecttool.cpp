@@ -21,6 +21,7 @@
 #include "qgsaimodelrouter.h"
 #include "qgsaiplanclient.h"
 #include "qgsaisettingsutils.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsnetworkaccessmanager.h"
 
@@ -48,6 +49,8 @@ namespace trees_tool
       int httpStatus = 0;
       QJsonObject body;
       QString error;
+      //! The user pressed Stop while the request was pending.
+      bool canceled = false;
   };
 
   JsonResponse sendJsonRequest( QgsNetworkAccessManager *networkManager, const QNetworkRequest &request, const QJsonObject *body )
@@ -61,11 +64,16 @@ namespace trees_tool
     timer.setSingleShot( true );
     QObject::connect( &timer, &QTimer::timeout, &loop, &QEventLoop::quit );
     QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
-    timer.start( REQUEST_TIMEOUT_MS );
-    loop.exec();
+    bool canceled = false;
+    {
+      const QgsAiCancelHookScope cancelScope( u"Strata trees detection"_s, [&loop]() { loop.quit(); } );
+      timer.start( REQUEST_TIMEOUT_MS );
+      loop.exec();
+      canceled = cancelScope.canceledByUser();
+    }
 
-    const bool timedOut = !timer.isActive();
-    if ( timedOut )
+    const bool timedOut = !canceled && !timer.isActive();
+    if ( canceled || timedOut )
       reply->abort();
     const int httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
     const QByteArray responseBytes = reply->readAll();
@@ -73,6 +81,13 @@ namespace trees_tool
     const QString networkErrorString = reply->errorString();
     reply->deleteLater();
 
+    if ( canceled )
+    {
+      JsonResponse response;
+      response.error = u"Strata trees detection was canceled."_s;
+      response.canceled = true;
+      return response;
+    }
     if ( timedOut )
       return { false, httpStatus, {}, u"Strata trees request timed out."_s };
     if ( networkError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300 )
@@ -311,6 +326,8 @@ QgsAiToolResult QgsAiTreesDetectTool::execute( const QJsonObject &args )
 
   const QNetworkRequest submitRequest = requestForPath( u"/v1/trees/detect"_s );
   const trees_tool::JsonResponse submit = trees_tool::sendJsonRequest( networkManager, submitRequest, &submitBody );
+  if ( submit.canceled )
+    return QgsAiToolResult::canceledResult( submit.error );
   if ( !submit.success )
     return QgsAiToolResult::error( submit.error );
   if ( submit.httpStatus != 202 )
@@ -330,12 +347,17 @@ QgsAiToolResult QgsAiTreesDetectTool::execute( const QJsonObject &args )
     if ( attempt > 0 && mPollIntervalMs > 0 )
     {
       QEventLoop waitLoop;
+      const QgsAiCancelHookScope waitScope( u"Strata trees detection"_s, [&waitLoop]() { waitLoop.quit(); } );
       QTimer::singleShot( mPollIntervalMs, &waitLoop, &QEventLoop::quit );
       waitLoop.exec();
+      if ( waitScope.canceledByUser() )
+        return QgsAiToolResult::canceledResult( u"Strata trees detection was canceled."_s );
     }
 
     const QNetworkRequest pollRequest = requestForPath( u"/v1/trees/jobs/"_s + encodedJobId );
     const trees_tool::JsonResponse poll = trees_tool::sendJsonRequest( networkManager, pollRequest, nullptr );
+    if ( poll.canceled )
+      return QgsAiToolResult::canceledResult( poll.error );
     if ( !poll.success )
       return QgsAiToolResult::error( poll.error );
 

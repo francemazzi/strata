@@ -496,6 +496,21 @@ void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
 
   QPushButton *review = dock.findChild<QPushButton *>( u"aiGisCardReviewButton"_s );
   QVERIFY( review );
+
+  // While a turn runs, Analyze, mode and model are locked; they unlock when it ends.
+  QToolButton *modePill = dock.findChild<QToolButton *>( u"aiModePill"_s );
+  QToolButton *modelPill = dock.findChild<QToolButton *>( u"aiModelPill"_s );
+  QVERIFY( modePill );
+  QVERIFY( modelPill );
+  manager.requestRunningChanged( true );
+  QVERIFY( !review->isEnabled() );
+  QVERIFY( !modePill->isEnabled() );
+  QVERIFY( !modelPill->isEnabled() );
+  manager.requestRunningChanged( false );
+  QVERIFY( review->isEnabled() );
+  QVERIFY( modePill->isEnabled() );
+  QVERIFY( modelPill->isEnabled() );
+
   review->click();
 
   QCOMPARE( manager.activeAgent(), u"ask_before_edits"_s );

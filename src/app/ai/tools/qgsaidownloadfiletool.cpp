@@ -19,6 +19,7 @@
 #include "qgsaiauditlog.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaisettingsutils.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaiworkspacetrust.h"
 #include "qgsmessagelog.h"
@@ -272,8 +273,16 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
     loop.quit();
   } );
   QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
-  overallTimer.start( OVERALL_TIMEOUT_MS );
-  loop.exec();
+  bool canceled = false;
+  {
+    const QgsAiCancelHookScope cancelScope( u"Downloading file"_s, [&loop, reply]() {
+      reply->abort();
+      loop.quit();
+    } );
+    overallTimer.start( OVERALL_TIMEOUT_MS );
+    loop.exec();
+    canceled = cancelScope.canceledByUser();
+  }
   if ( overallTimer.isActive() )
     overallTimer.stop();
 
@@ -301,8 +310,14 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
   reply->deleteLater();
 
   const bool httpOk = httpStatus >= 200 && httpStatus < 300;
-  const bool success = !exceededLimit && !overallTimedOut && networkError == QNetworkReply::NoError && httpOk;
+  const bool success = !canceled && !exceededLimit && !overallTimedOut && networkError == QNetworkReply::NoError && httpOk;
 
+  if ( canceled )
+  {
+    QFile::remove( destPath );
+    QgsMessageLog::logMessage( u"download_file canceled by the user (url=%1)"_s.arg( urlForLog( url ) ), u"AI/Download"_s, Qgis::MessageLevel::Info, false );
+    return QgsAiToolResult::canceledResult( u"Download was canceled."_s );
+  }
   if ( !success )
   {
     QFile::remove( destPath );

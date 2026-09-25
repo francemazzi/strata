@@ -17,9 +17,11 @@
 #include "ai/tools/qgsaireadtools.h"
 #include "ai/tools/qgsairunpythontool.h"
 #include "ai/tools/qgsaitoolregistry.h"
+#include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgsexception.h"
 #include "qgsfeature.h"
 #include "qgsgeometry.h"
 #include "qgsgraduatedsymbolrenderer.h"
@@ -34,12 +36,15 @@
 #include "qgsnativealgorithms.h"
 #include "qgspallabeling.h"
 #include "qgsprintlayout.h"
+#include "qgsprocessingalgorithm.h"
+#include "qgsprocessingprovider.h"
 #include "qgsprocessingregistry.h"
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsrenderer.h"
 #include "qgssettings.h"
 #include "qgssinglesymbolrenderer.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
@@ -63,6 +68,30 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  //! Fails in prepareAlgorithm(), which the AI runner's task calls in its constructor.
+  class FailingPrepareAlgorithm : public QgsProcessingAlgorithm
+  {
+    public:
+      QString name() const override { return u"failingprepare"_s; }
+      QString displayName() const override { return u"Failing prepare"_s; }
+      void initAlgorithm( const QVariantMap & = QVariantMap() ) override {}
+      QgsProcessingAlgorithm *createInstance() const override { return new FailingPrepareAlgorithm(); }
+
+    protected:
+      bool prepareAlgorithm( const QVariantMap &, QgsProcessingContext &, QgsProcessingFeedback * ) override { throw QgsProcessingException( u"prepare boom"_s ); }
+      QVariantMap processAlgorithm( const QVariantMap &, QgsProcessingContext &, QgsProcessingFeedback * ) override { return QVariantMap(); }
+  };
+
+  class AiTestProcessingProvider : public QgsProcessingProvider
+  {
+    public:
+      QString id() const override { return u"aitest"_s; }
+      QString name() const override { return u"AI test"_s; }
+
+    protected:
+      void loadAlgorithms() override { addAlgorithm( new FailingPrepareAlgorithm() ); }
+  };
+
   class FakeEchoTool : public QgsAiTool
   {
     public:
@@ -144,6 +173,8 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
     void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
+    void addLayerFromFileContextQualityCheckFindsInvalidValue();
+    void addLayerFromFileStopDuringQualityCheckRemovesLayer();
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
@@ -151,6 +182,8 @@ class TestQgsAiToolRegistry : public QObject
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
     void processingToolRunsNoThreadingOnMainThread();
+    void processingPrepareFailureIsAnErrorNotACancel();
+    void processingToolDeclaresInputLayers();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -393,7 +426,11 @@ void TestQgsAiToolRegistry::runPythonDiagnosticsAreConservative()
 void TestQgsAiToolRegistry::runPythonFeatureLoopHintDoesNotChangeDiagnosis()
 {
   QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"print('ok')"_s ), QStringList() );
-  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList { u"slow_feature_loop"_s } );
+  // Reading features in a loop is fine; editing them one by one is what blocks Strata.
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( u"for f in layer.getFeatures():\n    print(f.id())"_s ), QStringList() );
+  const QString editingLoop = u"with edit(layer):\n    for f in layer.getFeatures():\n        layer.changeAttributeValue(f.id(), 0, 1)"_s;
+  QCOMPARE( QgsAiRunPythonTool::featureLoopHints( editingLoop ), QStringList { u"slow_feature_loop"_s } );
+  QVERIFY( QgsAiRunPythonTool::hintMessage( u"slow_feature_loop"_s ).contains( u"calculate_field"_s ) );
 
   QJsonObject diagnosis = QgsAiRunPythonTool::diagnoseCapturedOutput( u"ok"_s, QString(), QString() );
   QCOMPARE( diagnosis.value( u"status"_s ).toString(), u"ok"_s );
@@ -581,25 +618,48 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsSidecarFiles()
   QVERIFY( qmlResult.errorMessage.contains( u"style"_s ) );
   QVERIFY( qmlResult.errorMessage.contains( u"layer.geojson"_s ) );
   QCOMPARE( project.mapLayers().size(), 0 );
+
+  // The suggestion prefers the primary dataset over a same-named .csv export.
+  for ( const QString &name : { u"roads.csv"_s, u"roads.shp"_s, u"roads.qmd"_s } )
+  {
+    QFile file( tempDir.filePath( name ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    QVERIFY( file.write( "x" ) > 0 );
+  }
+  QJsonObject roadsArgs;
+  roadsArgs.insert( u"path"_s, u"roads.qmd"_s );
+  const QgsAiToolResult roadsResult = tool.execute( roadsArgs );
+  QVERIFY( !roadsResult.success );
+  QVERIFY2( roadsResult.errorMessage.contains( u"Open 'roads.shp' instead"_s ), qPrintable( roadsResult.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 0 );
 }
+
+namespace
+{
+  //! Writes a trees GeoJSON with \a count points; the feature at \a invalidIndex gets an unknown context value.
+  bool writeTreesGeoJson( const QString &path, int count, int invalidIndex = -1 )
+  {
+    QFile geojson( path );
+    if ( !geojson.open( QIODevice::WriteOnly | QIODevice::Text ) )
+      return false;
+    QByteArray body = R"({"type":"FeatureCollection","features":[)";
+    for ( int i = 0; i < count; ++i )
+    {
+      if ( i > 0 )
+        body += ',';
+      const QByteArray context = i == invalidIndex ? QByteArrayLiteral( "forest" ) : QByteArrayLiteral( "park" );
+      body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":")" ) + context + QByteArray( R"("},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
+    }
+    body += "]}";
+    return geojson.write( body ) > 0;
+  }
+} // namespace
 
 void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceResponsive()
 {
   QTemporaryDir tempDir;
   QVERIFY( tempDir.isValid() );
-
-  QFile geojson( tempDir.filePath( u"trees.geojson"_s ) );
-  QVERIFY( geojson.open( QIODevice::WriteOnly | QIODevice::Text ) );
-  QByteArray body = R"({"type":"FeatureCollection","features":[)";
-  for ( int i = 0; i < 2500; ++i )
-  {
-    if ( i > 0 )
-      body += ',';
-    body += QByteArray( R"({"type":"Feature","properties":{"estimate":1,"context":"park"},"geometry":{"type":"Point","coordinates":[)" ) + QByteArray::number( i ) + ",0]}}";
-  }
-  body += "]}";
-  QVERIFY( geojson.write( body ) > 0 );
-  geojson.close();
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 2500 ) );
 
   QgsAiFileContextProvider contextProvider( tempDir.path() );
   QgsProject project;
@@ -607,17 +667,50 @@ void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckKeepsInterfaceRes
   QJsonObject args;
   args.insert( u"path"_s, u"trees.geojson"_s );
 
-  bool interfaceEventsRan = false;
-  QTimer interfaceTimer;
-  interfaceTimer.setSingleShot( true );
-  QObject::connect( &interfaceTimer, &QTimer::timeout, &interfaceTimer, [&interfaceEventsRan]() { interfaceEventsRan = true; } );
-  interfaceTimer.start( 0 );
-
+  const QgsAiTestBackgroundProbe probe;
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
-  QVERIFY2( interfaceEventsRan, "add_layer quality check blocked the interface thread" );
+  QVERIFY2( probe.maxLoopLevel() >= 1, "add_layer quality check blocked the interface thread" );
   QCOMPARE( result.output.toObject().value( u"quality_checks"_s ).toObject().value( u"context_values_valid"_s ).toBool(), true );
   QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileContextQualityCheckFindsInvalidValue()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 50, 10 ) );
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  const QJsonObject checks = result.output.toObject().value( u"quality_checks"_s ).toObject();
+  QCOMPARE( checks.value( u"context_values_valid"_s ).toBool( true ), false );
+  QCOMPARE( checks.value( u"passed"_s ).toBool( true ), false );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileStopDuringQualityCheckRemovesLayer()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QVERIFY( writeTreesGeoJson( tempDir.filePath( u"trees.geojson"_s ), 2500 ) );
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"trees.geojson"_s );
+
+  // Stop while the new layer is being checked: the canceled call must leave no layer behind.
+  const QgsAiTestBackgroundProbe probe( []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QCOMPARE( project.mapLayers().size(), 0 );
 }
 
 void TestQgsAiToolRegistry::addLayerFromServiceLoadsXyzAndRollsBack()
@@ -1059,6 +1152,57 @@ void TestQgsAiToolRegistry::processingToolRunsNoThreadingOnMainThread()
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY2( result.success, qPrintable( result.errorMessage ) );
   QCOMPARE( points->selectedFeatureCount(), 1 );
+}
+
+void TestQgsAiToolRegistry::processingPrepareFailureIsAnErrorNotACancel()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"aitest"_s ) )
+    QVERIFY( QgsApplication::processingRegistry()->addProvider( new AiTestProcessingProvider() ) );
+
+  QgsProject project;
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"aitest:failingprepare"_s );
+  args.insert( u"parameters"_s, QJsonObject() );
+  const QgsAiToolResult result = tool.execute( args );
+  // The model must see the real error and be able to retry: this is not a user Stop.
+  QVERIFY( !result.success );
+  QVERIFY( !result.canceled );
+  QVERIFY2( result.errorMessage.contains( u"prepare boom"_s ), qPrintable( result.errorMessage ) );
+}
+
+void TestQgsAiToolRegistry::processingToolDeclaresInputLayers()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  // The task manager tracks dependencies on the global project only.
+  QgsProject *project = QgsProject::instance();
+  const auto cleanup = qScopeGuard( [project]() { project->clear(); } );
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"points"_s, u"memory"_s );
+  QVERIFY( points->isValid() );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project->addMapLayer( points );
+  const QString pointsId = points->id();
+
+  QgsAiRunProcessingAlgorithmTool tool( project );
+  QJsonObject parameters;
+  parameters.insert( u"INPUT"_s, pointsId );
+  parameters.insert( u"DISTANCE"_s, 1 );
+  parameters.insert( u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:buffer"_s );
+  args.insert( u"parameters"_s, parameters );
+
+  // While the algorithm runs, QGIS refuses to remove its input or close the project.
+  bool inputDeclared = false;
+  QTimer::singleShot( 0, [&inputDeclared, points]() { inputDeclared = !QgsApplication::taskManager()->tasksDependentOnLayer( points ).isEmpty(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY( inputDeclared );
+  QVERIFY( QgsApplication::taskManager()->tasksDependentOnLayer( project->mapLayer( pointsId ) ).isEmpty() );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

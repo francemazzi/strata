@@ -34,7 +34,7 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
-  constexpr int REQUEST_TIMEOUT_MS = 20000;
+  constexpr int RULES_SKILLS_REQUEST_TIMEOUT_MS = 20000;
 
   QUrl rulesSkillsApiUrl( const QString &apiBase, const QString &path )
   {
@@ -46,7 +46,7 @@ namespace
     request.setHeader( QNetworkRequest::ContentTypeHeader, u"application/json"_s );
     request.setRawHeader( "Accept", "application/json" );
     request.setRawHeader( "Authorization", ( u"Bearer %1"_s.arg( sessionToken.trimmed() ) ).toUtf8() );
-    request.setTransferTimeout( REQUEST_TIMEOUT_MS );
+    request.setTransferTimeout( RULES_SKILLS_REQUEST_TIMEOUT_MS );
   }
 
   QString rulesSkillsResponseErrorMessage( QNetworkReply *reply, const QByteArray &body )

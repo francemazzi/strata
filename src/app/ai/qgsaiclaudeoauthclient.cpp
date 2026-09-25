@@ -70,7 +70,7 @@ namespace
     return false;
   }
 
-  QJsonObject postJsonBlocking( const QUrl &url, const QJsonObject &payload, int timeoutMs, int &httpStatus, QString *errorMessage )
+  QJsonObject postClaudeTokenRequest( const QUrl &url, const QJsonObject &payload, int timeoutMs, int &httpStatus, QString *errorMessage )
   {
     httpStatus = 0;
     QgsNetworkAccessManager *nam = QgsNetworkAccessManager::instance();
@@ -311,7 +311,7 @@ bool QgsAiClaudeOAuthClient::exchangeCode( const QString &code, QString *errorMe
   payload.insert( u"state"_s, mState );
 
   int httpStatus = 0;
-  const QJsonObject tokenObject = postJsonBlocking( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
+  const QJsonObject tokenObject = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
   if ( tokenObject.isEmpty() )
     return false;
 
@@ -356,7 +356,7 @@ bool QgsAiClaudeOAuthClient::refreshAccessToken( AccessToken &token, QString *er
   payload.insert( u"scope"_s, QString::fromUtf8( CLAUDE_SCOPE ) );
 
   int httpStatus = 0;
-  const QJsonObject object = postJsonBlocking( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
+  const QJsonObject object = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
   if ( object.isEmpty() )
     return false;
 

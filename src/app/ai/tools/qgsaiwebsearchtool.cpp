@@ -17,6 +17,7 @@
 
 #include "qgsaimodelrouter.h"
 #include "qgsaiplanclient.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsnetworkaccessmanager.h"
 
@@ -96,17 +97,24 @@ QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const Q
   timer.setSingleShot( true );
   QObject::connect( &timer, &QTimer::timeout, &loop, &QEventLoop::quit );
   QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
-  timer.start( timeoutMs );
-  loop.exec();
+  bool canceled = false;
+  {
+    const QgsAiCancelHookScope cancelScope( u"Strata Plan request"_s, [&loop]() { loop.quit(); } );
+    timer.start( timeoutMs );
+    loop.exec();
+    canceled = cancelScope.canceledByUser();
+  }
 
-  const bool timedOut = !timer.isActive();
-  if ( timedOut )
+  const bool timedOut = !canceled && !timer.isActive();
+  if ( canceled || timedOut )
     reply->abort();
   const int httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
   const QByteArray responseBytes = reply->readAll();
   const QNetworkReply::NetworkError networkError = reply->error();
   reply->deleteLater();
 
+  if ( canceled )
+    return QgsAiToolResult::canceledResult( u"Strata Plan request was canceled."_s );
   if ( timedOut )
     return QgsAiToolResult::error( u"Strata Plan search request timed out."_s );
   if ( networkError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300 )

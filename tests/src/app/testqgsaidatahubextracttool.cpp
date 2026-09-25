@@ -8,15 +8,18 @@
 #include "qgsaimodelrouter.h"
 #include "qgsaisecretstore.h"
 #include "qgsaisecretstoretestutils.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitestloopbackserver.h"
 #include "qgssettings.h"
 #include "qgstest.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -67,6 +70,8 @@ class TestQgsAiDataHubExtractTool : public QObject
     void includesAgentContextWhenSetOnRouter();
     void rejectsMalformedArtifact();
     void stopsAfterBoundedPolls();
+    void stopDuringPendingRequestReturnsCanceled();
+    void stopDuringPollWaitReturnsCanceled();
 };
 
 void TestQgsAiDataHubExtractTool::init()
@@ -245,6 +250,50 @@ void TestQgsAiDataHubExtractTool::stopsAfterBoundedPolls()
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"2 polling attempts"_s ) );
   QCOMPARE( server.requestCount, 3 );
+}
+
+void TestQgsAiDataHubExtractTool::stopDuringPendingRequestReturnsCanceled()
+{
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse pending = QgsAiTestLoopbackServer::jsonResponse( 202, "Accepted", QByteArrayLiteral( R"({"id":"job-pending","status":"QUEUED"})" ) );
+  pending.responseDelayMs = 60000;
+  server.responses << pending;
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QVERIFY( configurePlanForLoopback( router, server.serverPort() ) );
+  QgsAiDataHubExtractTool tool( &router, 0, 4 );
+  QTimer::singleShot( 200, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer elapsed;
+  elapsed.start();
+  const QgsAiToolResult result = tool.execute( validArgs() );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  // Well under the 20 s request timeout: Stop aborted the pending request.
+  QVERIFY2( elapsed.elapsed() < 10000, "Stop did not interrupt the pending request" );
+  QVERIFY( !qgsAiHasActiveBackgroundTool() );
+}
+
+void TestQgsAiDataHubExtractTool::stopDuringPollWaitReturnsCanceled()
+{
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 202, "Accepted", QByteArrayLiteral( R"({"id":"job-wait","status":"QUEUED"})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"status":"running"})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QVERIFY( configurePlanForLoopback( router, server.serverPort() ) );
+  // A minute between polls: only Stop can end the wait early.
+  QgsAiDataHubExtractTool tool( &router, 60000, 4 );
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer elapsed;
+  elapsed.start();
+  const QgsAiToolResult result = tool.execute( validArgs() );
+  QVERIFY( !result.success );
+  QVERIFY( result.canceled );
+  QVERIFY2( elapsed.elapsed() < 10000, "Stop did not interrupt the polling wait" );
+  QVERIFY( server.requestCount <= 2 );
 }
 
 QGSTEST_MAIN( TestQgsAiDataHubExtractTool )

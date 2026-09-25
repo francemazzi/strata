@@ -29,7 +29,9 @@
 #include "qgsvectorlayer.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QString>
+#include <QTemporaryDir>
 
 using namespace Qt::StringLiterals;
 
@@ -54,6 +56,7 @@ class TestQgisApp : public QObject
     void copyPasteMultipleStyles();
     void autoSelectAddedLayerIgnoresStalePointers();
     void dropShapefileSidecarsDoesNotCrash();
+    void dropMetadataAndStyleSidecarsAreNotLayers();
 
   public slots:
     void addVectorLayerShp();
@@ -338,6 +341,29 @@ void TestQgisApp::dropShapefileSidecarsDoesNotCrash()
   QCOMPARE( mQgisApp->activeLayer(), added.at( 0 ) );
 
   QgsProject::instance()->layerStore()->removeMapLayers( QStringList() << added.at( 0 )->id() );
+}
+
+void TestQgisApp::dropMetadataAndStyleSidecarsAreNotLayers()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  for ( const QString &suffix : { u"shp"_s, u"shx"_s, u"dbf"_s, u"prj"_s } )
+    QVERIFY( QFile::copy( mTestDataDir + u"points."_s + suffix, tempDir.filePath( u"points."_s + suffix ) ) );
+  for ( const QString &suffix : { u"qmd"_s, u"qml"_s } )
+  {
+    QFile sidecar( tempDir.filePath( u"points."_s + suffix ) );
+    QVERIFY( sidecar.open( QIODevice::WriteOnly ) );
+    QVERIFY( sidecar.write( "<!DOCTYPE qgis><qgis/>" ) > 0 );
+  }
+
+  for ( const QString &suffix : { u"qmd"_s, u"qml"_s } )
+  {
+    bool ok = false;
+    const QList<QgsMapLayer *> opened = QgsAppLayerHandling::openLayer( tempDir.filePath( u"points."_s + suffix ), ok, false, true, true );
+    QVERIFY2( ok, qPrintable( suffix ) );
+    QVERIFY2( opened.isEmpty(), qPrintable( suffix ) );
+  }
+  QCOMPARE( QgsProject::instance()->mapLayers().size(), 0 );
 }
 
 QGSTEST_MAIN( TestQgisApp )

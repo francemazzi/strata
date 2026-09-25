@@ -4,6 +4,8 @@
   begin                : April 2026
 ***************************************************************************/
 
+#include <algorithm>
+#include <functional>
 #include <memory>
 
 #include "ai/index/qgsaiembeddingprovider.h"
@@ -15,15 +17,18 @@
 #include "ai/qgsaireviewpatchengine.h"
 #include "ai/qgsaiworkspacetrust.h"
 #include "ai/tools/qgsaiechotool.h"
-#include "ai/tools/qgsaitoolregistry.h"
 #include "ai/tools/qgsaitaskrunner.h"
+#include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaisecretstoretestutils.h"
 #include "qgsaitestloopbackserver.h"
+#include "qgsapplication.h"
 #include "qgsfeedback.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
 
+#include <QAbstractButton>
+#include <QApplication>
 #include <QAtomicInt>
 #include <QByteArray>
 #include <QDir>
@@ -33,6 +38,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPdfWriter>
 #include <QScopeGuard>
@@ -178,17 +184,11 @@ namespace
       {
         if ( mManager && *mManager )
           QTimer::singleShot( 0, *mManager, &QgsAiAgentSessionManager::cancelActiveRequest );
-        auto feedback = std::make_unique<QgsFeedback>();
-        auto *task = new QgsAiFunctionTask(
-          u"slow"_s,
-          []( QgsFeedback *workerFeedback ) {
-            while ( !workerFeedback->isCanceled() )
-              QThread::msleep( 5 );
-            return false;
-          },
-          feedback.get()
-        );
-        const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, feedback.get(), u"slow"_s );
+        const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"slow"_s, []( QgsFeedback *workerFeedback ) {
+          while ( !workerFeedback->isCanceled() )
+            QThread::msleep( 5 );
+          return false;
+        } );
         if ( wait.canceled )
           return QgsAiToolResult::canceledResult( u"slow tool canceled"_s );
         return QgsAiToolResult::ok( QJsonObject() );
@@ -219,6 +219,105 @@ namespace
     private:
       bool *mRan = nullptr;
   };
+
+  //! Waits on the shared background runner until canceled; onStart runs from the nested event loop.
+  class WaitingTool : public QgsAiTool
+  {
+    public:
+      WaitingTool( const QString &name, std::function<void()> onStart )
+        : mName( name )
+        , mOnStart( std::move( onStart ) )
+      {}
+      QString name() const override { return mName; }
+      QString description() const override { return u"waits until canceled"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        const std::function<void()> onStart = mOnStart;
+        QTimer::singleShot( 0, [onStart]() {
+          if ( onStart )
+            onStart();
+        } );
+        const QgsAiTaskWaitResult wait = qgsAiRunFunction( mName, []( QgsFeedback *workerFeedback ) {
+          while ( !workerFeedback->isCanceled() )
+            QThread::msleep( 5 );
+          return false;
+        } );
+        if ( wait.canceled )
+          return QgsAiToolResult::canceledResult( u"waiting tool canceled"_s );
+        return QgsAiToolResult::ok( QJsonObject() );
+      }
+      bool requiresApproval() const override { return false; }
+
+    private:
+      QString mName;
+      std::function<void()> mOnStart;
+  };
+
+  //! Runs onExecute inside execute() (while the round is active), records that it ran and succeeds.
+  class CallbackTool : public QgsAiTool
+  {
+    public:
+      CallbackTool( const QString &name, bool requiresApproval, std::function<void()> onExecute, bool *ran = nullptr )
+        : mName( name )
+        , mRequiresApproval( requiresApproval )
+        , mOnExecute( std::move( onExecute ) )
+        , mRan( ran )
+      {}
+      QString name() const override { return mName; }
+      QString description() const override { return u"callback tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        if ( mRan )
+          *mRan = true;
+        if ( mOnExecute )
+          mOnExecute();
+        return QgsAiToolResult::ok( QJsonObject() );
+      }
+      bool requiresApproval() const override { return mRequiresApproval; }
+
+    private:
+      QString mName;
+      bool mRequiresApproval = false;
+      std::function<void()> mOnExecute;
+      bool *mRan = nullptr;
+  };
+
+  //! Points the OpenRouter provider of \a router at the loopback \a port.
+  void configureOpenRouterLoopback( QgsAiModelRouter &router, quint16 port )
+  {
+    QgsSettings().setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+    QgsSettings().setValue( u"ai/network/maxRetries"_s, 0 );
+    router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+    QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+    providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( port );
+    providerSettings.model = u"test/model"_s;
+    providerSettings.enabled = true;
+    router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+    router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  }
+
+  QByteArray toolCallsResponseBody( const QStringList &toolNames )
+  {
+    QJsonArray calls;
+    for ( const QString &toolName : toolNames )
+    {
+      calls.append( QJsonObject {
+        { u"id"_s, u"call_%1"_s.arg( toolName ) },
+        { u"type"_s, u"function"_s },
+        { u"function"_s, QJsonObject { { u"name"_s, toolName }, { u"arguments"_s, u"{}"_s } } },
+      } );
+    }
+    const QJsonObject message { { u"role"_s, u"assistant"_s }, { u"content"_s, QJsonValue() }, { u"tool_calls"_s, calls } };
+    const QJsonObject choice { { u"message"_s, message }, { u"finish_reason"_s, u"tool_calls"_s } };
+    return QJsonDocument( QJsonObject { { u"choices"_s, QJsonArray { choice } } } ).toJson( QJsonDocument::Compact );
+  }
+
+  bool historyContains( const QList<QgsAiChatMessage> &history, const QString &text )
+  {
+    return std::any_of( history.cbegin(), history.cend(), [&text]( const QgsAiChatMessage &message ) { return message.content.contains( text ); } );
+  }
 
   void clearProviderSettings()
   {
@@ -345,10 +444,16 @@ class TestQgsAiAgentSessionManager : public QObject
     void repeatedEquivalentToolCallsStopTurn();
     void nonRetryableToolFailureStopsTurn();
     void stopDuringToolEndsTurn();
+    void newChatDuringToolDropsRoundAndUnlocksInput();
+    void taskManagerCancelEndsTurn();
     void runPythonSoftFailureMarksToolResultError();
     void unverifiedSuccessClaimTriggersCompletionGate();
     void emptyAssistantAfterToolErrorTriggersRecovery();
     void emptyAssistantAfterSuccessfulToolsUsesLocalSummary();
+    void emptyReplyWithoutToolsIsRequestError();
+    void streamErrorAfterToolsIsRequestError();
+    void modeSwitchDuringToolKeepsRoundApproval();
+    void sendWhileRunningDoesNotTouchHistory();
     void agentBehaviorTogglePropagatesToRouter();
     void planModeDoesNotAdvertiseTools();
     void unresolvedPlanToolsNormalizesNearMissNames();
@@ -1021,6 +1126,135 @@ void TestQgsAiAgentSessionManager::stopDuringToolEndsTurn()
   QVERIFY( manager.history().last().content.contains( u"Stopped"_s ) );
 }
 
+void TestQgsAiAgentSessionManager::newChatDuringToolDropsRoundAndUnlocksInput()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::
+         jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_wait\",\"type\":\"function\",\"function\":{\"name\":\"waiting_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}" ) )
+    << QgsAiTestLoopbackServer::
+         jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_second\",\"type\":\"function\",\"function\":{\"name\":\"second_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QgsAiAgentSessionManager *managerPtr = nullptr;
+  bool secondRan = false;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<WaitingTool>( u"waiting_tool"_s, [&managerPtr]() {
+    // The user starts a new chat while the tool is still running.
+    if ( managerPtr )
+      managerPtr->startNewSession();
+  } ) );
+  registry.registerTool( std::make_unique<SecondTool>( &secondRan ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  managerPtr = &manager;
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"editor"_s );
+  QSignalSpy runningSpy( &manager, &QgsAiAgentSessionManager::requestRunningChanged );
+
+  manager.sendUserMessage( u"run the waiting tool"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 1 );
+  // Nothing from the old round leaks into the new chat, and the input is unlocked.
+  QVERIFY( manager.history().isEmpty() );
+  QVERIFY( !runningSpy.isEmpty() );
+  QCOMPARE( runningSpy.last().at( 0 ).toBool(), false );
+
+  // The Stop raised by the new chat must not kill the next turn's tools.
+  managerPtr = nullptr;
+  manager.sendUserMessage( u"run the second tool"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QVERIFY( secondRan );
+  QCOMPARE( server.requestCount, 3 );
+  QCOMPARE( manager.history().last().content, u"done"_s );
+}
+
+void TestQgsAiAgentSessionManager::taskManagerCancelEndsTurn()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::
+      jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_wait\",\"type\":\"function\",\"function\":{\"name\":\"waiting_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<WaitingTool>( u"waiting_tool"_s, []() {
+    // The user cancels the task from the QGIS task manager instead of pressing Stop.
+    const QList<QgsTask *> tasks = QgsApplication::taskManager()->activeTasks();
+    for ( QgsTask *task : tasks )
+      task->cancel();
+  } ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"editor"_s );
+
+  manager.sendUserMessage( u"run the waiting tool"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 1 );
+  QVERIFY( manager.history().last().content.contains( u"Stopped"_s ) );
+}
+
 void TestQgsAiAgentSessionManager::runPythonSoftFailureMarksToolResultError()
 {
   clearProviderSettings();
@@ -1275,6 +1509,214 @@ void TestQgsAiAgentSessionManager::emptyAssistantAfterSuccessfulToolsUsesLocalSu
   QVERIFY( last.contains( u"native:serviceareafromlayer"_s ) );
   QVERIFY( last.contains( u"Service area (from layer)"_s ) );
   QVERIFY( last.contains( u"visual evidence"_s, Qt::CaseInsensitive ) );
+}
+
+void TestQgsAiAgentSessionManager::emptyReplyWithoutToolsIsRequestError()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  // An empty 200 before any tool ran is a failed request (e.g. a swallowed upstream 402),
+  // not a completion to summarize.
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiToolRegistry registry;
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"editor"_s );
+
+  manager.sendUserMessage( u"hello"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 1 );
+  const QgsAiChatMessage last = manager.history().last();
+  QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QVERIFY( !last.content.contains( u"empty reply"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  // A provider error delivered inside a 200 stream after a tool round must reach the user,
+  // not be replaced by a local summary of the tools.
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s } ) )
+                   << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}\n\n" ), QByteArrayLiteral( "data: [DONE]\n\n" ) } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"editor"_s );
+
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+
+  manager.sendUserMessage( u"echo something"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 2 );
+  const QgsAiChatMessage last = manager.history().last();
+  QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+  QVERIFY2( last.content.contains( u"Insufficient credits"_s ), qPrintable( last.content ) );
+  QVERIFY( !historyContains( manager.history(), u"Here is what I ran"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::modeSwitchDuringToolKeepsRoundApproval()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s, u"approval_tool"_s } ) )
+                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiAgentSessionManager *managerPtr = nullptr;
+  bool approvalToolRan = false;
+  QgsAiToolRegistry registry;
+  // The user switches to Agent mode while the first (read-only) tool of the round runs.
+  registry.registerTool( std::make_unique<CallbackTool>( u"echo"_s, false, [&managerPtr]() {
+    if ( managerPtr )
+      managerPtr->setActiveAgent( u"editor"_s );
+  } ) );
+  registry.registerTool( std::make_unique<CallbackTool>( u"approval_tool"_s, true, std::function<void()>(), &approvalToolRan ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  managerPtr = &manager;
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"ask_before_edits"_s );
+
+  // Decline the approval dialog as soon as it opens. A native macOS alert has no widget to click.
+  const bool nativeDialogsWereDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
+  QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
+  const auto restoreNativeDialogs = qScopeGuard( [nativeDialogsWereDisabled]() { QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsWereDisabled ); } );
+  bool approvalAsked = false;
+  QTimer approvalCloser;
+  approvalCloser.setInterval( 20 );
+  connect( &approvalCloser, &QTimer::timeout, this, [&approvalAsked]() {
+    if ( QMessageBox *box = qobject_cast<QMessageBox *>( QApplication::activeModalWidget() ) )
+    {
+      approvalAsked = true;
+      if ( QAbstractButton *no = box->button( QMessageBox::No ) )
+        no->click();
+    }
+  } );
+  approvalCloser.start();
+
+  manager.sendUserMessage( u"inspect, then edit"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  approvalCloser.stop();
+
+  QVERIFY( approvalAsked );
+  QVERIFY( !approvalToolRan );
+  QCOMPARE( manager.activeAgent(), u"editor"_s );
+}
+
+void TestQgsAiAgentSessionManager::sendWhileRunningDoesNotTouchHistory()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"busy_tool"_s } ) )
+                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiAgentSessionManager *managerPtr = nullptr;
+  QgsAiToolRegistry registry;
+  // Something (e.g. a suggestion button) sends a message while the tool runs.
+  registry.registerTool( std::make_unique<CallbackTool>( u"busy_tool"_s, false, [&managerPtr]() {
+    if ( managerPtr )
+      managerPtr->sendUserMessage( u"another request"_s );
+  } ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  managerPtr = &manager;
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"editor"_s );
+  QSignalSpy stateSpy( &manager, &QgsAiAgentSessionManager::requestStateChanged );
+
+  manager.sendUserMessage( u"run the busy tool"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 2 );
+  QVERIFY( !historyContains( manager.history(), u"already running"_s ) );
+  QVERIFY( !historyContains( manager.history(), u"another request"_s ) );
+  QCOMPARE( manager.history().last().content, u"done"_s );
+  const bool reportedBusy = std::any_of( stateSpy.cbegin(), stateSpy.cend(), []( const QList<QVariant> &args ) { return args.at( 0 ).toString() == "busy"_L1; } );
+  QVERIFY( reportedBusy );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorTogglePropagatesToRouter()

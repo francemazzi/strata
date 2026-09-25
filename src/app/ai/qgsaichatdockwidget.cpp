@@ -2674,6 +2674,15 @@ void QgsAiChatDockWidget::setRequestRunning( bool running )
     mInputTextEdit->setEnabled( !running );
   if ( mCancelButton )
     mCancelButton->setEnabled( running );
+  // Tools pump the event loop: keep mode and model fixed until the turn ends, so approvals and
+  // the provider chain stay those the turn started with.
+  if ( mModePill )
+    mModePill->setEnabled( !running );
+  if ( mModelPill )
+    mModelPill->setEnabled( !running );
+  const QList<QPushButton *> analyzeButtons = findChildren<QPushButton *>( u"aiGisCardReviewButton"_s );
+  for ( QPushButton *button : analyzeButtons )
+    button->setEnabled( !running );
   const QList<QPushButton *> continueButtons = findChildren<QPushButton *>( u"aiContinueToolLimitButton"_s );
   for ( QPushButton *button : continueButtons )
     button->setEnabled( button->property( "tool_limit_status" ).toString() == "pending"_L1 && !running && mSessionManager );
@@ -3186,7 +3195,7 @@ QList<QgsAiChatContextFile> QgsAiChatDockWidget::contextFilesForCurrentMessage( 
 
 void QgsAiChatDockWidget::sendGisSuggestionToChat( const QgsAiGisSuggestion &suggestion )
 {
-  if ( !mSessionManager || suggestion.actionPrompt.trimmed().isEmpty() )
+  if ( !mSessionManager || suggestion.actionPrompt.trimmed().isEmpty() || mRequestRunning )
     return;
 
   setModeLabel( u"Ask before edits"_s );
@@ -3287,6 +3296,7 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
 
     QPushButton *analyzeButton = new QPushButton( tr( "Analyze" ), row );
     analyzeButton->setObjectName( u"aiGisCardReviewButton"_s );
+    analyzeButton->setEnabled( !mRequestRunning );
     connect( analyzeButton, &QPushButton::clicked, this, [this, suggestion]() { sendGisSuggestionToChat( suggestion ); } );
     rowLayout->addWidget( analyzeButton );
 

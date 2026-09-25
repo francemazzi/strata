@@ -15,9 +15,11 @@
 
 #include "qgsairunpythontool.h"
 
+#include <algorithm>
+
 #include "qgsaiauditlog.h"
-#include "qgsaipythonruntime.h"
 #include "qgsaipythonapprovaldialog.h"
+#include "qgsaipythonruntime.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaiworkspacetrust.h"
@@ -38,7 +40,6 @@
 #include <QStringList>
 #include <QTemporaryFile>
 #include <QUuid>
-#include <algorithm>
 
 using namespace Qt::StringLiterals;
 
@@ -82,8 +83,10 @@ except Exception as __qgsai_import_error:
 
 try:
 %3
-    with __qgsai_session(%4, %5):
-        exec(compile(__qgsai_code, "<ai_run_python>", "exec"), globals())
+    __qgsai_compiled = compile(__qgsai_code, "<ai_run_python>", "exec")
+    # The session gets the compiled snippet so its interrupts only land in the snippet's code.
+    with __qgsai_session(%4, %5, __qgsai_compiled):
+        exec(__qgsai_compiled, globals())
 except SystemExit as __qgsai_ex:
     if __qgsai_ex.code not in (None, 0):
         __qgsai_exception_type = type(__qgsai_ex).__name__
@@ -217,8 +220,12 @@ QString QgsAiRunPythonTool::description() const
     "Use this tool ONLY when the action genuinely requires Python (e.g. driving "
     "the QGIS API to add a runtime layer). Prefer propose_edit/propose_create_file "
     "for static file changes. Prefer calculate_field, batch_update_attributes or "
-    "run_processing_algorithm instead of Python feature loops. Execution stops after "
-    "a configurable timeout if the snippet does not return."
+    "run_processing_algorithm instead of Python feature loops: they run in the background "
+    "and can be stopped. Python execution stops after a time budget (120 s by default, "
+    "configurable in the AI settings). processing.run runs the algorithms shipped with Strata "
+    "(native, GDAL, and models built from them) in the background: the window stays responsive, "
+    "Stop works and that time does not count. Script and plugin algorithms run on the interface "
+    "thread, like in the Python console. While processing.run works, project layers cannot be removed."
   );
 }
 
@@ -283,10 +290,21 @@ QJsonObject QgsAiRunPythonTool::diagnoseCapturedOutput( const QString &stdoutTex
 
 QStringList QgsAiRunPythonTool::featureLoopHints( const QString &code )
 {
-  const QRegularExpression loopExpression( uR"(\bgetFeatures\s*\()"_s );
-  if ( !loopExpression.match( code ).hasMatch() )
-    return {};
-  return { u"slow_feature_loop"_s };
+  // Editing features one by one in Python runs on the interface thread and is the usual
+  // reason a snippet hits its time budget. Reading features in a loop is fine.
+  static const QRegularExpression featureIteration( uR"(\bgetFeatures\s*\()"_s );
+  static const QRegularExpression featureMutation( uR"(\b(?:changeAttributeValues?|changeGeometry|updateFeature|deleteFeatures?|setAttribute)\s*\()"_s );
+  static const QRegularExpression loop( uR"(\b(?:for|while)\b)"_s );
+  if ( featureIteration.match( code ).hasMatch() && featureMutation.match( code ).hasMatch() && loop.match( code ).hasMatch() )
+    return { u"slow_feature_loop"_s };
+  return {};
+}
+
+QString QgsAiRunPythonTool::hintMessage( const QString &hint )
+{
+  if ( hint == "slow_feature_loop"_L1 )
+    return u"This snippet edits features one by one in a Python loop, which blocks Strata. For whole-layer updates prefer calculate_field or batch_update_attributes: they run in the background and can be stopped."_s;
+  return QString();
 }
 
 QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
@@ -341,13 +359,20 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   QgsMessageLog::logMessage( u"run_python: executing approved code (codeChars=%1)"_s.arg( code.size() ), u"AI/Python"_s, Qgis::MessageLevel::Info, false );
   QgsAiAuditLog::append( u"run_python"_s, code );
 
+  // Stop cancels this bridge; Python cancels its Processing runs from it and stops the snippet.
   QgsProcessingFeedback feedback;
-  QgsAiActiveFeedbackScope activeFeedback( &feedback, u"run_python"_s );
+  const QgsAiActiveFeedbackScope activeFeedback( &feedback, u"run_python"_s );
 
-  // Build the wrapper with safely-quoted paths.
+  // Build the wrapper with safely-quoted paths. One arg() call, so a '%' sequence inside a
+  // substituted path or bootstrap is never read as a later placeholder.
   const QString wrapper = QString::fromUtf8( PY_WRAPPER_TEMPLATE )
-                            .arg( escapeRunPythonPath( codePath ), escapeRunPythonPath( outPath ), QgsAiPythonRuntime::bootstrapSource( QgsAiPythonRuntime::packageTargetPath() ) )
-                            .arg( QString::number( static_cast<qulonglong>( reinterpret_cast<quintptr>( &feedback ) ) ), QString::number( mTimeoutSeconds ) );
+                            .arg(
+                              escapeRunPythonPath( codePath ),
+                              escapeRunPythonPath( outPath ),
+                              QgsAiPythonRuntime::bootstrapSource( QgsAiPythonRuntime::packageTargetPath() ),
+                              QString::number( static_cast<qulonglong>( reinterpret_cast<quintptr>( &feedback ) ) ),
+                              QString::number( mTimeoutSeconds )
+                            );
 
   {
     QFile wrapperFile( wrapperPath );
@@ -391,17 +416,27 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   if ( !ranOk )
   {
     QgsMessageLog::logMessage( u"run_python: QgsPythonRunner::runFileCaptureError() returned false (wrapper failed)."_s, u"AI/Python"_s, Qgis::MessageLevel::Warning, false );
-    if ( feedback.isCanceled() )
+    if ( activeFeedback.canceledByUser() )
       return QgsAiToolResult::canceledResult( u"Python execution was canceled."_s );
     const QString detail = !runnerError.isEmpty() ? runnerError : tracebackText;
     return QgsAiToolResult::error( u"Python wrapper failed to execute. %1"_s.arg( detail ) );
   }
 
-  if ( feedback.isCanceled() || ( exceptionType == "RunPythonTimeout"_L1 && exceptionMessage.contains( u"Canceled."_s ) ) )
+  const QStringList hints = featureLoopHints( code );
+  if ( activeFeedback.canceledByUser() )
     return QgsAiToolResult::canceledResult( u"Python execution was canceled."_s );
+  if ( exceptionType == "RunPythonLayersRemoved"_L1 )
+  {
+    // Removed from code by a plugin: a tool error the model can react to, not a Stop.
+    return QgsAiToolResult::error( u"%1 run_python stopped so the snippet would not use a deleted layer. Fetch the layers again and retry."_s.arg( exceptionMessage ) );
+  }
   if ( exceptionType == "RunPythonTimeout"_L1 )
   {
-    return QgsAiToolResult::error( u"stopped after %1 s of Python. Use calculate_field, batch_update_attributes or run_processing_algorithm for long GIS work."_s.arg( mTimeoutSeconds ) );
+    QString message = u"run_python stopped after %1 s of Python (time inside background processing.run calls does not count). Use calculate_field, batch_update_attributes or run_processing_algorithm for long GIS work."_s
+                        .arg( mTimeoutSeconds );
+    for ( const QString &hint : hints )
+      message += ' ' + hintMessage( hint );
+    return QgsAiToolResult::error( message );
   }
 
   const QJsonObject diagnosis = diagnoseCapturedOutput( stdoutText, stderrText, tracebackText, exceptionType, exceptionMessage );
@@ -414,12 +449,12 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   output.insert( u"stderr"_s, truncateRunPythonOutput( stderrText, MAX_CAPTURE_BYTES ) );
   if ( !tracebackText.isEmpty() )
     output.insert( u"traceback"_s, truncateRunPythonOutput( tracebackText, MAX_CAPTURE_BYTES ) );
-  const QStringList hints = featureLoopHints( code );
   if ( !hints.isEmpty() )
   {
+    // Advice only: hints never turn a successful run into a failure.
     QJsonArray hintArray;
     for ( const QString &hint : hints )
-      hintArray.push_back( hint );
+      hintArray.push_back( QJsonObject { { u"code"_s, hint }, { u"message"_s, hintMessage( hint ) } } );
     output.insert( u"hints"_s, hintArray );
   }
   return QgsAiToolResult::ok( output );
