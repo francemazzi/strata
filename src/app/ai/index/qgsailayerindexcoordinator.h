@@ -66,6 +66,12 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
 
     bool isBulkOperationActive() const { return mBulkOperationDepth > 0; }
 
+    //! True while a layer is being indexed in the background.
+    bool isRunning() const;
+
+    //! Stops indexing for good (Strata is quitting): disconnects and cancels the running layer.
+    void shutdown();
+
     //! Idle gap between two consecutive per-layer snapshot flushes (main-thread work).
     int interFlushDelayMs() const { return mInterFlushDelayMs; }
     void setInterFlushDelayMs( int ms );
@@ -100,7 +106,9 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     QSet<QString> mDirtyLayers;
     QTimer mDebounceTimer;
     QPointer<QgsTask> mRunningTask;
+    QString mRunningLayerId;
     bool mEnabled = false;
+    bool mShutdown = false;
     bool mUseBulkDebounce = false;
     int mDebounceMs = 5000;
     int mBulkDebounceMs = 15000;

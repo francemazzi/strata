@@ -15,12 +15,18 @@
 
 #include "qgsaiindextools.h"
 
+#include <algorithm>
+#include <memory>
+
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaiworkspaceindex.h"
+#include "qgsfeedback.h"
 
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <QString>
 
 using namespace Qt::StringLiterals;
@@ -53,10 +59,12 @@ QgsAiToolResult QgsAiIndexStatusTool::execute( const QJsonObject &args )
   if ( !mIndex )
     return QgsAiToolResult::error( u"Workspace index is not available."_s );
 
-  mIndex->ensureLoaded();
+  // Never load on the interface thread: report what is known and load in the background.
+  mIndex->requestLoad();
   const QgsAiWorkspaceIndex::Status status = mIndex->status();
   QJsonObject output;
   output.insert( u"indexed"_s, status.indexed );
+  output.insert( u"loading"_s, status.loading );
   output.insert( u"file_count"_s, status.fileCount );
   output.insert( u"chunk_count"_s, status.chunkCount );
   output.insert( u"file_chunk_count"_s, status.fileChunkCount );
@@ -103,10 +111,28 @@ QgsAiToolResult QgsAiSearchWorkspaceTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Argument 'query' is required and must be non-empty."_s );
 
   const int k = args.value( u"k"_s ).toInt( 5 );
-  QString errorMessage;
-  const QList<QgsAiWorkspaceIndex::Chunk> hits = mIndex->search( query, k, &errorMessage );
-  if ( hits.isEmpty() && !errorMessage.isEmpty() )
-    return QgsAiToolResult::error( errorMessage );
+  struct SearchJob
+  {
+      QList<QgsAiWorkspaceIndex::Chunk> hits;
+      QString errorMessage;
+  };
+  auto job = std::make_shared<SearchJob>();
+  const QPointer<QgsAiWorkspaceIndex> index( mIndex );
+  // The query embedding (and a wait for a running reindex batch) happen in the background.
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Searching the workspace index"_s, [job, index, query, k]( QgsFeedback *feedback ) {
+    if ( !index )
+      return false;
+    job->hits = index->search( query, k, &job->errorMessage, feedback );
+    index->closeDatabaseConnectionForCurrentThread();
+    return true;
+  } );
+  if ( wait.abandoned || wait.canceled )
+    return QgsAiToolResult::canceledResult( u"Workspace search was canceled."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( u"Workspace index is not available."_s );
+  const QList<QgsAiWorkspaceIndex::Chunk> hits = job->hits;
+  if ( hits.isEmpty() && !job->errorMessage.isEmpty() )
+    return QgsAiToolResult::error( job->errorMessage );
 
   QJsonArray array;
   for ( const QgsAiWorkspaceIndex::Chunk &c : hits )
@@ -172,12 +198,26 @@ QgsAiToolResult QgsAiReindexWorkspaceTool::execute( const QJsonObject &args )
   const int maxFiles = std::clamp( requestedMax, 1, 5000 );
 
   const qint64 startedAt = QDateTime::currentMSecsSinceEpoch();
-  QString errorMessage;
-  const bool ok = mIndex->reindex( maxFiles, &errorMessage );
+  auto errorMessage = std::make_shared<QString>();
+  const QPointer<QgsAiWorkspaceIndex> index( mIndex );
+  const QString workspaceRoot = mIndex->workspaceRoot();
+  // Scanning, reading and embedding all run in the background, with progress and Stop.
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Reindexing the workspace"_s, [errorMessage, index, workspaceRoot, maxFiles]( QgsFeedback *feedback ) {
+    if ( !index )
+      return false;
+    QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
+    bool ok = QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( workspaceRoot, maxFiles, snapshot, errorMessage.get(), feedback );
+    if ( ok )
+      ok = index->reindex( snapshot, workspaceRoot, errorMessage.get(), feedback );
+    index->closeDatabaseConnectionForCurrentThread();
+    return ok;
+  } );
   const qint64 durationMs = QDateTime::currentMSecsSinceEpoch() - startedAt;
 
-  if ( !ok )
-    return QgsAiToolResult::error( errorMessage.isEmpty() ? u"Reindex failed."_s : errorMessage );
+  if ( wait.abandoned || wait.canceled )
+    return QgsAiToolResult::canceledResult( u"Workspace reindex was canceled."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( errorMessage->isEmpty() ? u"Reindex failed."_s : *errorMessage );
 
   const QgsAiWorkspaceIndex::Status status = mIndex->status();
   QJsonObject output;
@@ -223,12 +263,33 @@ QgsAiToolResult QgsAiReindexLayersTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Refusing to reindex layers without explicit 'confirm: true' (local indexing may be CPU-intensive)."_s );
 
   const qint64 startedAt = QDateTime::currentMSecsSinceEpoch();
-  QString errorMessage;
-  const bool ok = mIndex->reindexLayers( &errorMessage );
+  // Prepared here, on the interface thread (cheap); features are read and embedded in the background.
+  if ( !mIndex->embeddingProviderAvailable() )
+  {
+    // reindexLayers() stops at its availability check and explains why.
+    QString availabilityError;
+    mIndex->reindexLayers( &availabilityError );
+    return QgsAiToolResult::error( availabilityError.isEmpty() ? u"Layer reindex failed."_s : availabilityError );
+  }
+  QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+  QString prepareError;
+  if ( !mIndex->createWorkspaceLayerSnapshot( snapshot, &prepareError ) )
+    return QgsAiToolResult::error( prepareError.isEmpty() ? u"Layer reindex failed."_s : prepareError );
+  auto errorMessage = std::make_shared<QString>();
+  const QPointer<QgsAiWorkspaceIndex> index( mIndex );
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Reindexing layers"_s, [errorMessage, index, snapshot]( QgsFeedback *feedback ) {
+    if ( !index )
+      return false;
+    const bool ok = index->reindexLayerSnapshot( snapshot, errorMessage.get(), feedback );
+    index->closeDatabaseConnectionForCurrentThread();
+    return ok;
+  } );
   const qint64 durationMs = QDateTime::currentMSecsSinceEpoch() - startedAt;
 
-  if ( !ok )
-    return QgsAiToolResult::error( errorMessage.isEmpty() ? u"Layer reindex failed."_s : errorMessage );
+  if ( wait.abandoned || wait.canceled )
+    return QgsAiToolResult::canceledResult( u"Layer reindex was canceled."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( errorMessage->isEmpty() ? u"Layer reindex failed."_s : *errorMessage );
 
   const QgsAiWorkspaceIndex::Status status = mIndex->status();
   QJsonObject output;

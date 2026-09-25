@@ -17,9 +17,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <utility>
 
 #include "ai/qgsaisecretstore.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiembeddingprovider.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsailayerchunker.h"
@@ -29,6 +31,8 @@
 #include "qgsmessagelog.h"
 #include "qgsproject.h"
 #include "qgsrasterlayer.h"
+#include "qgssettings.h"
+#include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 
 #include <QByteArray>
@@ -39,12 +43,15 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QMutex>
+#include <QScopeGuard>
+#include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QString>
 #include <QStringList>
 #include <QThread>
+#include <QThreadPool>
 #include <QUuid>
 #include <QVariant>
 
@@ -118,12 +125,6 @@ namespace
     // non-null empty string to bind '' rather than SQL NULL.
     const QString revision = provider->modelRevision();
     return revision.isNull() ? u""_s : revision;
-  }
-
-  int storageDimension( QgsAiEmbeddingProvider *provider, const QVector<float> &embedding )
-  {
-    const int providerDimension = provider ? provider->embeddingDimension() : 0;
-    return providerDimension > 0 ? providerDimension : embedding.size();
   }
 
   ProviderInfo providerInfo( QgsAiEmbeddingProvider *provider )
@@ -217,20 +218,6 @@ namespace
     return QString::fromLatin1( hash.result().toHex() );
   }
 
-  bool metadataMatchesProvider( const QString &providerId, const QString &modelId, const QString &modelRevision, int dimension, QgsAiEmbeddingProvider *provider )
-  {
-    if ( !provider )
-      return true;
-    if ( providerId != provider->providerId() )
-      return false;
-    if ( modelId != provider->modelId() )
-      return false;
-    if ( modelRevision != provider->modelRevision() )
-      return false;
-    const int providerDimension = provider->embeddingDimension();
-    return providerDimension <= 0 || dimension == providerDimension;
-  }
-
   QString chunkReuseKey( const QString &sourceType, const QString &relativePath, const QString &layerId, int chunkIndex )
   {
     return sourceType + QChar( 0x1f ) + relativePath + QChar( 0x1f ) + layerId + QChar( 0x1f ) + QString::number( chunkIndex );
@@ -249,19 +236,136 @@ namespace
       return QString();
     return QString::fromUtf8( content );
   }
+
+  QString indexProviderSlug( const QString &providerId )
+  {
+    // Separate index files per embedding provider so switching providers (for example
+    // local <-> remote) keeps each index intact instead of rebuilding every time.
+    QString slug;
+    for ( const QChar ch : providerId.toLower() )
+      slug.append( ch.isLetterOrNumber() ? ch : QChar( u'_' ) );
+    return slug.isEmpty() ? u"none"_s : slug;
+  }
+
+  //! Provider id that names the database file (no provider: "none", as before).
+  QString indexDatabaseProviderId( QgsAiEmbeddingProvider *provider )
+  {
+    return provider ? provider->providerId() : QString();
+  }
+
+  QString indexCanceledMessage()
+  {
+    return u"Indexing was canceled."_s;
+  }
+
+  /**
+   * Embeds \a texts one EMBEDDING_BATCH at a time, holding \a providerUseMutex only for the
+   * batch being computed, so a search can run between two batches of a long reindex.
+   */
+  bool indexEmbedInBatches(
+    QMutex &providerUseMutex,
+    const std::atomic_int &searchesWaiting,
+    QgsAiEmbeddingProvider *provider,
+    const QStringList &texts,
+    QgsAiEmbeddingRole role,
+    QList<QVector<float>> &out,
+    QString *errorMessage,
+    QgsFeedback *feedback,
+    const std::function<void( double percent )> &progress = {}
+  )
+  {
+    out.clear();
+    out.reserve( texts.size() );
+    for ( int start = 0; start < texts.size(); start += QgsAiWorkspaceIndex::EMBEDDING_BATCH )
+    {
+      if ( feedback && feedback->isCanceled() )
+      {
+        if ( errorMessage )
+          *errorMessage = indexCanceledMessage();
+        return false;
+      }
+      const QStringList batch = texts.mid( start, QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+      QgsAiEmbeddingOptions options;
+      options.maxBatch = static_cast<int>( batch.size() );
+      options.feedback = feedback;
+      QList<QVector<float>> vectors;
+      {
+        const QMutexLocker locker( &providerUseMutex );
+        if ( !provider->embed( batch, role, vectors, errorMessage, options ) )
+          return false;
+      }
+      // QMutex is not fair: relocking right away would starve a search waiting for this batch.
+      for ( int waitedMs = 0; searchesWaiting.load() > 0 && waitedMs < QgsAiWorkspaceIndex::SEARCH_LOCK_TIMEOUT_MS; ++waitedMs )
+        QThread::msleep( 1 );
+      if ( vectors.size() != batch.size() )
+      {
+        if ( errorMessage )
+          *errorMessage = u"Embedding count mismatch: expected %1 got %2"_s.arg( batch.size() ).arg( vectors.size() );
+        return false;
+      }
+      out.append( vectors );
+      if ( progress )
+        progress( 100.0 * static_cast<double>( out.size() ) / static_cast<double>( texts.size() ) );
+    }
+    return true;
+  }
+
+  //! Serial pool for index database work that must not block the interface thread.
+  QThreadPool *indexDatabaseWorkPool()
+  {
+    static QThreadPool *pool = []() {
+      auto *p = new QThreadPool();
+      p->setMaxThreadCount( 1 );
+      return p;
+    }();
+    return pool;
+  }
+
+  //! Loads the index cache in the background for QgsAiWorkspaceIndex::requestLoad().
+  class QgsAiIndexLoadTask final : public QgsTask
+  {
+    public:
+      explicit QgsAiIndexLoadTask( QgsAiWorkspaceIndex *index )
+        : QgsTask( QObject::tr( "Load AI workspace index" ), QgsTask::CanCancel | QgsTask::CancelWithoutPrompt | QgsTask::Silent | QgsTask::Hidden )
+        , mIndex( index )
+      {}
+
+    protected:
+      bool run() override
+      {
+        if ( !mIndex )
+          return false;
+        mIndex->ensureLoaded();
+        mIndex->closeDatabaseConnectionForCurrentThread();
+        return true;
+      }
+
+    private:
+      QPointer<QgsAiWorkspaceIndex> mIndex;
+  };
 } //namespace
 
 QgsAiWorkspaceIndex::QgsAiWorkspaceIndex( QgsAiFileContextProvider *contextProvider, QgsAiEmbeddingProvider *embeddingProvider, QObject *parent )
   : QObject( parent )
   , mContextProvider( contextProvider )
-  , mEmbeddingProvider( embeddingProvider )
+  , mEmbeddingProvider( embeddingProvider, []( QgsAiEmbeddingProvider * ) {} )
 {
   if ( mContextProvider )
+  {
+    mCurrentRoot = mContextProvider->workspaceRoot();
     connect( mContextProvider, &QgsAiFileContextProvider::workspaceRootChanged, this, &QgsAiWorkspaceIndex::onWorkspaceRootChanged );
+  }
+  updateStatusSnapshot();
 }
 
 QgsAiWorkspaceIndex::~QgsAiWorkspaceIndex()
 {
+  if ( mLoadTask )
+  {
+    mLoadTask->cancel();
+    mLoadTask->waitForFinished( 5000 );
+  }
+  indexDatabaseWorkPool()->waitForDone( 5000 );
   closeDatabaseConnectionForCurrentThread();
 }
 
@@ -280,40 +384,44 @@ void QgsAiWorkspaceIndex::closeDatabaseConnectionForCurrentThread() const
 
 QString QgsAiWorkspaceIndex::connectionName() const
 {
-  // One named SQL connection per index instance — avoid clashing with other
+  // One named SQL connection per index instance and thread — avoid clashing with other
   // QGIS components that already use unnamed default connections.
   return u"qgsai_index_%1_%2"_s.arg( reinterpret_cast<quintptr>( this ) ).arg( reinterpret_cast<quintptr>( QThread::currentThreadId() ) );
 }
 
+std::shared_ptr<QgsAiEmbeddingProvider> QgsAiWorkspaceIndex::providerSnapshot() const
+{
+  const QMutexLocker locker( &mProviderPointerMutex );
+  return mEmbeddingProvider;
+}
+
+QString QgsAiWorkspaceIndex::workspaceRoot() const
+{
+  const QMutexLocker locker( &mRootMutex );
+  return mCurrentRoot;
+}
+
 QString QgsAiWorkspaceIndex::dbPath() const
 {
-  if ( !mContextProvider )
-    return QString();
-
-  return dbPathForRoot( mContextProvider->workspaceRoot() );
+  return dbPathForRoot( workspaceRoot() );
 }
 
 QString QgsAiWorkspaceIndex::dbPathForRoot( const QString &workspaceRoot ) const
+{
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  return dbPathForRoot( workspaceRoot, indexDatabaseProviderId( provider.get() ) );
+}
+
+QString QgsAiWorkspaceIndex::dbPathForRoot( const QString &workspaceRoot, const QString &providerId )
 {
   const QString root = workspaceRoot.trimmed().isEmpty() ? QString() : QDir( workspaceRoot ).absolutePath();
   if ( root.isEmpty() )
     return QString();
 
   const QByteArray hash = QCryptographicHash::hash( root.toUtf8(), QCryptographicHash::Sha1 ).toHex().left( 16 );
-
-  // Separate index files per embedding provider so switching providers (for example
-  // local <-> remote) keeps each index intact instead of rebuilding every time.
-  // local and remote embeddings can never share a file.
-  QString providerSlug;
-  const QString rawId = mEmbeddingProvider ? mEmbeddingProvider->providerId().toLower() : QString();
-  for ( const QChar ch : rawId )
-    providerSlug.append( ch.isLetterOrNumber() ? ch : QChar( u'_' ) );
-  if ( providerSlug.isEmpty() )
-    providerSlug = u"none"_s;
-
   const QString dir = QgsApplication::qgisSettingsDirPath() + u"ai_index"_s;
   QDir().mkpath( dir );
-  return QDir( dir ).filePath( u"ws_%1_%2.sqlite"_s.arg( QString::fromLatin1( hash ), providerSlug ) );
+  return QDir( dir ).filePath( u"ws_%1_%2.sqlite"_s.arg( QString::fromLatin1( hash ), indexProviderSlug( providerId ) ) );
 }
 
 bool QgsAiWorkspaceIndex::isTextFile( const QString &relativePath )
@@ -331,52 +439,81 @@ bool QgsAiWorkspaceIndex::hasEmbeddingConfiguration() const
 
 void QgsAiWorkspaceIndex::setEmbeddingProvider( QgsAiEmbeddingProvider *embeddingProvider )
 {
-  QMutexLocker providerLocker( &mProviderUseMutex );
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  if ( mEmbeddingProvider == embeddingProvider )
-    return;
+  // Not owned: the caller keeps it alive.
+  setEmbeddingProvider( std::shared_ptr<QgsAiEmbeddingProvider>( embeddingProvider, []( QgsAiEmbeddingProvider * ) {} ) );
+}
 
-  mEmbeddingProvider = embeddingProvider;
-  mCache.clear();
-  mLastSync = QDateTime();
-  mLoaded = false;
-  ensureLoaded();
+void QgsAiWorkspaceIndex::setEmbeddingProvider( std::shared_ptr<QgsAiEmbeddingProvider> embeddingProvider )
+{
+  const QgsAiPerfScope perf( u"index"_s, u"set_provider"_s );
+  {
+    // Tasks already running keep their own reference to the previous provider.
+    const QMutexLocker locker( &mProviderPointerMutex );
+    if ( mEmbeddingProvider.get() == embeddingProvider.get() )
+      return;
+    mEmbeddingProvider = std::move( embeddingProvider );
+  }
+
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    mCache.clear();
+    mCacheRoot.clear();
+    mLastSync = QDateTime();
+    mLoaded = false;
+    updateStatusSnapshot();
+  }
+  requestLoad();
 }
 
 bool QgsAiWorkspaceIndex::embeddingProviderAvailable() const
 {
-  // Never block here. This is called from timers and task-completion handlers which
-  // can run inside a nested event loop on the main thread while search()/reindex
-  // hold the provider mutex (e.g. waiting on a remote embedding HTTP request):
-  // locking unconditionally would deadlock the main thread on its own stack.
-  if ( !mProviderUseMutex.tryLock() )
-  {
-    // provider busy right now → it exists and is actively in use
-    return mEmbeddingProvider != nullptr;
-  }
+  // Cheap and never blocking: timers and the interface thread call this. Providers must
+  // answer without loading models or waiting on the network (see QgsAiE5EmbeddingProvider).
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  const QgsAiPerfScope perf( u"index"_s, u"provider_available"_s, 5 );
   QString ignored;
-  const bool available = mEmbeddingProvider && mEmbeddingProvider->isAvailable( &ignored );
-  mProviderUseMutex.unlock();
-  return available;
+  return provider && provider->isAvailable( &ignored );
 }
 
 void QgsAiWorkspaceIndex::onWorkspaceRootChanged()
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  const QString name = connectionName();
-  if ( QSqlDatabase::contains( name ) )
+  const QString root = mContextProvider ? mContextProvider->workspaceRoot() : QString();
   {
-    {
-      QSqlDatabase db = QSqlDatabase::database( name );
-      db.close();
-    }
-    QSqlDatabase::removeDatabase( name );
+    const QMutexLocker locker( &mRootMutex );
+    mCurrentRoot = root;
   }
+  closeDatabaseConnectionForCurrentThread();
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    mCache.clear();
+    mCacheRoot.clear();
+    mLastSync = QDateTime();
+    mLoaded = false;
+    updateStatusSnapshot();
+  }
+  // The new workspace's cache loads in the background: opening a project never waits on it.
+  requestLoad();
+}
 
-  mCache.clear();
-  mLastSync = QDateTime();
-  mLoaded = false;
-  ensureLoaded();
+void QgsAiWorkspaceIndex::requestLoad()
+{
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( mLoaded )
+      return;
+  }
+  if ( mLoadTask && mLoadTask->isActive() )
+    return;
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  if ( !manager )
+    return;
+  auto *task = new QgsAiIndexLoadTask( this );
+  mLoadTask = task;
+  connect( task, &QgsTask::taskCompleted, this, [this]() {
+    updateStatusSnapshot();
+    emit loaded();
+  } );
+  manager->addTask( task );
 }
 
 QStringList QgsAiWorkspaceIndex::chunkText( const QString &content )
@@ -428,50 +565,78 @@ float QgsAiWorkspaceIndex::cosineSimilarity( const QVector<float> &a, const QVec
 
 bool QgsAiWorkspaceIndex::ensureLoaded()
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  if ( mLoaded )
-    return true;
+  // Serializes loads without holding mMutex during the database read, so the interface
+  // thread, which only takes mMutex for short cache updates, never waits on it.
+  const QMutexLocker loadLocker( &mLoadMutex );
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( mLoaded )
+      return true;
+  }
   QString err;
   if ( !loadAll( &err ) )
   {
     QgsMessageLog::logMessage( u"Workspace index load failed: %1"_s.arg( err ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
     // Treat missing/corrupt DB as empty rather than fatal.
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     mCache.clear();
+    mCacheRoot = workspaceRoot();
     mLastSync = QDateTime();
+    mLoaded = true;
+    updateStatusSnapshot();
   }
-  mLoaded = true;
   return true;
 }
 
-QgsAiWorkspaceIndex::Status QgsAiWorkspaceIndex::status() const
+void QgsAiWorkspaceIndex::updateStatusSnapshot()
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
+  const QMutexLocker<QRecursiveMutex> locker( &mMutex );
   Status s;
-  s.workspaceRoot = mContextProvider ? mContextProvider->workspaceRoot() : QString();
-  s.embeddingProviderId = mEmbeddingProvider ? mEmbeddingProvider->providerId() : QString();
-  s.embeddingModelId = mEmbeddingProvider ? mEmbeddingProvider->modelId() : QString();
-  s.chunkCount = mCache.size();
-  QStringList uniqueFiles;
-  for ( const CachedChunk &c : mCache )
+  s.chunkCount = static_cast<int>( mCache.size() );
+  QSet<QString> uniqueFiles;
+  for ( const CachedChunk &c : std::as_const( mCache ) )
   {
     if ( c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ) )
       ++s.layerChunkCount;
     else
     {
       ++s.fileChunkCount;
-      if ( !uniqueFiles.contains( c.chunk.relativePath ) )
-        uniqueFiles.append( c.chunk.relativePath );
+      uniqueFiles.insert( c.chunk.relativePath );
     }
   }
-  s.fileCount = uniqueFiles.size();
+  s.fileCount = static_cast<int>( uniqueFiles.size() );
   s.lastSync = mLastSync;
   s.indexed = !mCache.isEmpty();
+  s.loading = !mLoaded;
+
+  const QMutexLocker statusLocker( &mStatusMutex );
+  mStatus = s;
+}
+
+QgsAiWorkspaceIndex::Status QgsAiWorkspaceIndex::status() const
+{
+  Status s;
+  {
+    const QMutexLocker locker( &mStatusMutex );
+    s = mStatus;
+  }
+  s.workspaceRoot = workspaceRoot();
+  if ( const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot() )
+  {
+    s.embeddingProviderId = provider->providerId();
+    s.embeddingModelId = provider->modelId();
+  }
   return s;
+}
+
+bool QgsAiWorkspaceIndex::cacheHoldsRoot( const QString &workspaceRoot ) const
+{
+  return QDir::cleanPath( mCacheRoot ) == QDir::cleanPath( workspaceRoot );
 }
 
 QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::chunks( ReplaceScope scope, const QString &layerId ) const
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
+  const QMutexLocker<QRecursiveMutex> locker( &mMutex );
   QList<Chunk> out;
   for ( const CachedChunk &c : mCache )
   {
@@ -500,16 +665,33 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::chunks( ReplaceScope scop
 
 bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
 {
-  return loadAll( QString(), errorMessage );
-}
+  const QgsAiPerfScope perf( u"index"_s, u"load_cache"_s );
+  // A pending background removal must be on disk before we read it back.
+  indexDatabaseWorkPool()->waitForDone();
 
-bool QgsAiWorkspaceIndex::loadAll( const QString &workspaceRoot, QString *errorMessage )
-{
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  mCache.clear();
-  const QString path = workspaceRoot.trimmed().isEmpty() ? dbPath() : dbPathForRoot( workspaceRoot );
+  const QString root = workspaceRoot();
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  const ProviderInfo activeProvider = providerInfo( provider.get() );
+  const QString path = dbPathForRoot( root, indexDatabaseProviderId( provider.get() ) );
+
+  QList<CachedChunk> loadedChunks;
+  qint64 maxSync = 0;
+  const auto commit = [&]() {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( QDir::cleanPath( root ) != QDir::cleanPath( workspaceRoot() ) )
+      return; // The workspace changed while loading: the next load reads the new one.
+    mCache = loadedChunks;
+    mCacheRoot = root;
+    mLastSync = maxSync > 0 ? QDateTime::fromMSecsSinceEpoch( maxSync ) : QDateTime();
+    mLoaded = true;
+    updateStatusSnapshot();
+  };
+
   if ( path.isEmpty() || !QFileInfo::exists( path ) )
-    return true; // Nothing to load yet — that's not an error.
+  {
+    commit(); // Nothing to load yet — that's not an error.
+    return true;
+  }
 
   QSqlDatabase db = QSqlDatabase::contains( connectionName() ) ? QSqlDatabase::database( connectionName() ) : QSqlDatabase::addDatabase( u"QSQLITE"_s, connectionName() );
   db.setDatabaseName( path );
@@ -533,14 +715,18 @@ bool QgsAiWorkspaceIndex::loadAll( const QString &workspaceRoot, QString *errorM
       QSqlQuery drop( db );
       drop.exec( u"DROP TABLE IF EXISTS chunks"_s );
       drop.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
-      return true; // Empty — caller will reindex.
+      commit(); // Empty — caller will reindex.
+      return true;
     }
   }
 
   {
     QSqlQuery tableCheck( db );
     if ( tableCheck.exec( u"SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"_s ) && !tableCheck.next() )
+    {
+      commit();
       return true;
+    }
   }
 
   {
@@ -551,13 +737,14 @@ bool QgsAiWorkspaceIndex::loadAll( const QString &workspaceRoot, QString *errorM
       const QString modelId = metadata.value( 1 ).toString();
       const QString modelRevision = metadata.value( 2 ).toString();
       const int dimension = metadata.value( 3 ).toInt();
-      if ( !metadataMatchesProvider( providerId, modelId, modelRevision, dimension, mEmbeddingProvider ) )
+      if ( provider && !metadataMatchesProvider( providerId, modelId, modelRevision, dimension, activeProvider ) )
       {
         QgsMessageLog::
-          logMessage( u"Workspace index provider changed (%1/%2 -> %3/%4); dropping old chunks"_s.arg( providerId, modelId, storageProviderId( mEmbeddingProvider ), storageModelId( mEmbeddingProvider ) ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+          logMessage( u"Workspace index provider changed (%1/%2 -> %3/%4); dropping old chunks"_s.arg( providerId, modelId, activeProvider.providerId, activeProvider.modelId ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
         QSqlQuery drop( db );
         drop.exec( u"DROP TABLE IF EXISTS chunks"_s );
         drop.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
+        commit();
         return true;
       }
     }
@@ -572,7 +759,6 @@ bool QgsAiWorkspaceIndex::loadAll( const QString &workspaceRoot, QString *errorM
       *errorMessage = q.lastError().text();
     return false;
   }
-  qint64 maxSync = 0;
   while ( q.next() )
   {
     CachedChunk c;
@@ -598,23 +784,17 @@ bool QgsAiWorkspaceIndex::loadAll( const QString &workspaceRoot, QString *errorM
     if ( syncMs > maxSync )
       maxSync = syncMs;
     if ( !c.embedding.isEmpty() )
-      mCache.append( c );
+      loadedChunks.append( c );
   }
-  if ( maxSync > 0 )
-    mLastSync = QDateTime::fromMSecsSinceEpoch( maxSync );
-
+  commit();
   return true;
 }
 
-bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage )
+bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, const QString &databaseProviderId, QString *errorMessage )
 {
-  return persistAll( chunks, scope, scopedLayerId, QString(), errorMessage );
-}
-
-bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, QString *errorMessage )
-{
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  const QString path = workspaceRoot.trimmed().isEmpty() ? dbPath() : dbPathForRoot( workspaceRoot );
+  // Runs without mMutex: the database write can take a while, and each thread has its own
+  // SQLite connection. Callers update the cache under mMutex afterwards.
+  const QString path = dbPathForRoot( workspaceRoot, databaseProviderId );
   if ( path.isEmpty() )
   {
     if ( errorMessage )
@@ -657,7 +837,30 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
   q.exec( u"CREATE INDEX IF NOT EXISTS idx_chunks_source_hash ON chunks(source_type, relative_path, chunk_index, content_hash)"_s );
   q.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
 
-  // Replace only the rows in scope.
+  // Encrypt-at-rest when the data key is available; otherwise warn once and
+  // persist plaintext (or refuse when the user requires encryption).
+  const bool encryptionAvailable = QgsAiSecretStore::storageEncryptionAvailable();
+  const bool requireEncryption = QgsSettings().value( u"ai/storage/requireEncryption"_s, false ).toBool();
+  if ( !encryptionAvailable )
+  {
+    if ( requireEncryption )
+    {
+      if ( errorMessage )
+        *errorMessage = u"Encryption is required (ai/storage/requireEncryption) but the authentication vault is unavailable."_s;
+      return false;
+    }
+    QgsAiSecretStore::warnPlaintextStorageOnce();
+  }
+
+  // The replaced rows are deleted in the same transaction as the new rows are written,
+  // so a concurrent reader never sees the scope empty.
+  if ( !db.transaction() )
+  {
+    if ( errorMessage )
+      *errorMessage = u"Cannot start SQLite transaction: %1"_s.arg( db.lastError().text() );
+    return false;
+  }
+
   switch ( scope )
   {
     case ReplaceScope::All:
@@ -679,36 +882,6 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
     }
   }
 
-  if ( !db.transaction() )
-  {
-    if ( errorMessage )
-      *errorMessage = u"Cannot start SQLite transaction: %1"_s.arg( db.lastError().text() );
-    return false;
-  }
-
-  // Encrypt-at-rest when the data key is available; otherwise warn once and
-  // persist plaintext (or refuse when the user requires encryption).
-  const bool encryptionAvailable = QgsAiSecretStore::storageEncryptionAvailable();
-  bool requireEncryption = false;
-  if ( !encryptionAvailable )
-  {
-    QgsSettings appSettings;
-    requireEncryption = appSettings.value( u"ai/storage/requireEncryption"_s, false ).toBool();
-    if ( requireEncryption )
-    {
-      if ( errorMessage )
-        *errorMessage = u"Encryption is required (ai/storage/requireEncryption) but the authentication vault is unavailable."_s;
-      db.rollback();
-      return false;
-    }
-    QgsAiSecretStore::warnPlaintextStorageOnce();
-  }
-  else
-  {
-    QgsSettings appSettings;
-    requireEncryption = appSettings.value( u"ai/storage/requireEncryption"_s, false ).toBool();
-  }
-
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
   q.prepare( QStringLiteral(
     "INSERT INTO chunks (source_type, relative_path, layer_id, feature_id_min, feature_id_max, chunk_index, text, wkt_blob, embedding, last_sync, provider_id, model_id, model_revision, "
@@ -717,10 +890,10 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
   ) );
   for ( const CachedChunk &c : chunks )
   {
-    const QString providerId = c.providerId.isEmpty() ? storageProviderId( mEmbeddingProvider ) : c.providerId;
-    const QString modelId = c.modelId.isEmpty() ? storageModelId( mEmbeddingProvider ) : c.modelId;
-    const QString modelRevision = c.modelRevision.isEmpty() ? storageModelRevision( mEmbeddingProvider ) : c.modelRevision;
-    const int dimension = c.embeddingDimension > 0 ? c.embeddingDimension : storageDimension( mEmbeddingProvider, c.embedding );
+    const QString rowProviderId = c.providerId.isEmpty() ? u"test"_s : c.providerId;
+    const QString modelId = c.modelId.isEmpty() ? u"test"_s : c.modelId;
+    const QString modelRevision = c.modelRevision.isNull() ? u""_s : c.modelRevision;
+    const int dimension = c.embeddingDimension > 0 ? c.embeddingDimension : static_cast<int>( c.embedding.size() );
     // The content hash stays computed over the PLAINTEXT so chunk-reuse keys
     // remain stable across encrypted and plaintext sessions.
     const QString hash = c.contentHash.isEmpty() ? textHash( c.chunk.text, c.chunk.wktBlob ) : c.contentHash;
@@ -750,7 +923,7 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
       return false;
     }
     q.addBindValue( nowMs );
-    q.addBindValue( providerId );
+    q.addBindValue( rowProviderId );
     q.addBindValue( modelId );
     q.addBindValue( modelRevision );
     q.addBindValue( dimension );
@@ -773,9 +946,10 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
   return true;
 }
 
-bool QgsAiWorkspaceIndex::persistChunks( const QList<Chunk> &chunks, const QList<QVector<float>> &embeddings, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage )
+bool QgsAiWorkspaceIndex::persistChunks(
+  const QList<Chunk> &chunks, const QList<QVector<float>> &embeddings, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage, const QString &workspaceRoot
+)
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
   if ( chunks.size() != embeddings.size() )
   {
     if ( errorMessage )
@@ -783,8 +957,11 @@ bool QgsAiWorkspaceIndex::persistChunks( const QList<Chunk> &chunks, const QList
     return false;
   }
 
+  const QString root = workspaceRoot.trimmed().isEmpty() ? this->workspaceRoot() : workspaceRoot;
   ensureLoaded();
 
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  const ProviderInfo activeProvider = providerInfo( provider.get() );
   QList<CachedChunk> built;
   built.reserve( chunks.size() );
   for ( int i = 0; i < chunks.size(); ++i )
@@ -794,18 +971,25 @@ bool QgsAiWorkspaceIndex::persistChunks( const QList<Chunk> &chunks, const QList
     if ( cc.chunk.sourceType.isEmpty() )
       cc.chunk.sourceType = QString::fromLatin1( SOURCE_TYPE_FILE );
     cc.embedding = embeddings.at( i );
-    cc.providerId = storageProviderId( mEmbeddingProvider );
-    cc.modelId = storageModelId( mEmbeddingProvider );
-    cc.modelRevision = storageModelRevision( mEmbeddingProvider );
-    cc.embeddingDimension = storageDimension( mEmbeddingProvider, cc.embedding );
+    cc.providerId = activeProvider.providerId;
+    cc.modelId = activeProvider.modelId;
+    cc.modelRevision = activeProvider.modelRevision;
+    cc.embeddingDimension = storageDimension( activeProvider, cc.embedding );
     cc.contentHash = textHash( cc.chunk.text, cc.chunk.wktBlob );
     built.append( cc );
   }
 
-  if ( !persistAll( built, scope, scopedLayerId, errorMessage ) )
-    return false;
+  {
+    const QgsAiPerfScope persistPerf( u"index_task"_s, u"persist_chunks"_s );
+    if ( !persistAll( built, scope, scopedLayerId, root, indexDatabaseProviderId( provider.get() ), errorMessage ) )
+      return false;
+  }
 
-  // Reflect the change in the in-memory cache without re-reading the DB.
+  // Reflect the change in the in-memory cache without re-reading the DB, unless the cache
+  // now holds another workspace (the project changed while the chunks were computed).
+  const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+  if ( !cacheHoldsRoot( root ) )
+    return true;
   switch ( scope )
   {
     case ReplaceScope::All:
@@ -829,12 +1013,12 @@ bool QgsAiWorkspaceIndex::persistChunks( const QList<Chunk> &chunks, const QList
   mCache.append( built );
   mLastSync = QDateTime::currentDateTimeUtc();
   mLoaded = true;
+  updateStatusSnapshot();
   return true;
 }
 
 bool QgsAiWorkspaceIndex::removeLayer( const QString &layerId, QString *errorMessage )
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
   if ( layerId.isEmpty() )
   {
     if ( errorMessage )
@@ -842,47 +1026,56 @@ bool QgsAiWorkspaceIndex::removeLayer( const QString &layerId, QString *errorMes
     return false;
   }
 
-  ensureLoaded();
-
-  const QString path = dbPath();
-  if ( !path.isEmpty() && QFileInfo::exists( path ) )
   {
-    QSqlDatabase db = QSqlDatabase::contains( connectionName() ) ? QSqlDatabase::database( connectionName() ) : QSqlDatabase::addDatabase( u"QSQLITE"_s, connectionName() );
-    db.setDatabaseName( path );
-    if ( db.open() )
-    {
-      QSqlQuery del( db );
-      del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
-      del.addBindValue( layerId );
-      if ( !del.exec() )
-      {
-        if ( errorMessage )
-          *errorMessage = del.lastError().text();
-        return false;
-      }
-    }
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    mCache.erase(
+      std::remove_if( mCache.begin(), mCache.end(), [&layerId]( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ) && c.chunk.layerId == layerId; } ),
+      mCache.end()
+    );
+    updateStatusSnapshot();
   }
 
-  mCache.erase(
-    std::remove_if( mCache.begin(), mCache.end(), [&layerId]( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ) && c.chunk.layerId == layerId; } ),
-    mCache.end()
-  );
+  // The interface thread calls this when a layer is removed: never wait on the database,
+  // which a background reindex may be writing. The delete runs in order with later loads.
+  const QString path = dbPath();
+  if ( path.isEmpty() || !QFileInfo::exists( path ) )
+    return true;
+  indexDatabaseWorkPool()->start( [path, layerId]() {
+    const QString connection = u"qgsai_index_remove_%1"_s.arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    {
+      QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+      db.setDatabaseName( path );
+      if ( db.open() )
+      {
+        QSqlQuery del( db );
+        del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
+        del.addBindValue( layerId );
+        if ( !del.exec() )
+          QgsMessageLog::logMessage( u"Layer index: removing %1 from the database failed: %2"_s.arg( layerId, del.lastError().text() ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
+        db.close();
+      }
+    }
+    QSqlDatabase::removeDatabase( connection );
+  } );
   return true;
 }
 
 bool QgsAiWorkspaceIndex::createWorkspaceFileSnapshot( int maxFiles, QString &workspaceRoot, QList<WorkspaceFileSnapshot> &snapshot, QString *errorMessage ) const
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
   snapshot.clear();
-  workspaceRoot.clear();
+  workspaceRoot = this->workspaceRoot();
   if ( !mContextProvider )
   {
     if ( errorMessage )
       *errorMessage = u"Workspace context provider is unavailable."_s;
     return false;
   }
+  return scanWorkspaceFileSnapshot( workspaceRoot, maxFiles, snapshot, errorMessage );
+}
 
-  workspaceRoot = mContextProvider->workspaceRoot();
+bool QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( const QString &workspaceRoot, int maxFiles, QList<WorkspaceFileSnapshot> &snapshot, QString *errorMessage, QgsFeedback *feedback )
+{
+  snapshot.clear();
   if ( workspaceRoot.isEmpty() )
   {
     if ( errorMessage )
@@ -890,35 +1083,50 @@ bool QgsAiWorkspaceIndex::createWorkspaceFileSnapshot( int maxFiles, QString &wo
     return false;
   }
 
-  const int cap = maxFiles > 0 ? maxFiles : DEFAULT_MAX_FILES;
-  const QStringList all = mContextProvider->workspaceFileCandidates( QString(), 50000 );
-  for ( const QString &rel : all )
+  if ( QgsAiFileContextProvider::isNetworkPath( workspaceRoot ) && !QgsSettings().value( u"strata/index/allow_network_workspace"_s, false ).toBool() )
   {
-    if ( !isTextFile( rel ) )
+    // Walking and reading a network share can take minutes and loads the network.
+    if ( errorMessage )
+      *errorMessage = u"The AI workspace %1 is on a network share; file indexing is skipped. Enable strata/index/allow_network_workspace to index it anyway."_s.arg( workspaceRoot );
+    return false;
+  }
+
+  const QgsAiPerfScope perf( u"index_task"_s, u"scan_files"_s );
+  QgsAiFileContextProvider::WorkspaceScanOptions options;
+  options.timeBudgetMs = FILE_SCAN_TIME_BUDGET_MS;
+  const QgsAiFileContextProvider::WorkspaceScanResult scan = QgsAiFileContextProvider::scanWorkspace( workspaceRoot, options, feedback );
+  if ( feedback && feedback->isCanceled() )
+  {
+    if ( errorMessage )
+      *errorMessage = indexCanceledMessage();
+    return false;
+  }
+  if ( scan.truncated )
+    QgsMessageLog::
+      logMessage( u"Workspace scan of %1 stopped early after %2 entries (%3)."_s.arg( workspaceRoot ).arg( scan.visitedEntries ).arg( scan.timedOut ? u"time limit"_s : u"entry limit"_s ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+
+  const int cap = maxFiles > 0 ? maxFiles : DEFAULT_MAX_FILES;
+  for ( const QgsAiFileContextProvider::WorkspaceFile &file : scan.files )
+  {
+    if ( !isTextFile( file.relativePath ) || file.size > MAX_FILE_BYTES )
       continue;
-    const QString abs = mContextProvider->resolveWorkspaceFile( rel );
-    if ( abs.isEmpty() )
-      continue;
-    const QFileInfo fileInfo( abs );
-    if ( fileInfo.size() > MAX_FILE_BYTES )
-      continue;
-    snapshot.append( { rel, abs, fileInfo.exists() ? fileInfo.lastModified().toMSecsSinceEpoch() : 0 } );
+    snapshot.append( { file.relativePath, file.absolutePath, file.lastModifiedMs } );
     if ( snapshot.size() >= cap )
       break;
   }
   return true;
 }
 
-bool QgsAiWorkspaceIndex::reindex( int maxFiles, QString *errorMessage )
+bool QgsAiWorkspaceIndex::reindex( int maxFiles, QString *errorMessage, QgsFeedback *feedback )
 {
-  QString workspaceRoot;
+  QString root;
   QList<WorkspaceFileSnapshot> snapshot;
-  if ( !createWorkspaceFileSnapshot( maxFiles, workspaceRoot, snapshot, errorMessage ) )
+  if ( !createWorkspaceFileSnapshot( maxFiles, root, snapshot, errorMessage ) )
     return false;
-  return reindex( snapshot, workspaceRoot, errorMessage );
+  return reindex( snapshot, root, errorMessage, feedback );
 }
 
-bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot, const QString &workspaceRoot, QString *errorMessage )
+bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot, const QString &workspaceRoot, QString *errorMessage, QgsFeedback *feedback )
 {
   if ( workspaceRoot.trimmed().isEmpty() )
   {
@@ -927,31 +1135,22 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
     return false;
   }
 
-  QMutexLocker providerLocker( &mProviderUseMutex );
-  if ( !ensureEmbeddingProviderAvailable( mEmbeddingProvider, errorMessage ) )
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  if ( !ensureEmbeddingProviderAvailable( provider.get(), errorMessage ) )
     return false;
-  const ProviderInfo activeProvider = providerInfo( mEmbeddingProvider );
+  const ProviderInfo activeProvider = providerInfo( provider.get() );
 
-  {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    QString loadError;
-    if ( !mLoaded && !loadAll( workspaceRoot, &loadError ) )
-    {
-      QgsMessageLog::logMessage( u"Workspace index load failed: %1"_s.arg( loadError ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
-      mCache.clear();
-      mLastSync = QDateTime();
-      mLoaded = true;
-    }
-  }
+  ensureLoaded();
 
   QHash<QString, CachedChunk> reusableFileChunks;
   {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    for ( const CachedChunk &cached : std::as_const( mCache ) )
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( cacheHoldsRoot( workspaceRoot ) )
     {
-      if ( cached.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || cached.chunk.sourceType.isEmpty() )
+      for ( const CachedChunk &cached : std::as_const( mCache ) )
       {
-        if ( metadataMatchesProvider( cached.providerId, cached.modelId, cached.modelRevision, cached.embeddingDimension, activeProvider ) )
+        if ( ( cached.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || cached.chunk.sourceType.isEmpty() )
+             && metadataMatchesProvider( cached.providerId, cached.modelId, cached.modelRevision, cached.embeddingDimension, activeProvider ) )
         {
           reusableFileChunks.insert( chunkReuseKey( QString::fromLatin1( SOURCE_TYPE_FILE ), cached.chunk.relativePath, QString(), cached.chunk.chunkIndex ), cached );
         }
@@ -959,97 +1158,71 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
     }
   }
 
-  if ( snapshot.isEmpty() )
-  {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    QString err;
-    if ( !persistAll( {}, ReplaceScope::AllFiles, QString(), workspaceRoot, &err ) )
-    {
-      if ( errorMessage )
-        *errorMessage = err;
-      return false;
-    }
-    mCache.erase(
-      std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty(); } ), mCache.end()
-    );
-    mLastSync = QDateTime::currentDateTimeUtc();
-    mLoaded = true;
-    return true;
-  }
+  // Progress: reading files is the first 20 %, embeddings the next 75 %, writing the rest.
+  const auto reportProgress = [feedback]( double percent ) {
+    if ( feedback )
+      feedback->setProgress( percent );
+  };
 
   QList<CachedChunk> built;
   QStringList textsToEmbed;
   QList<int> backRefIndex;
-  for ( int fileIdx = 0; fileIdx < snapshot.size(); ++fileIdx )
   {
-    const WorkspaceFileSnapshot &file = snapshot.at( fileIdx );
-    emit progress( fileIdx + 1, snapshot.size(), file.relativePath );
-
-    const QString fileText = readSnapshotTextFile( file.absolutePath, MAX_FILE_BYTES );
-    if ( fileText.isEmpty() )
-      continue;
-
-    const QStringList chunks = chunkText( fileText );
-    for ( int ci = 0; ci < chunks.size(); ++ci )
+    const QgsAiPerfScope readPerf( u"index_task"_s, u"read_files files=%1"_s.arg( snapshot.size() ) );
+    for ( int fileIdx = 0; fileIdx < snapshot.size(); ++fileIdx )
     {
-      CachedChunk c;
-      c.chunk.relativePath = file.relativePath;
-      c.chunk.chunkIndex = ci;
-      c.chunk.text = chunks.at( ci );
-      c.chunk.sourceType = QString::fromLatin1( SOURCE_TYPE_FILE );
-      c.providerId = activeProvider.providerId;
-      c.modelId = activeProvider.modelId;
-      c.modelRevision = activeProvider.modelRevision;
-      c.contentHash = textHash( c.chunk.text );
-      c.sourceMTime = file.sourceMTime;
-
-      const QString reuseKey = chunkReuseKey( QString::fromLatin1( SOURCE_TYPE_FILE ), file.relativePath, QString(), ci );
-      const auto reusableIt = reusableFileChunks.constFind( reuseKey );
-      if ( reusableIt != reusableFileChunks.constEnd() && reusableIt->contentHash == c.contentHash && reusableIt->sourceMTime == c.sourceMTime && !reusableIt->embedding.isEmpty() )
+      if ( feedback && feedback->isCanceled() )
       {
-        c.embedding = reusableIt->embedding;
-        c.embeddingDimension = reusableIt->embeddingDimension;
-        built.append( c );
-        continue;
+        if ( errorMessage )
+          *errorMessage = indexCanceledMessage();
+        return false;
       }
+      const WorkspaceFileSnapshot &file = snapshot.at( fileIdx );
+      emit progress( fileIdx + 1, snapshot.size(), file.relativePath );
+      reportProgress( 20.0 * ( fileIdx + 1 ) / snapshot.size() );
 
-      built.append( c );
-      backRefIndex.append( built.size() - 1 );
-      textsToEmbed.append( c.chunk.text );
-    }
-  }
+      const QString fileText = readSnapshotTextFile( file.absolutePath, MAX_FILE_BYTES );
+      if ( fileText.isEmpty() )
+        continue;
 
-  if ( built.isEmpty() )
-  {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    QString err;
-    if ( !persistAll( {}, ReplaceScope::AllFiles, QString(), workspaceRoot, &err ) )
-    {
-      if ( errorMessage )
-        *errorMessage = err;
-      return false;
+      const QStringList chunks = chunkText( fileText );
+      for ( int ci = 0; ci < chunks.size(); ++ci )
+      {
+        CachedChunk c;
+        c.chunk.relativePath = file.relativePath;
+        c.chunk.chunkIndex = ci;
+        c.chunk.text = chunks.at( ci );
+        c.chunk.sourceType = QString::fromLatin1( SOURCE_TYPE_FILE );
+        c.providerId = activeProvider.providerId;
+        c.modelId = activeProvider.modelId;
+        c.modelRevision = activeProvider.modelRevision;
+        c.contentHash = textHash( c.chunk.text );
+        c.sourceMTime = file.sourceMTime;
+
+        const QString reuseKey = chunkReuseKey( QString::fromLatin1( SOURCE_TYPE_FILE ), file.relativePath, QString(), ci );
+        const auto reusableIt = reusableFileChunks.constFind( reuseKey );
+        if ( reusableIt != reusableFileChunks.constEnd() && reusableIt->contentHash == c.contentHash && reusableIt->sourceMTime == c.sourceMTime && !reusableIt->embedding.isEmpty() )
+        {
+          c.embedding = reusableIt->embedding;
+          c.embeddingDimension = reusableIt->embeddingDimension;
+          built.append( c );
+          continue;
+        }
+
+        built.append( c );
+        backRefIndex.append( built.size() - 1 );
+        textsToEmbed.append( c.chunk.text );
+      }
     }
-    mCache.erase(
-      std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty(); } ), mCache.end()
-    );
-    mLastSync = QDateTime::currentDateTimeUtc();
-    mLoaded = true;
-    return true;
   }
 
   if ( !textsToEmbed.isEmpty() )
   {
+    const QgsAiPerfScope embedPerf( u"index_task"_s, u"embed_files chunks=%1"_s.arg( textsToEmbed.size() ) );
     QList<QVector<float>> vectors;
-    QgsAiEmbeddingOptions options;
-    options.maxBatch = EMBEDDING_BATCH;
-    if ( !mEmbeddingProvider->embed( textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, options ) )
+    const auto embedProgress = [&reportProgress]( double percent ) { reportProgress( 20.0 + 0.75 * percent ); };
+    if ( !indexEmbedInBatches( mProviderUseMutex, mSearchesWaiting, provider.get(), textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, feedback, embedProgress ) )
       return false;
-    if ( vectors.size() != textsToEmbed.size() )
-    {
-      if ( errorMessage )
-        *errorMessage = u"Embedding count mismatch: expected %1 got %2"_s.arg( textsToEmbed.size() ).arg( vectors.size() );
-      return false;
-    }
 
     for ( int i = 0; i < vectors.size(); ++i )
     {
@@ -1059,19 +1232,34 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
     }
   }
 
+  if ( feedback && feedback->isCanceled() )
   {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    if ( !persistAll( built, ReplaceScope::AllFiles, QString(), workspaceRoot, errorMessage ) )
-      return false;
-
-    mCache.erase(
-      std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty(); } ), mCache.end()
-    );
-    mCache.append( built );
-    mLastSync = QDateTime::currentDateTimeUtc();
-    mLoaded = true;
+    if ( errorMessage )
+      *errorMessage = indexCanceledMessage();
+    return false;
   }
-  QgsMessageLog::logMessage( u"Workspace index built: files=%1 chunks=%2"_s.arg( snapshot.size() ).arg( built.size() ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+
+  {
+    const QgsAiPerfScope persistPerf( u"index_task"_s, u"persist_files"_s );
+    if ( !persistAll( built, ReplaceScope::AllFiles, QString(), workspaceRoot, indexDatabaseProviderId( provider.get() ), errorMessage ) )
+      return false;
+  }
+  reportProgress( 100.0 );
+
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( cacheHoldsRoot( workspaceRoot ) )
+    {
+      mCache.erase(
+        std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty(); } ), mCache.end()
+      );
+      mCache.append( built );
+      mLastSync = QDateTime::currentDateTimeUtc();
+      mLoaded = true;
+      updateStatusSnapshot();
+    }
+  }
+  QgsMessageLog::logMessage( u"Workspace index built: files=%1 chunks=%2 embedded=%3"_s.arg( snapshot.size() ).arg( built.size() ).arg( textsToEmbed.size() ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
   return true;
 }
 
@@ -1085,21 +1273,15 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::search( const QString &qu
     return results;
   }
 
-  QMutexLocker providerLocker( &mProviderUseMutex );
-  if ( feedback && feedback->isCanceled() )
-  {
-    // cancelled while waiting for the provider lock: don't start a new embed
-    if ( errorMessage )
-      *errorMessage = u"Search cancelled."_s;
-    return results;
-  }
-  if ( !ensureEmbeddingProviderAvailable( mEmbeddingProvider, errorMessage ) )
+  const QgsAiPerfScope perf( u"index"_s, u"search"_s );
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  if ( !ensureEmbeddingProviderAvailable( provider.get(), errorMessage ) )
     return results;
 
+  ensureLoaded();
   QList<CachedChunk> cache;
   {
-    QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    ensureLoaded();
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     cache = mCache;
   }
 
@@ -1110,12 +1292,30 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::search( const QString &qu
     return results;
   }
 
+  // A reindex holds the provider for one batch at a time: wait for that batch, not the whole run.
+  ++mSearchesWaiting;
+  const bool providerLocked = mProviderUseMutex.tryLock( SEARCH_LOCK_TIMEOUT_MS );
+  --mSearchesWaiting;
+  if ( !providerLocked )
+  {
+    if ( errorMessage )
+      *errorMessage = u"The workspace index is busy updating; try the search again in a moment."_s;
+    return results;
+  }
+  const auto unlockProvider = qScopeGuard( [this]() { mProviderUseMutex.unlock(); } );
+  if ( feedback && feedback->isCanceled() )
+  {
+    if ( errorMessage )
+      *errorMessage = u"Search cancelled."_s;
+    return results;
+  }
+
   QStringList qList { query };
   QList<QVector<float>> qEmb;
   QgsAiEmbeddingOptions options;
   options.maxBatch = 1;
   options.feedback = feedback;
-  if ( !mEmbeddingProvider->embed( qList, QgsAiEmbeddingRole::Query, qEmb, errorMessage, options ) || qEmb.isEmpty() )
+  if ( !provider->embed( qList, QgsAiEmbeddingRole::Query, qEmb, errorMessage, options ) || qEmb.isEmpty() )
     return results;
 
   if ( feedback && feedback->isCanceled() )
@@ -1141,24 +1341,11 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::search( const QString &qu
   return results;
 }
 
-namespace
-{
-  QList<QgsAiWorkspaceIndex::Chunk> chunksForLayer( QgsMapLayer *layer )
-  {
-    if ( !layer )
-      return {};
-    if ( QgsVectorLayer *v = qobject_cast<QgsVectorLayer *>( layer ) )
-      return QgsAiLayerChunker::chunkVector( v );
-    if ( QgsRasterLayer *r = qobject_cast<QgsRasterLayer *>( layer ) )
-      return QgsAiLayerChunker::chunkRaster( r );
-    return {};
-  }
-} // namespace
-
 bool QgsAiWorkspaceIndex::createWorkspaceLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QString *errorMessage ) const
 {
   snapshot = WorkspaceLayerSnapshot();
   snapshot.scope = ReplaceScope::AllLayers;
+  snapshot.workspaceRoot = workspaceRoot();
 
   QgsProject *project = QgsProject::instance();
   if ( !project )
@@ -1171,7 +1358,7 @@ bool QgsAiWorkspaceIndex::createWorkspaceLayerSnapshot( WorkspaceLayerSnapshot &
   const QMap<QString, QgsMapLayer *> layers = project->mapLayers();
   snapshot.layerCount = layers.size();
   for ( auto it = layers.constBegin(); it != layers.constEnd(); ++it )
-    snapshot.chunks.append( chunksForLayer( it.value() ) );
+    snapshot.preparedLayers.append( std::make_shared<const QgsAiPreparedLayer>( QgsAiLayerChunker::prepare( it.value() ) ) );
   return true;
 }
 
@@ -1180,6 +1367,7 @@ bool QgsAiWorkspaceIndex::createWorkspaceLayerSnapshotForLayer( const QString &l
   snapshot = WorkspaceLayerSnapshot();
   snapshot.scope = ReplaceScope::SingleLayer;
   snapshot.scopedLayerId = layerId;
+  snapshot.workspaceRoot = workspaceRoot();
   if ( layerId.isEmpty() )
   {
     if ( errorMessage )
@@ -1196,50 +1384,70 @@ bool QgsAiWorkspaceIndex::createWorkspaceLayerSnapshotForLayer( const QString &l
   }
 
   snapshot.layerCount = 1;
-  snapshot.chunks = chunksForLayer( layer );
+  snapshot.preparedLayers.append( std::make_shared<const QgsAiPreparedLayer>( QgsAiLayerChunker::prepare( layer ) ) );
   return true;
 }
 
-bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &snapshot, QString *errorMessage )
+bool QgsAiWorkspaceIndex::materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback )
 {
-  if ( snapshot.scope != ReplaceScope::AllLayers && snapshot.scope != ReplaceScope::SingleLayer )
+  for ( const std::shared_ptr<const QgsAiPreparedLayer> &prepared : std::as_const( snapshot.preparedLayers ) )
+  {
+    if ( feedback && feedback->isCanceled() )
+      return false;
+    if ( prepared )
+      snapshot.chunks.append( QgsAiLayerChunker::chunk( *prepared, feedback ) );
+  }
+  snapshot.preparedLayers.clear();
+  return !( feedback && feedback->isCanceled() );
+}
+
+bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &preparedSnapshot, QString *errorMessage, QgsFeedback *feedback )
+{
+  if ( preparedSnapshot.scope != ReplaceScope::AllLayers && preparedSnapshot.scope != ReplaceScope::SingleLayer )
   {
     if ( errorMessage )
       *errorMessage = u"Layer snapshots must use AllLayers or SingleLayer replace scope."_s;
     return false;
   }
-  if ( snapshot.scope == ReplaceScope::SingleLayer && snapshot.scopedLayerId.isEmpty() )
+  if ( preparedSnapshot.scope == ReplaceScope::SingleLayer && preparedSnapshot.scopedLayerId.isEmpty() )
   {
     if ( errorMessage )
       *errorMessage = u"Layer snapshot is missing scoped layer id."_s;
     return false;
   }
 
-  QMutexLocker providerLocker( &mProviderUseMutex );
-  if ( !ensureEmbeddingProviderAvailable( mEmbeddingProvider, errorMessage ) )
+  const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
+  if ( !ensureEmbeddingProviderAvailable( provider.get(), errorMessage ) )
     return false;
 
+  WorkspaceLayerSnapshot snapshot = preparedSnapshot;
+  if ( !snapshot.preparedLayers.isEmpty() )
+  {
+    const QgsAiPerfScope chunkPerf( u"index_task"_s, u"read_layer"_s );
+    if ( !materializeLayerSnapshot( snapshot, feedback ) )
+    {
+      if ( errorMessage )
+        *errorMessage = indexCanceledMessage();
+      return false;
+    }
+  }
+
   if ( snapshot.chunks.isEmpty() )
-    return persistChunks( {}, {}, snapshot.scope, snapshot.scopedLayerId, errorMessage );
+    return persistChunks( {}, {}, snapshot.scope, snapshot.scopedLayerId, errorMessage, snapshot.workspaceRoot );
 
   QStringList textsToEmbed;
   textsToEmbed.reserve( snapshot.chunks.size() );
-  for ( const Chunk &c : snapshot.chunks )
+  for ( const Chunk &c : std::as_const( snapshot.chunks ) )
     textsToEmbed.append( c.text );
 
   QList<QVector<float>> vectors;
-  QgsAiEmbeddingOptions options;
-  options.maxBatch = EMBEDDING_BATCH;
-  if ( !mEmbeddingProvider->embed( textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, options ) )
-    return false;
-  if ( vectors.size() != snapshot.chunks.size() )
   {
-    if ( errorMessage )
-      *errorMessage = u"Embedding count mismatch: expected %1 got %2"_s.arg( snapshot.chunks.size() ).arg( vectors.size() );
-    return false;
+    const QgsAiPerfScope embedPerf( u"index_task"_s, u"embed_layer chunks=%1"_s.arg( textsToEmbed.size() ) );
+    if ( !indexEmbedInBatches( mProviderUseMutex, mSearchesWaiting, provider.get(), textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, feedback ) )
+      return false;
   }
 
-  if ( !persistChunks( snapshot.chunks, vectors, snapshot.scope, snapshot.scopedLayerId, errorMessage ) )
+  if ( !persistChunks( snapshot.chunks, vectors, snapshot.scope, snapshot.scopedLayerId, errorMessage, snapshot.workspaceRoot ) )
     return false;
 
   QgsMessageLog::logMessage(
@@ -1254,11 +1462,8 @@ bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &sn
 
 bool QgsAiWorkspaceIndex::reindexLayers( QString *errorMessage )
 {
-  {
-    QMutexLocker providerLocker( &mProviderUseMutex );
-    if ( !ensureEmbeddingProviderAvailable( mEmbeddingProvider, errorMessage ) )
-      return false;
-  }
+  if ( !ensureEmbeddingProviderAvailable( providerSnapshot().get(), errorMessage ) )
+    return false;
 
   WorkspaceLayerSnapshot snapshot;
   if ( !createWorkspaceLayerSnapshot( snapshot, errorMessage ) )
@@ -1268,11 +1473,8 @@ bool QgsAiWorkspaceIndex::reindexLayers( QString *errorMessage )
 
 bool QgsAiWorkspaceIndex::reindexLayer( const QString &layerId, QString *errorMessage )
 {
-  {
-    QMutexLocker providerLocker( &mProviderUseMutex );
-    if ( !ensureEmbeddingProviderAvailable( mEmbeddingProvider, errorMessage ) )
-      return false;
-  }
+  if ( !ensureEmbeddingProviderAvailable( providerSnapshot().get(), errorMessage ) )
+    return false;
 
   WorkspaceLayerSnapshot snapshot;
   if ( !createWorkspaceLayerSnapshotForLayer( layerId, snapshot, errorMessage ) )
@@ -1282,10 +1484,15 @@ bool QgsAiWorkspaceIndex::reindexLayer( const QString &layerId, QString *errorMe
 
 void QgsAiWorkspaceIndex::clear()
 {
-  QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  mCache.clear();
-  mLastSync = QDateTime();
   const QString path = dbPath();
+  indexDatabaseWorkPool()->waitForDone();
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    mCache.clear();
+    mLastSync = QDateTime();
+    updateStatusSnapshot();
+  }
+  closeDatabaseConnectionForCurrentThread();
   if ( !path.isEmpty() && QFileInfo::exists( path ) )
     QFile::remove( path );
 }

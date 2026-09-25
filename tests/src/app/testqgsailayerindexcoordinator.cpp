@@ -71,9 +71,10 @@ class CountingWorkspaceIndex : public QgsAiWorkspaceIndex // clazy:exclude=missi
       return false;
     }
 
-    bool reindexLayerSnapshot( const QgsAiWorkspaceIndex::WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr ) override
+    bool reindexLayerSnapshot( const QgsAiWorkspaceIndex::WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr ) override
     {
       Q_UNUSED( errorMessage )
+      Q_UNUSED( feedback )
       reindexedLayerIds.append( snapshot.scopedLayerId );
       return true;
     }
@@ -103,8 +104,9 @@ class BreakerTrippingIndex : public QgsAiWorkspaceIndex // clazy:exclude=missing
       return false;
     }
 
-    bool reindexLayerSnapshot( const QgsAiWorkspaceIndex::WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr ) override
+    bool reindexLayerSnapshot( const QgsAiWorkspaceIndex::WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr ) override
     {
+      Q_UNUSED( feedback )
       reindexedLayerIds.append( snapshot.scopedLayerId );
       mAvailable = false; // the breaker trips on the first failed embed
       if ( errorMessage )

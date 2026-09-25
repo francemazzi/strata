@@ -5,23 +5,30 @@
 ***************************************************************************/
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
+#include <thread>
 #include <utility>
 
 #include "ai/index/qgsaiembeddingclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingscheduler.h"
 #include "ai/index/qgsailayerchunker.h"
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/tools/qgsaiindextools.h"
+#include "qgsapplication.h"
+#include "qgsfeedback.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectorlayer.h"
 
 #include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
@@ -30,6 +37,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QVariant>
 #include <QVector>
 
@@ -140,6 +148,27 @@ namespace
       }
   };
 
+  //! Takes \a delayMs per embed() call, i.e. per batch, like a real model on a slow computer.
+  class SlowEmbeddingProvider : public FakeEmbeddingProvider
+  {
+    public:
+      explicit SlowEmbeddingProvider( int delayMs )
+        : mDelayMs( delayMs )
+      {}
+
+      bool embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage = nullptr, int maxBatch = 64 ) override
+      {
+        ++calls;
+        QThread::msleep( mDelayMs );
+        return FakeEmbeddingProvider::embed( texts, out, errorMessage, maxBatch );
+      }
+
+      std::atomic_int calls { 0 };
+
+    private:
+      int mDelayMs = 0;
+  };
+
   /**
    * Provider with fully configurable identity metadata, used to exercise the
    * provider/model mismatch -> wipe-and-rebuild path of the on-disk index.
@@ -212,8 +241,14 @@ class TestQgsAiWorkspaceIndex : public QObject
     void reindexLayersToolRequiresConfirm();
     void e5AvailabilityDoesNotLoadTheModel();
     void workspaceScanPrunesExcludedFoldersAtAnyDepth();
+    void searchWaitsForOneBatchNotTheWholeReindex();
+    void reindexStopsWithinOneBatchWhenCanceled();
+    void setEmbeddingProviderDoesNotWaitForTheReindex();
+    void schedulerRerunsARequestMadeDuringAPass();
 
   private:
+    //! Writes a workspace file that chunkText() splits into \a chunkCount chunks.
+    static void writeManyChunkFile( const QString &path, int chunkCount );
     static QgsAiWorkspaceIndex::Chunk makeFileChunk( const QString &rel, int index, const QString &text );
     static QgsAiWorkspaceIndex::Chunk makeLayerChunk( const QString &layerId, const QString &name, qint64 fidMin, qint64 fidMax, int index, const QString &text, const QByteArray &wkt );
     static QVector<float> dummyEmbedding( float seed );
@@ -430,6 +465,10 @@ void TestQgsAiWorkspaceIndex::workspaceRootChangeLoadsSeparateIndex()
 
   contextProvider.setWorkspaceRoot( root1.path() );
   QCOMPARE( index.status().workspaceRoot, QDir( root1.path() ).absolutePath() );
+  // The previous workspace's cache loads in the background after the switch.
+  QVERIFY( index.status().loading );
+  QVERIFY( index.ensureLoaded() );
+  QVERIFY( !index.status().loading );
   QCOMPARE( index.status().chunkCount, 1 );
   QCOMPARE( index.chunks().first().relativePath, u"a.md"_s );
 }
@@ -771,7 +810,15 @@ void TestQgsAiWorkspaceIndex::layerSnapshotsReindexWithoutDroppingFileChunks()
   QVERIFY2( index.createWorkspaceLayerSnapshot( allSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( allSnapshot.scope, QgsAiWorkspaceIndex::ReplaceScope::AllLayers );
   QCOMPARE( allSnapshot.layerCount, 1 );
-  QVERIFY( !allSnapshot.chunks.isEmpty() );
+  // Prepared on this thread, read into chunks where the snapshot is indexed (a worker in the app).
+  QCOMPARE( allSnapshot.preparedLayers.size(), 1 );
+  QVERIFY( allSnapshot.chunks.isEmpty() );
+  {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot materialized = allSnapshot;
+    QVERIFY( QgsAiWorkspaceIndex::materializeLayerSnapshot( materialized ) );
+    QVERIFY( !materialized.chunks.isEmpty() );
+    QVERIFY( materialized.preparedLayers.isEmpty() );
+  }
 
   QVERIFY2( index.reindexLayerSnapshot( allSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( index.status().fileChunkCount, 1 );
@@ -781,7 +828,7 @@ void TestQgsAiWorkspaceIndex::layerSnapshotsReindexWithoutDroppingFileChunks()
   QVERIFY2( index.createWorkspaceLayerSnapshotForLayer( layerId, singleSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( singleSnapshot.scope, QgsAiWorkspaceIndex::ReplaceScope::SingleLayer );
   QCOMPARE( singleSnapshot.scopedLayerId, layerId );
-  QVERIFY( !singleSnapshot.chunks.isEmpty() );
+  QCOMPARE( singleSnapshot.preparedLayers.size(), 1 );
 
   QVERIFY2( index.reindexLayerSnapshot( singleSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( index.status().fileChunkCount, 1 );
@@ -864,6 +911,16 @@ void TestQgsAiWorkspaceIndex::reindexLayersToolRequiresConfirm()
   QVERIFY2( confirmed.errorMessage.contains( u"Local embedding model"_s, Qt::CaseInsensitive ), confirmed.errorMessage.toUtf8().constData() );
 }
 
+void TestQgsAiWorkspaceIndex::writeManyChunkFile( const QString &path, int chunkCount )
+{
+  QFile file( path );
+  QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
+  // One line per chunk, a bit shorter than CHUNK_TARGET_CHARS so each chunk ends on its newline.
+  const QByteArray line = QByteArray( QgsAiWorkspaceIndex::CHUNK_TARGET_CHARS - 10, 'a' ) + '\n';
+  for ( int i = 0; i < chunkCount; ++i )
+    file.write( line );
+}
+
 void TestQgsAiWorkspaceIndex::e5AvailabilityDoesNotLoadTheModel()
 {
   if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
@@ -923,6 +980,133 @@ void TestQgsAiWorkspaceIndex::workspaceScanPrunesExcludedFoldersAtAnyDepth()
 
   options.maxEntries = 2;
   QVERIFY( QgsAiFileContextProvider::scanWorkspace( root.path(), options ).truncated );
+}
+
+void TestQgsAiWorkspaceIndex::searchWaitsForOneBatchNotTheWholeReindex()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  // 10 batches of 200 ms: about 2 s of embedding.
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { QVector<float> { 1.0f, 0.0f, 0.1f } }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+  std::atomic_bool reindexFinished { false };
+  std::thread worker( [&index, &reindexFinished]() {
+    QString reindexError;
+    index.reindex( 10, &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+    reindexFinished = true;
+  } );
+  QThread::msleep( 300 );
+
+  QElapsedTimer clock;
+  clock.start();
+  const QList<QgsAiWorkspaceIndex::Chunk> hits = index.search( u"alpha"_s, 1, &err );
+  const qint64 searchMs = clock.elapsed();
+  const bool reindexWasRunning = !reindexFinished;
+  worker.join();
+
+  QVERIFY2( !hits.isEmpty(), err.toUtf8().constData() );
+  QVERIFY( reindexWasRunning );
+  // At most the batch in progress plus the query itself, not the rest of the reindex.
+  QVERIFY2( searchMs < 1000, QString::number( searchMs ).toUtf8().constData() );
+}
+
+void TestQgsAiWorkspaceIndex::reindexStopsWithinOneBatchWhenCanceled()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  QgsFeedback feedback;
+  std::thread canceller( [&feedback]() {
+    QThread::msleep( 300 );
+    feedback.cancel();
+  } );
+  QElapsedTimer clock;
+  clock.start();
+  QString err;
+  const bool ok = index.reindex( 10, &err, &feedback );
+  const qint64 elapsedMs = clock.elapsed();
+  canceller.join();
+
+  QVERIFY( !ok );
+  QVERIFY2( err.contains( u"canceled"_s, Qt::CaseInsensitive ), err.toUtf8().constData() );
+  QVERIFY2( elapsedMs < 1000, QString::number( elapsedMs ).toUtf8().constData() );
+  QVERIFY( provider.calls < 10 );
+  // Nothing half-done reached the index.
+  QCOMPARE( index.status().fileChunkCount, 0 );
+}
+
+void TestQgsAiWorkspaceIndex::setEmbeddingProviderDoesNotWaitForTheReindex()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  FakeEmbeddingProvider replacement;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  std::atomic_bool reindexFinished { false };
+  std::thread worker( [&index, &reindexFinished]() {
+    QString reindexError;
+    index.reindex( 10, &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+    reindexFinished = true;
+  } );
+  QThread::msleep( 300 );
+
+  QElapsedTimer clock;
+  clock.start();
+  index.setEmbeddingProvider( &replacement );
+  const qint64 swapMs = clock.elapsed();
+  const bool reindexWasRunning = !reindexFinished;
+  worker.join();
+
+  QVERIFY( reindexWasRunning );
+  QVERIFY2( swapMs < 1000, QString::number( swapMs ).toUtf8().constData() );
+  // The running pass kept the provider it started with.
+  QVERIFY( provider.calls >= 10 );
+}
+
+void TestQgsAiWorkspaceIndex::schedulerRerunsARequestMadeDuringAPass()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 3 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QgsAiIndexingScheduler scheduler( &index );
+  scheduler.setAutomaticEnabled( true );
+
+  int passes = 0;
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  const QMetaObject::Connection counter = connect( manager, &QgsTaskManager::taskAdded, this, [&passes, manager]( long taskId ) {
+    if ( QgsTask *task = manager->task( taskId ); task && task->description() == QObject::tr( "Index AI workspace" ) )
+      ++passes;
+  } );
+
+  scheduler.scheduleWorkspaceIndexing( 0 );
+  QTRY_VERIFY_WITH_TIMEOUT( scheduler.isRunning(), 5000 );
+  // A request during the pass is kept and runs once the pass ends.
+  scheduler.scheduleWorkspaceIndexing( 0 );
+  QTRY_COMPARE_WITH_TIMEOUT( passes, 2, 10000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !scheduler.isRunning(), 10000 );
+  disconnect( counter );
+  QCOMPARE( passes, 2 );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

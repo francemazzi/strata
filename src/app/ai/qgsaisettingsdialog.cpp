@@ -24,6 +24,7 @@
 #include "ai/index/qgsaiembeddingprovider.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiaccountwidget.h"
 #include "qgsaiagentsessionmanager.h"
 #include "qgsaichatdockwidget.h"
@@ -455,6 +456,7 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
   , mModelRouter( modelRouter )
   , mLayerIndexCoordinator( layerIndexCoordinator )
 {
+  QgsAiPerfScope perf( u"settings"_s, u"dialog_open"_s, 100 );
   setWindowTitle( tr( "AI Settings" ) );
   setObjectName( u"aiSettingsDialog"_s );
 
@@ -619,6 +621,7 @@ void QgsAiSettingsDialog::accept()
   QgsAiCredentialDialog::save( this, credentials, [this]( bool saved ) {
     mSavingSecrets = false;
     mStack->setEnabled( true );
+    QgsAiPerfScope perf( u"settings"_s, u"dialog_accept"_s, 100 );
     if ( !saved || !applySettings() )
       return;
     if ( mRequestedProvider )
@@ -1610,7 +1613,9 @@ void QgsAiSettingsDialog::setSkillDocumentInEditor( const QgsAiMarkdownDocument 
 
   for ( const QgsAiFrontmatterProperty &property : document.properties )
   {
-    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
+    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0
+         || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0
+         || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
       continue;
     addSkillPropertyRow( property.key, property.values, property.isList, false );
   }
@@ -2963,8 +2968,17 @@ void QgsAiSettingsDialog::refreshIndexStatusLabel()
 {
   if ( mSessionManager && mSessionManager->workspaceIndex() )
   {
-    mSessionManager->workspaceIndex()->ensureLoaded();
-    const auto status = mSessionManager->workspaceIndex()->status();
+    QgsAiWorkspaceIndex *index = mSessionManager->workspaceIndex();
+    // Opening the settings never waits on the index: it loads in the background and the
+    // label refreshes once it is ready.
+    const auto status = index->status();
+    if ( status.loading )
+    {
+      mIndexStatusLabel->setText( tr( "Indexed: loading…" ) );
+      connect( index, &QgsAiWorkspaceIndex::loaded, this, &QgsAiSettingsDialog::refreshIndexStatusLabel, Qt::SingleShotConnection );
+      index->requestLoad();
+      return;
+    }
     mIndexStatusLabel->setText( tr( "Indexed: %1 file chunks, %2 layer chunks (last sync: %3)" )
                                   .arg( status.fileChunkCount )
                                   .arg( status.layerChunkCount )
@@ -3230,12 +3244,9 @@ bool QgsAiSettingsDialog::applySettings()
     layerSettings.setValue( u"strata/index/enable_layer_indexing"_s, layerIndexingChoice );
     layerSettings.remove( u"geoai/index/enable_layer_indexing"_s );
     layerSettings.remove( u"qgis_ai/index/enable_layer_indexing"_s );
+    // Enabling schedules every layer by itself; keeping it on must not re-embed them all.
     if ( mLayerIndexCoordinator )
-    {
       mLayerIndexCoordinator->setEnabled( layerIndexingChoice && canUseEmbeddings );
-      if ( layerIndexingChoice && canUseEmbeddings )
-        mLayerIndexCoordinator->scheduleAllLayers();
-    }
   }
 
   if ( !errorMessages.isEmpty() )

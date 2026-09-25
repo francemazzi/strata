@@ -1506,7 +1506,8 @@ QgisApp::QgisApp(
   mAiToolRegistry->registerTool( std::make_unique<QgsAiWebFetchTool>( mAiModelRouter.get() ) );
   mAiToolRegistry->setMcpCallProxy( std::make_unique<QgsAiMcpCallTool>( mAiModelRouter.get() ) );
   mAiEmbeddingProvider = QgsAiEmbeddingProviderRegistry::createProviderFromSettings( this );
-  mAiWorkspaceIndex = std::make_unique<QgsAiWorkspaceIndex>( mAiFileContextProvider.get(), mAiEmbeddingProvider.get(), this );
+  mAiWorkspaceIndex = std::make_unique<QgsAiWorkspaceIndex>( mAiFileContextProvider.get(), nullptr, this );
+  mAiWorkspaceIndex->setEmbeddingProvider( mAiEmbeddingProvider );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiIndexStatusTool>( mAiWorkspaceIndex.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiSearchWorkspaceTool>( mAiWorkspaceIndex.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiReindexWorkspaceTool>( mAiWorkspaceIndex.get() ) );
@@ -1575,26 +1576,42 @@ QgisApp::QgisApp(
   connect( mAiChatDock, &QgsAiChatDockWidget::embeddingProviderSettingsChanged, this, [this]() {
     if ( !mAiWorkspaceIndex )
       return;
+    const QgsAiPerfScope perf( u"index"_s, u"settings_apply"_s );
 
+    // Every OK of the AI settings lands here. Only a different embedding provider or model
+    // invalidates the index; otherwise keep the provider (and its loaded model) as is.
     std::unique_ptr<QgsAiEmbeddingProvider> newEmbeddingProvider = QgsAiEmbeddingProviderRegistry::createProviderFromSettings( this );
-    mAiWorkspaceIndex->setEmbeddingProvider( newEmbeddingProvider.get() );
-    mAiEmbeddingProvider = std::move( newEmbeddingProvider );
+    const bool providerChanged = !mAiEmbeddingProvider
+                                 || newEmbeddingProvider->providerId() != mAiEmbeddingProvider->providerId()
+                                 || newEmbeddingProvider->modelId() != mAiEmbeddingProvider->modelId()
+                                 || newEmbeddingProvider->modelRevision() != mAiEmbeddingProvider->modelRevision();
+    if ( providerChanged )
+    {
+      mAiEmbeddingProvider = std::move( newEmbeddingProvider );
+      mAiWorkspaceIndex->setEmbeddingProvider( mAiEmbeddingProvider );
+    }
 
     QgsSettings settings;
     const bool automaticIndexing = settings.value( u"strata/index/automatic"_s, true ).toBool();
+    const bool providerAvailable = mAiWorkspaceIndex->embeddingProviderAvailable();
+    // A new provider needs everything embedded again; so does an empty index once the model is
+    // installed (the download ends with this same signal).
+    const bool needsIndexing = providerChanged || ( providerAvailable && !mAiWorkspaceIndex->status().indexed );
     if ( mAiIndexingScheduler )
     {
+      const bool wasAutomatic = mAiIndexingScheduler->automaticEnabled();
       mAiIndexingScheduler->setAutomaticEnabled( automaticIndexing );
-      if ( automaticIndexing )
+      if ( automaticIndexing && ( needsIndexing || !wasAutomatic ) )
         mAiIndexingScheduler->scheduleWorkspaceIndexing();
     }
 
     const bool layerIndexing = settings.value( u"strata/index/enable_layer_indexing"_s, automaticIndexing ).toBool();
-    const bool providerAvailable = mAiWorkspaceIndex->embeddingProviderAvailable();
     if ( mAiLayerIndexCoordinator )
     {
+      const bool wasEnabled = mAiLayerIndexCoordinator->isEnabled();
+      // Enabling schedules every layer by itself.
       mAiLayerIndexCoordinator->setEnabled( layerIndexing && providerAvailable );
-      if ( layerIndexing && providerAvailable )
+      if ( wasEnabled && needsIndexing && layerIndexing && providerAvailable )
         mAiLayerIndexCoordinator->scheduleAllLayers();
     }
   } );
@@ -2389,6 +2406,14 @@ QgisApp::~QgisApp()
 {
   // shouldn't be needed, but from this stage on, we don't want/need ANY map canvas refreshes to take place
   mFreezeCount = 1000000;
+
+#ifdef HAVE_AI_ASSISTANT
+  // No new indexing pass from here on; running ones are canceled (fileExit also waits for them).
+  if ( mAiIndexingScheduler )
+    mAiIndexingScheduler->shutdown();
+  if ( mAiLayerIndexCoordinator )
+    mAiLayerIndexCoordinator->shutdown();
+#endif
 
 #ifdef HAVE_GEOREFERENCER
   if ( mGeoreferencer )
@@ -6257,6 +6282,17 @@ void QgisApp::fileExit()
   QgsCanvasRefreshBlocker refreshBlocker;
   if ( canCreateNewProject() )
   {
+#ifdef HAVE_AI_ASSISTANT
+    // Indexing reads the index and the project's layers: stop it for good and let a pass that
+    // was running return (it stops within one embedding batch) before the layers are closed.
+    const bool indexing = ( mAiIndexingScheduler && mAiIndexingScheduler->isRunning() ) || ( mAiLayerIndexCoordinator && mAiLayerIndexCoordinator->isRunning() );
+    if ( mAiIndexingScheduler )
+      mAiIndexingScheduler->shutdown();
+    if ( mAiLayerIndexCoordinator )
+      mAiLayerIndexCoordinator->shutdown();
+    if ( indexing && !qgsAiWaitForActiveTasks( 5000 ) )
+      QgsMessageLog::logMessage( u"AI indexing was still running when Strata quit."_s, u"AI/Index"_s, Qgis::MessageLevel::Warning );
+#endif
     closeProject();
     userProfileManager()->updateLastProfileName();
 

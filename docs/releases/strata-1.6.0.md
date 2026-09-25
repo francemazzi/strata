@@ -24,3 +24,10 @@ the Windows reference machine measurements are still to be done.
   features are read in the background. Geometries are only turned into WKT when the
   privacy setting allows them in the model context, and layers from remote services are
   indexed from their metadata unless `strata/index/include_remote_layers` is on.
+- File and layer indexing, the index tools and the settings dialog no longer wait on each
+  other: the embedding model is held one batch at a time, so a chat search waits at most
+  one batch; the index cache loads in the background when a project opens; OK in the AI
+  settings reloads the model and re-embeds layers only when the embedding provider really
+  changed. Indexing stops within one batch when canceled, when an import starts or when
+  Strata quits, and a request that arrives during a pass is run afterwards instead of
+  being dropped.

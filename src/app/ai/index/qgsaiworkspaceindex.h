@@ -16,12 +16,16 @@
 #ifndef QGSAIWORKSPACEINDEX_H
 #define QGSAIWORKSPACEINDEX_H
 
+#include <atomic>
+#include <memory>
+
 #include "qgis_app.h"
 
 #include <QDateTime>
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <QPointer>
 #include <QRecursiveMutex>
 #include <QString>
 #include <QVector>
@@ -29,6 +33,8 @@
 class QgsAiEmbeddingProvider;
 class QgsAiFileContextProvider;
 class QgsFeedback;
+class QgsTask;
+struct QgsAiPreparedLayer;
 
 /**
  * Lightweight retrieval index over the user's workspace. The model uses this
@@ -44,6 +50,12 @@ class QgsFeedback;
  * - Retrieval is a linear cosine-similarity scan in C++ (fast enough for
  *   tens of thousands of chunks; we cap reindex at 500 files for the MVP).
  *
+ * Threading: indexing and search run on worker threads. The interface thread only
+ * prepares snapshots (cheap), reads status() (never blocks) and asks for the cache to
+ * be loaded in the background (requestLoad()). The embedding provider is shared with
+ * the tasks using it, and its lock is held for one embedding batch at a time, so a
+ * search waits at most one batch for a running reindex.
+ *
  * Privacy: the default product path is local/on-device embeddings. Remote
  * embedding providers must be explicitly selected by future code before use.
  */
@@ -56,6 +68,10 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     static constexpr int MAX_FILE_BYTES = 256 * 1024;
     static constexpr int DEFAULT_MAX_FILES = 500;
     static constexpr int EMBEDDING_BATCH = 16;
+    //! How long search() waits for a running reindex batch before reporting the index as busy.
+    static constexpr int SEARCH_LOCK_TIMEOUT_MS = 2000;
+    //! Time budget of a workspace file scan.
+    static constexpr int FILE_SCAN_TIME_BUDGET_MS = 5000;
     //! Bumped when the on-disk SQLite schema changes; older DBs are dropped on first load.
     static constexpr int SCHEMA_VERSION = 4;
 
@@ -100,6 +116,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     struct Status
     {
         bool indexed = false;
+        //! The cache of the current workspace is still being loaded in the background.
+        bool loading = false;
         int fileCount = 0;
         int chunkCount = 0;
         int fileChunkCount = 0;
@@ -122,17 +140,32 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
         ReplaceScope scope = ReplaceScope::AllLayers;
         QString scopedLayerId;
         int layerCount = 0;
+        //! Workspace whose database receives the chunks, captured when the snapshot was prepared.
+        QString workspaceRoot;
+        //! Layers prepared on the interface thread; materializeLayerSnapshot() turns them into chunks.
+        QList<std::shared_ptr<const QgsAiPreparedLayer>> preparedLayers;
         QList<Chunk> chunks;
     };
 
     QgsAiWorkspaceIndex( QgsAiFileContextProvider *contextProvider, QgsAiEmbeddingProvider *embeddingProvider, QObject *parent = nullptr );
     ~QgsAiWorkspaceIndex() override;
 
+    //! Uses \a embeddingProvider without owning it. The caller keeps it alive while the index may use it.
     void setEmbeddingProvider( QgsAiEmbeddingProvider *embeddingProvider );
+    //! Shares ownership of \a embeddingProvider with the tasks using it, so it can be replaced while they run.
+    void setEmbeddingProvider( std::shared_ptr<QgsAiEmbeddingProvider> embeddingProvider );
     virtual bool embeddingProviderAvailable() const;
     //! Temporary compatibility wrapper for older call sites.
     virtual bool hasEmbeddingConfiguration() const;
+
+    /**
+     * Counts of the cached chunks. Never blocks: while a background task holds the index it
+     * returns the last known counts, and while the cache loads it reports Status::loading.
+     */
     Status status() const;
+
+    //! Root of the current workspace. Call on the interface thread.
+    QString workspaceRoot() const;
 
     /**
      * Walks the workspace, chunks every eligible text file, embeds the chunks
@@ -142,32 +175,39 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
      *
      * \param maxFiles    Cap on the number of files indexed in one run (default 500).
      */
-    bool reindex( int maxFiles, QString *errorMessage = nullptr );
+    bool reindex( int maxFiles, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );
 
-    //! Creates an immutable file snapshot on the caller thread for background indexing.
+    //! Creates an immutable file snapshot of the current workspace, on the calling thread.
     bool createWorkspaceFileSnapshot( int maxFiles, QString &workspaceRoot, QList<WorkspaceFileSnapshot> &snapshot, QString *errorMessage = nullptr ) const;
 
-    //! Reindexes file chunks from a prebuilt snapshot without reading the context provider.
-    bool reindex( const QList<WorkspaceFileSnapshot> &snapshot, const QString &workspaceRoot, QString *errorMessage = nullptr );
+    /**
+     * Scans \a workspaceRoot for indexable text files. Safe on any thread: it does not read
+     * the index or the context provider. Excluded folders are skipped at any depth and the
+     * walk stops after FILE_SCAN_TIME_BUDGET_MS.
+     */
+    static bool scanWorkspaceFileSnapshot( const QString &workspaceRoot, int maxFiles, QList<WorkspaceFileSnapshot> &snapshot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );
 
-    //! Creates immutable layer chunks on the caller thread for background indexing.
+    //! Reindexes file chunks from a prebuilt snapshot without reading the context provider.
+    bool reindex( const QList<WorkspaceFileSnapshot> &snapshot, const QString &workspaceRoot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );
+
+    //! Prepares every layer of the active project on the calling (interface) thread. Cheap.
     bool createWorkspaceLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr ) const;
 
-    //! Creates immutable chunks for one layer id on the caller thread.
+    //! Prepares one layer on the calling (interface) thread. Cheap.
     bool createWorkspaceLayerSnapshotForLayer( const QString &layerId, WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr ) const;
 
-    //! Embeds and persists a prebuilt layer snapshot without reading QgsProject or QgsMapLayer.
-    virtual bool reindexLayerSnapshot( const WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr );
+    //! Reads the prepared layers of \a snapshot into chunks. Safe on any thread. Returns false if canceled.
+    static bool materializeLayerSnapshot( WorkspaceLayerSnapshot &snapshot, QgsFeedback *feedback = nullptr );
 
-    /**
-     * Embeds \a query and returns the top-\a k chunks by cosine similarity.
-     */
+    //! Chunks (if still needed), embeds and persists a prepared layer snapshot. Meant for a worker thread.
+    virtual bool reindexLayerSnapshot( const WorkspaceLayerSnapshot &snapshot, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );
+
     /**
      * Runs a cosine similarity search for \a query, returning the best \a k chunks.
      *
-     * Cancelling \a feedback aborts the (possibly remote) query embedding, so callers
-     * running on a worker thread stop holding the provider lock as soon as they are
-     * cancelled instead of waiting for the network timeout.
+     * Cancelling \a feedback aborts the (possibly remote) query embedding. If a reindex holds
+     * the embedding provider for longer than SEARCH_LOCK_TIMEOUT_MS, the search gives up and
+     * reports the index as busy instead of waiting for the whole reindex.
      */
     virtual QList<Chunk> search( const QString &query, int k, QString *errorMessage = nullptr, QgsFeedback *feedback = nullptr );
 
@@ -195,12 +235,16 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
      * Writes \a chunks (with their precomputed \a embeddings) to the SQLite store
      * and updates the in-memory cache. Existing rows are replaced according to
      * \a scope (and \a scopedLayerId for SingleLayer). Used by reindex(),
-     * reindexLayers(), reindexLayer() and by tests.
+     * reindexLayers(), reindexLayer() and by tests. An empty \a workspaceRoot means the
+     * current workspace.
      */
-    bool persistChunks( const QList<Chunk> &chunks, const QList<QVector<float>> &embeddings, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage = nullptr );
+    bool persistChunks(
+      const QList<Chunk> &chunks, const QList<QVector<float>> &embeddings, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage = nullptr, const QString &workspaceRoot = QString()
+    );
 
     /**
-     * Removes every chunk belonging to \a layerId from the cache and the SQLite store.
+     * Removes every chunk belonging to \a layerId from the cache at once, and from the
+     * SQLite store in the background.
      */
     virtual bool removeLayer( const QString &layerId, QString *errorMessage = nullptr );
 
@@ -216,16 +260,21 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
 
     /**
      * Loads the on-disk SQLite store into the in-memory cache the first time
-     * it is called. Subsequent calls are no-ops. Public so callers (e.g. tests
-     * or UI code reading status before any reindex) can force the lazy load.
+     * it is called, on the calling thread. Subsequent calls are no-ops. Prefer
+     * requestLoad() on the interface thread.
      */
     bool ensureLoaded();
+
+    //! Loads the cache in a background task if it is not loaded yet. Never blocks.
+    void requestLoad();
 
     //! Closes the SQLite connection owned by the current thread, if one exists.
     void closeDatabaseConnectionForCurrentThread() const;
 
   signals:
     void progress( int current, int total, const QString &filePath );
+    //! The cache finished loading in the background.
+    void loaded();
 
   private slots:
     void onWorkspaceRootChanged();
@@ -243,24 +292,43 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
         qint64 sourceMTime = 0;
     };
 
-    bool persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, QString *errorMessage );
-    bool persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, QString *errorMessage );
+    //! The provider in use, kept alive by the returned pointer even if it is replaced meanwhile.
+    std::shared_ptr<QgsAiEmbeddingProvider> providerSnapshot() const;
+    bool persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, const QString &databaseProviderId, QString *errorMessage );
     bool loadAll( QString *errorMessage );
-    bool loadAll( const QString &workspaceRoot, QString *errorMessage );
     QString dbPath() const;
     QString dbPathForRoot( const QString &workspaceRoot ) const;
+    static QString dbPathForRoot( const QString &workspaceRoot, const QString &providerId );
     QString connectionName() const;
+    //! Refreshes the snapshot returned by status(). Call with mMutex held after changing mCache.
+    void updateStatusSnapshot();
+    //! True if the cache holds \a workspaceRoot (or nothing loaded yet). Call with mMutex held.
+    bool cacheHoldsRoot( const QString &workspaceRoot ) const;
     static QStringList chunkText( const QString &content );
     static bool isTextFile( const QString &relativePath );
     static float cosineSimilarity( const QVector<float> &a, const QVector<float> &b );
 
     QgsAiFileContextProvider *mContextProvider = nullptr;
-    QgsAiEmbeddingProvider *mEmbeddingProvider = nullptr;
+    //! Copy of the context provider's root, readable from worker threads.
+    QString mCurrentRoot;
+    mutable QMutex mRootMutex;
+    std::shared_ptr<QgsAiEmbeddingProvider> mEmbeddingProvider;
+    mutable QMutex mProviderPointerMutex;
+    //! Serializes cache loads; never taken by the interface thread.
+    QMutex mLoadMutex;
     QList<CachedChunk> mCache;
+    //! Workspace whose chunks are in mCache.
+    QString mCacheRoot;
     QDateTime mLastSync;
     bool mLoaded = false;
+    //! Serializes embedding calls; held for one batch at a time.
     mutable QMutex mProviderUseMutex;
+    //! Searches waiting for mProviderUseMutex: a reindex lets them in between batches.
+    mutable std::atomic_int mSearchesWaiting { 0 };
     mutable QRecursiveMutex mMutex;
+    mutable QMutex mStatusMutex;
+    Status mStatus;
+    QPointer<QgsTask> mLoadTask;
 };
 
 #endif // QGSAIWORKSPACEINDEX_H

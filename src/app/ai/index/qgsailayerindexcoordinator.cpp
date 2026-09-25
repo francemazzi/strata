@@ -18,8 +18,10 @@
 #include <algorithm>
 #include <utility>
 
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiworkspaceindex.h"
 #include "qgsapplication.h"
+#include "qgsfeedback.h"
 #include "qgsmaplayer.h"
 #include "qgsmessagelog.h"
 #include "qgsproject.h"
@@ -42,11 +44,12 @@ namespace
       QString errorMessage;
   };
 
-  class QgsAiLayerIndexTask final : public QgsTask
+  //! Reads, embeds and stores one prepared layer on a worker thread. Stops within one batch when canceled.
+  class QgsAiLayerIndexTask final : public QgsAiBackgroundTask
   {
     public:
       QgsAiLayerIndexTask( QgsAiWorkspaceIndex *index, QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot )
-        : QgsTask( QObject::tr( "Index AI layers" ), QgsTask::CanCancel | QgsTask::CancelWithoutPrompt )
+        : QgsAiBackgroundTask( QObject::tr( "Index AI layers" ) )
         , mIndex( index )
         , mSnapshot( std::move( snapshot ) )
       {}
@@ -71,7 +74,7 @@ namespace
         }
 
         QString reindexError;
-        const bool ok = mIndex->reindexLayerSnapshot( mSnapshot, &reindexError );
+        const bool ok = mIndex->reindexLayerSnapshot( mSnapshot, &reindexError, mFeedback.get() );
         mResult = { mSnapshot.scopedLayerId, ok, reindexError };
         if ( !ok && !mIndex->embeddingProviderAvailable() )
           mErrorMessage = reindexError;
@@ -193,8 +196,12 @@ void QgsAiLayerIndexCoordinator::onLayerAdded( QgsMapLayer *layer )
 void QgsAiLayerIndexCoordinator::onLayerWillBeRemoved( const QString &layerId )
 {
   mDirtyLayers.remove( layerId );
+  // Its chunks would be written back after the removal below.
+  if ( mRunningTask && mRunningLayerId == layerId )
+    mRunningTask->cancel();
   if ( !mIndex )
     return;
+  const QgsAiPerfScope perf( u"index"_s, u"remove_layer"_s, 5 );
   QString err;
   if ( !mIndex->removeLayer( layerId, &err ) )
     QgsMessageLog::logMessage( u"Layer index: removeLayer(%1) failed: %2"_s.arg( layerId, err ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
@@ -242,6 +249,13 @@ void QgsAiLayerIndexCoordinator::beginBulkOperation()
 {
   mBulkOperationDepth++;
   mDebounceTimer.stop();
+  // Leave the CPU to the import: stop the layer being embedded and index it again afterwards.
+  if ( mRunningTask && mRunningTask->isActive() )
+  {
+    if ( !mRunningLayerId.isEmpty() )
+      mDirtyLayers.insert( mRunningLayerId );
+    mRunningTask->cancel();
+  }
 }
 
 void QgsAiLayerIndexCoordinator::endBulkOperation()
@@ -279,9 +293,20 @@ void QgsAiLayerIndexCoordinator::scheduleNextFlush()
   mDebounceTimer.start( mInterFlushDelayMs );
 }
 
+bool QgsAiLayerIndexCoordinator::isRunning() const
+{
+  return mRunningTask && mRunningTask->isActive();
+}
+
+void QgsAiLayerIndexCoordinator::shutdown()
+{
+  mShutdown = true;
+  setEnabled( false );
+}
+
 void QgsAiLayerIndexCoordinator::flushDirty()
 {
-  if ( mBulkOperationDepth > 0 )
+  if ( mBulkOperationDepth > 0 || mShutdown )
     return;
 
   mUseBulkDebounce = false;
@@ -301,11 +326,16 @@ void QgsAiLayerIndexCoordinator::flushDirty()
 
   emit reindexStarted( layerId );
 
-  // Build one layer snapshot on the main thread (QgsMapLayer is not thread-safe).
-  // Embedding and SQLite writes run in QgsAiLayerIndexTask on a worker thread.
+  // Prepare the layer on the main thread (QgsMapLayer is not thread-safe): cheap metadata and a
+  // feature source. Reading its features, embedding and SQLite writes run in QgsAiLayerIndexTask.
   QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
   QString snapshotError;
-  if ( !mIndex->createWorkspaceLayerSnapshotForLayer( layerId, snapshot, &snapshotError ) )
+  bool snapshotOk = false;
+  {
+    const QgsAiPerfScope perf( u"index"_s, u"layer_snapshot"_s );
+    snapshotOk = mIndex->createWorkspaceLayerSnapshotForLayer( layerId, snapshot, &snapshotError );
+  }
+  if ( !snapshotOk )
   {
     emit reindexFinished( layerId, false, snapshotError );
     QgsMessageLog::logMessage( u"Layer index: snapshot(%1) failed: %2"_s.arg( layerId, snapshotError ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
@@ -330,6 +360,7 @@ void QgsAiLayerIndexCoordinator::flushDirty()
 
   QgsAiLayerIndexTask *task = new QgsAiLayerIndexTask( mIndex, std::move( snapshot ) );
   mRunningTask = task;
+  mRunningLayerId = layerId;
 
   auto finishTask = [this, task]( bool terminated ) {
     const LayerIndexResult result = task->result();
@@ -344,7 +375,10 @@ void QgsAiLayerIndexCoordinator::flushDirty()
       QgsMessageLog::logMessage( u"Layer index background task failed: %1"_s.arg( task->errorMessage() ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
 
     if ( mRunningTask == task )
+    {
       mRunningTask = nullptr;
+      mRunningLayerId.clear();
+    }
 
     if ( mEnabled && !mDirtyLayers.isEmpty() && mIndex ) // provider availability is re-checked when the flush fires
       scheduleNextFlush();
