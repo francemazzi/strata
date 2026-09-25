@@ -2744,6 +2744,9 @@ void QgsAiChatDockWidget::onModeSelected( QAction *action )
   if ( !action )
     return;
   setModeLabel( action->text() );
+  // Only a mode the user picks is the one to start with next time, not one a plan switches to.
+  if ( mSessionManager )
+    mSessionManager->rememberActiveAgent();
 }
 
 void QgsAiChatDockWidget::onModelSelected( QAction *action )

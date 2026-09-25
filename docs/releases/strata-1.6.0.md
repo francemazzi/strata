@@ -114,3 +114,12 @@ the Windows reference machine measurements are still to be done.
   job on the server, which stops spending quota.
 - Chat replies made only of tool calls are kept in the chat history even when it is stored
   unencrypted; they were lost, leaving the tool results without their call.
+
+### The assistant feels like Cursor
+
+- The first prompt acts: new profiles have the assistant's tools on and start in Agent mode,
+  which applies changes that can be undone directly and still asks before a database write
+  or a remote change that Strata cannot take back (`execute_sql`, `export_layer_to_postgis`,
+  MCP tools that change data). The mode picked in the chat is the one Strata starts with
+  next time, and a long task pauses for Continue after 20 rounds of tool calls instead of 5.
+  Profiles that turned tools off in the AI settings keep their settings and start in Plan.

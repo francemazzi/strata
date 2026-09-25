@@ -566,6 +566,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   , mReviewEngine( reviewEngine )
 {
   loadPersistedBehaviorSettings();
+  // The mode the user picked last; otherwise Agent, so the first prompt acts. Profiles that
+  // turned tools off keep starting in Plan, as before.
+  const QString startAgent = QgsSettings().value( startAgentSettingsKey() ).toString();
+  mActiveAgent = availableAgents().contains( startAgent ) ? startAgent : ( mBehaviorSettings.allowCustomActions ? u"editor"_s : u"planner"_s );
   refreshRouterToolPolicy();
   mDesktopClientSessionId = QUuid::createUuid().toString( QUuid::WithoutBraces );
   mAgentHeartbeatTimer = new QTimer( this );
@@ -701,6 +705,11 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
 QStringList QgsAiAgentSessionManager::availableAgents() const
 {
   return QStringList() << u"planner"_s << u"reviewer"_s << u"ask_before_edits"_s << u"editor"_s;
+}
+
+void QgsAiAgentSessionManager::rememberActiveAgent() const
+{
+  QgsSettings().setValue( startAgentSettingsKey(), mActiveAgent );
 }
 
 void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
@@ -1924,7 +1933,7 @@ void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
 {
   QgsSettings settings;
   mBehaviorSettings.allowCustomActions
-    = settingValueWithLegacy( settings, u"strata/agent/allow_custom_actions"_s, QStringList { u"geoai/agent/allow_custom_actions"_s, u"qgis_ai/agent/allow_custom_actions"_s }, false ).toBool();
+    = settingValueWithLegacy( settings, u"strata/agent/allow_custom_actions"_s, QStringList { u"geoai/agent/allow_custom_actions"_s, u"qgis_ai/agent/allow_custom_actions"_s }, true ).toBool();
   mBehaviorSettings.rulesText = settingValueWithLegacy( settings, u"strata/agent/rules_text"_s, QStringList { u"geoai/agent/rules_text"_s, u"qgis_ai/agent/rules_text"_s }, QString() ).toString();
   mBehaviorSettings.skillsText = settingValueWithLegacy( settings, u"strata/agent/skills_text"_s, QStringList { u"geoai/agent/skills_text"_s, u"qgis_ai/agent/skills_text"_s }, QString() ).toString();
   mBehaviorSettings.loadWorkspaceRules
@@ -3175,10 +3184,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   if ( mToolIterations >= maxToolIterations && !mBehaviorSettings.autoContinueToolBlocks )
   {
     QgsAiChatMessage limitMessage = buildAssistantMessage(
-      tr( "Numero massimo raggiunto: l'agente ha usato %1 round di tool call in questo blocco (%2/%3 totali). Premi Continue per concedere un altro blocco di %1." )
-        .arg( maxToolIterations )
-        .arg( mTotalToolIterations )
-        .arg( maxTotalToolIterations )
+      tr( "Paused after %1 rounds of tool calls (%2 of the %3 allowed in this turn). Press Continue to allow %1 more." ).arg( maxToolIterations ).arg( mTotalToolIterations ).arg( maxTotalToolIterations )
     );
     limitMessage.metadata.insert( u"ui_kind"_s, u"tool_limit"_s );
     limitMessage.metadata.insert( u"tool_limit_status"_s, u"pending"_s );
@@ -3279,7 +3285,11 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       QgsAiToolResult result;
       const QgsAiTool *calledTool = mToolRegistry->find( call.name );
       const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
-      const bool needsGenericApproval = roundAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+      const bool genericApproval = ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating );
+      // Agent mode applies changes that can be undone right away, but still asks before a
+      // database write or a remote change that Strata cannot take back.
+      const bool cannotBeUndone = ( calledTool && !calledTool->canBeUndone() ) || ( mcpTool && mcpTool->mutating );
+      const bool needsGenericApproval = genericApproval && ( roundAgent == "ask_before_edits"_L1 || ( roundAgent == "editor"_L1 && cannotBeUndone ) );
       const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
       if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
       {

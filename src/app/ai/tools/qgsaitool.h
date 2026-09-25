@@ -100,6 +100,13 @@ class APP_EXPORT QgsAiTool
     virtual bool requiresApproval() const { return false; }
     virtual QgsAiToolApprovalMode approvalMode() const { return requiresApproval() ? QgsAiToolApprovalMode::Generic : QgsAiToolApprovalMode::None; }
     virtual QgsAiToolRiskLevel riskLevel() const { return QgsAiToolRiskLevel::Low; }
+
+    /**
+     * FALSE when Strata cannot undo what the tool changes (a database write, a remote service).
+     * Agent mode applies other changes directly but still asks before running such a tool.
+     */
+    virtual bool canBeUndone() const { return true; }
+
     virtual bool isAvailable() const { return true; }
     virtual QString availabilityReason() const { return QString(); }
 };

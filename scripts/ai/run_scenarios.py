@@ -42,8 +42,6 @@ SCENARIOS = [
 #: Extra lines of the [strata] settings group, per scenario.
 SCENARIO_SETTINGS = {
     "idle_memory": ["index\\model_idle_unload_s=20"],
-    # Seven tool rounds in a row: more than the pause limit of new profiles (5 until phase 4).
-    "tools_on_dataset": ["agent\\max_tool_iterations_per_turn=20"],
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
 STALL_RE = re.compile(r"^gui_stall ms=(\d+) during=(.*)$")
@@ -296,8 +294,8 @@ def run_scenario(args, scenario):
             "provider\\openrouter\\enabled=true\n"
             "provider\\openrouter\\defaultModelMigrated_v1=true\n"
             "network\\maxRetries=0\n"
-            # Tools are off for new profiles until fix_primo_prompt_agisce (roadmap phase 4).
-            "[strata]\nagent\\allow_custom_actions=true\n"
+            # New profiles have tools on and start in Agent mode: the scenarios use those defaults.
+            "[strata]\n"
         )
         for line in SCENARIO_SETTINGS.get(scenario, []):
             f.write(line + "\n")

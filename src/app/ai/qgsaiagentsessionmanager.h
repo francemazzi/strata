@@ -53,7 +53,7 @@ struct APP_EXPORT QgsAiChatContextFile
  */
 struct APP_EXPORT QgsAiAgentBehaviorSettings
 {
-    static constexpr int DEFAULT_TOOL_CALL_PAUSE_LIMIT = 5;
+    static constexpr int DEFAULT_TOOL_CALL_PAUSE_LIMIT = 20;
     static constexpr int MIN_TOOL_CALL_PAUSE_LIMIT = 1;
     static constexpr int MAX_TOOL_CALL_PAUSE_LIMIT = 50;
     static constexpr int DEFAULT_TOTAL_TOOL_CALL_LIMIT = 48;
@@ -63,8 +63,8 @@ struct APP_EXPORT QgsAiAgentBehaviorSettings
     static constexpr int MAX_RUN_PYTHON_TIMEOUT_SECONDS = 3600;
     static constexpr int DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS = 120;
 
-    //! Master toggle. When false the agent must not use any custom tool/action.
-    bool allowCustomActions = false;
+    //! Master toggle. When false the agent must not use any custom tool/action. On by default: the first prompt acts.
+    bool allowCustomActions = true;
     //! Inline rules text injected into the system prompt.
     QString rulesText;
     //! Inline skills text injected into the system prompt.
@@ -100,6 +100,12 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QStringList availableAgents() const;
     QString activeAgent() const { return mActiveAgent; }
     void setActiveAgent( const QString &agentName );
+
+    //! Stores the active agent as the one to start with next time (the user picked it).
+    void rememberActiveAgent() const;
+
+    //! Settings key of the agent Strata starts with.
+    static QString startAgentSettingsKey() { return u"strata/agent/mode"_s; }
 
     QList<QgsAiChatMessage> history() const { return mHistory; }
     void clearHistory();

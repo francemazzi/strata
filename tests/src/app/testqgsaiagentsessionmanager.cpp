@@ -41,6 +41,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPdfWriter>
+#include <QPushButton>
 #include <QScopeGuard>
 #include <QSet>
 #include <QSignalSpy>
@@ -254,6 +255,28 @@ namespace
       std::function<void()> mOnStart;
   };
 
+  //! A tool whose changes Strata cannot undo, like a database write.
+  class IrreversibleTool : public QgsAiTool
+  {
+    public:
+      explicit IrreversibleTool( bool *ran )
+        : mRan( ran )
+      {}
+      QString name() const override { return u"write_database"_s; }
+      QString description() const override { return u"irreversible tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        *mRan = true;
+        return QgsAiToolResult::ok( QJsonObject() );
+      }
+      bool requiresApproval() const override { return true; }
+      bool canBeUndone() const override { return false; }
+
+    private:
+      bool *mRan = nullptr;
+  };
+
   //! Runs onExecute inside execute() (while the round is active), records that it ran and succeeds.
   class CallbackTool : public QgsAiTool
   {
@@ -441,6 +464,10 @@ class TestQgsAiAgentSessionManager : public QObject
     void attachmentPathsAreNotPersisted();
     void pdfContextReportsExtractionAvailability();
     void agentBehaviorSettingsRoundTrip();
+    void newProfileStartsInAgentModeWithTools();
+    void profileWithToolsOffKeepsPlanMode();
+    void pickedModeIsRememberedAcrossStarts();
+    void agentModeAsksOnlyBeforeWhatCannotBeUndone();
     void toolCallLimitPausesAndContinues();
     void cumulativeToolBudgetStopsAutomaticContinuation();
     void repeatedEquivalentToolCallsStopTurn();
@@ -725,6 +752,152 @@ void TestQgsAiAgentSessionManager::algorithmContractManifestIsComplete()
   }
 }
 
+void TestQgsAiAgentSessionManager::newProfileStartsInAgentModeWithTools()
+{
+  QgsSettings settings;
+  settings.remove( u"strata/agent"_s );
+  settings.remove( u"geoai/agent"_s );
+  settings.remove( u"qgis_ai/agent"_s );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+
+  // The first prompt acts: tools on, Agent mode, a pause only after 20 rounds.
+  QgsAiModelRouter router;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+  manager.setToolRegistry( &registry );
+  QCOMPARE( manager.activeAgent(), u"editor"_s );
+  QCOMPARE( manager.agentBehaviorSettings().allowCustomActions, true );
+  QCOMPARE( manager.agentBehaviorSettings().maxToolIterationsPerTurn, 20 );
+  QCOMPARE( manager.agentBehaviorSettings().maxTotalToolIterationsPerTurn, 48 );
+  QVERIFY( router.allowedTools().contains( u"echo"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::profileWithToolsOffKeepsPlanMode()
+{
+  QgsSettings settings;
+  settings.remove( u"strata/agent"_s );
+  settings.setValue( u"strata/agent/allow_custom_actions"_s, false );
+  settings.setValue( u"strata/agent/max_tool_iterations_per_turn"_s, 5 );
+  const QScopeGuard cleanup( [] { QgsSettings().remove( u"strata/agent"_s ); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+
+  // Explicit settings are kept: no tools, Plan mode and a pause every 5 rounds, as before.
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QCOMPARE( manager.agentBehaviorSettings().allowCustomActions, false );
+  QCOMPARE( manager.activeAgent(), u"planner"_s );
+  QCOMPARE( manager.agentBehaviorSettings().maxToolIterationsPerTurn, 5 );
+}
+
+void TestQgsAiAgentSessionManager::pickedModeIsRememberedAcrossStarts()
+{
+  QgsSettings().remove( u"strata/agent"_s );
+  const QScopeGuard cleanup( [] { QgsSettings().remove( u"strata/agent"_s ); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  {
+    QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+    manager.setActiveAgent( u"ask_before_edits"_s );
+    manager.rememberActiveAgent();
+    // A switch that the user did not pick (e.g. accepting a plan) is not remembered.
+    manager.setActiveAgent( u"planner"_s );
+  }
+  QgsAiAgentSessionManager reopened( nullptr, &contextProvider, &reviewEngine );
+  QCOMPARE( reopened.activeAgent(), u"ask_before_edits"_s );
+
+  // An unknown stored mode falls back to the default.
+  QgsSettings().setValue( QgsAiAgentSessionManager::startAgentSettingsKey(), u"no_such_mode"_s );
+  QgsAiAgentSessionManager fallback( nullptr, &contextProvider, &reviewEngine );
+  QCOMPARE( fallback.activeAgent(), u"editor"_s );
+}
+
+void TestQgsAiAgentSessionManager::agentModeAsksOnlyBeforeWhatCannotBeUndone()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+    QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, false );
+  } );
+
+  auto toolCall = []( const QString &id, const QString &name ) {
+    return QgsAiTestLoopbackServer::jsonResponse(
+      200,
+      "OK",
+      u"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"%1\",\"type\":\"function\",\"function\":{\"name\":\"%2\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"_s
+        .arg( id, name )
+        .toUtf8()
+    );
+  };
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << toolCall( u"call_edit"_s, u"edit_layer"_s )
+    << toolCall( u"call_write"_s, u"write_database"_s )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  bool editRan = false;
+  bool writeRan = false;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<CallbackTool>( u"edit_layer"_s, true, nullptr, &editRan ) );
+  registry.registerTool( std::make_unique<IrreversibleTool>( &writeRan ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  QCOMPARE( manager.activeAgent(), u"editor"_s );
+
+  // Refuse every approval question, and remember which tools asked.
+  QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
+  QStringList asked;
+  QTimer refuse;
+  connect( &refuse, &QTimer::timeout, this, [&asked]() {
+    if ( QMessageBox *box = qobject_cast<QMessageBox *>( QApplication::activeModalWidget() ) )
+    {
+      asked << box->text();
+      box->button( QMessageBox::No )->click();
+    }
+  } );
+  refuse.start( 20 );
+
+  manager.sendUserMessage( u"edit the layer, then write to the database"_s );
+  // The turn ends with the final answer (the request starts after an asynchronous retrieval).
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.history().isEmpty() && manager.history().last().content == "Done"_L1, 10000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  refuse.stop();
+
+  // The edit, which can be undone, ran without a question; the database write asked and was refused.
+  QVERIFY( editRan );
+  QVERIFY( !writeRan );
+  QCOMPARE( asked.size(), 1 );
+  QVERIFY( asked.constFirst().contains( u"write_database"_s ) );
+}
+
 void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
 {
   QgsSettings settings;
@@ -740,7 +913,7 @@ void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()
   {
     QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
     const QgsAiAgentBehaviorSettings defaults = manager.agentBehaviorSettings();
-    QCOMPARE( defaults.allowCustomActions, false );
+    QCOMPARE( defaults.allowCustomActions, true );
     QVERIFY( defaults.rulesText.isEmpty() );
     QVERIFY( defaults.skillsText.isEmpty() );
     QCOMPARE( defaults.rulesPath, u".strata/rules"_s );
@@ -873,7 +1046,7 @@ void TestQgsAiAgentSessionManager::toolCallLimitPausesAndContinues()
   QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
   QCOMPARE( server.requestCount, 3 );
   QVERIFY( server.requestBodies.size() >= 3 );
-  QVERIFY( !server.requestBodies.at( 2 ).contains( "Numero massimo raggiunto" ) );
+  QVERIFY( !server.requestBodies.at( 2 ).contains( "Paused after" ) );
   const QJsonArray continuedMessages = QJsonDocument::fromJson( server.requestBodies.at( 2 ) ).object().value( u"messages"_s ).toArray();
   QSet<QString> completedToolCalls;
   for ( const QJsonValue &value : continuedMessages )
@@ -1747,20 +1920,24 @@ void TestQgsAiAgentSessionManager::agentBehaviorTogglePropagatesToRouter()
   QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
   manager.setToolRegistry( &registry );
 
-  // Default: tool use stays off until the user opts in.
-  QCOMPARE( router.toolUseEnabled(), false );
-
-  QgsAiAgentBehaviorSettings updated = manager.agentBehaviorSettings();
-  updated.allowCustomActions = true;
-  manager.setAgentBehaviorSettings( updated );
-  QCOMPARE( router.toolUseEnabled(), false );
-
-  manager.setActiveAgent( u"editor"_s );
+  // Default: a new profile starts in Agent mode with tools on, so the first prompt acts.
+  QCOMPARE( manager.activeAgent(), u"editor"_s );
   QCOMPARE( router.toolUseEnabled(), true );
 
+  // Plan mode advertises no tools.
+  manager.setActiveAgent( u"planner"_s );
+  QCOMPARE( router.toolUseEnabled(), false );
+
+  // Turning tools off in the settings turns them off in Agent mode too.
+  manager.setActiveAgent( u"editor"_s );
+  QgsAiAgentBehaviorSettings updated = manager.agentBehaviorSettings();
   updated.allowCustomActions = false;
   manager.setAgentBehaviorSettings( updated );
   QCOMPARE( router.toolUseEnabled(), false );
+
+  updated.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( updated );
+  QCOMPARE( router.toolUseEnabled(), true );
 
   settings.remove( u"strata/agent"_s );
   settings.remove( u"geoai/agent"_s );

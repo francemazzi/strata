@@ -204,6 +204,7 @@ class TestQgsAiChatDockWidget : public QObject
     void acceptingPlanSwitchesToAgentAndSendsPlan();
     void acceptingAgentPlanJsonSwitchesToAgent();
     void acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks();
+    void pickedModeIsRemembered();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -938,6 +939,32 @@ void TestQgsAiChatDockWidget::acceptingAgentPlanJsonSwitchesToAgent()
   QVERIFY( manager.history().first().content.contains( u"Load boundary"_s ) );
 }
 
+void TestQgsAiChatDockWidget::pickedModeIsRemembered()
+{
+  QgsSettings().remove( u"strata/agent"_s );
+  const QScopeGuard cleanup( [] { QgsSettings().remove( u"strata/agent"_s ); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+
+  // A new profile starts in Agent mode.
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiModePill"_s );
+  QVERIFY( pill && pill->menu() );
+  QVERIFY( pill->text().startsWith( "Agent"_L1 ) );
+
+  for ( QAction *action : pill->menu()->actions() )
+  {
+    if ( action->text() == "Ask"_L1 )
+      action->trigger();
+  }
+  QCOMPARE( manager.activeAgent(), u"reviewer"_s );
+  QCOMPARE( QgsSettings().value( QgsAiAgentSessionManager::startAgentSettingsKey() ).toString(), u"reviewer"_s );
+}
+
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()
 {
   QTemporaryDir tempDir;
@@ -951,8 +978,11 @@ void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlo
   QgsAiReviewPatchEngine reviewEngine;
   QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
   manager.setToolRegistry( &registry );
-  // Default allowCustomActions=false makes the Agent allowlist empty.
-  QCOMPARE( manager.agentBehaviorSettings().allowCustomActions, false );
+  // Tools turned off in the settings make the Agent allowlist empty.
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = false;
+  manager.setAgentBehaviorSettings( behavior );
+  const QScopeGuard restoreTools( [] { QgsSettings().remove( u"strata/agent"_s ); } );
 
   QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
 
