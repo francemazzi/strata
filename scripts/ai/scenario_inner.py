@@ -20,7 +20,13 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QObject, QSize, QTimer
-from qgis.PyQt.QtWidgets import QApplication, QLabel, QMessageBox, QTextEdit
+from qgis.PyQt.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTextEdit,
+)
 from qgis.utils import iface
 
 _CONFIG = json.load(open(sys.argv[-1]))
@@ -172,17 +178,18 @@ def _chat(text, marker, then, mode="Ask before edits"):
     if prompt is None or send is None:
         _quit("chat_widgets_missing")
         return
-    # New profiles start in Plan mode, which runs no tools.
-    pill = _widget("aiModePill")
-    modes = [
-        a
-        for a in (pill.menu().actions() if pill is not None and pill.menu() else [])
-        if a.text() == mode
-    ]
-    if not modes:
-        _quit("chat_mode_missing")
-        return
-    modes[0].trigger()
+    # mode=None keeps the mode a new profile starts with.
+    if mode is not None:
+        pill = _widget("aiModePill")
+        modes = [
+            a
+            for a in (pill.menu().actions() if pill is not None and pill.menu() else [])
+            if a.text() == mode
+        ]
+        if not modes:
+            _quit("chat_mode_missing")
+            return
+        modes[0].trigger()
     prompt.setPlainText(text)
     _event("chat_sent", marker=marker)
     sent_ms = _now_ms()
@@ -232,6 +239,51 @@ def _send_chat_message():
     )
 
 
+def _first_prompt_buffer():
+    """Phase 4: a new profile, no settings touched: the first prompt acts, and Undo this turn
+    takes the result back."""
+    pill = _widget("aiModePill")
+    mode = pill.text().replace("▾", "").strip() if pill is not None else ""
+    before = len(QgsProject.instance().mapLayers())
+    _event("first_prompt", mode=mode, layers=before)
+
+    def undo(reply_ms):
+        after_buffer = len(QgsProject.instance().mapLayers())
+        buttons = [
+            b
+            for b in iface.mainWindow().findChildren(QPushButton, "aiUndoTurnButton")
+            if not b.isHidden()
+        ]
+        if not buttons:
+            _quit(
+                "undo_turn_missing",
+                first_prompt_mode=mode,
+                layers_before=before,
+                layers_after_buffer=after_buffer,
+            )
+            return
+        buttons[-1].click()
+
+        def check():
+            _quit(
+                "done",
+                first_prompt_mode=mode,
+                layers_before=before,
+                layers_after_buffer=after_buffer,
+                layers_after_undo=len(QgsProject.instance().mapLayers()),
+                chat_reply_ms=reply_ms,
+            )
+
+        _later(1500, check)
+
+    _chat(
+        "Buffer strato_00 by 100 m and add the result to the map.",
+        "SCENARIO-BUFFER-DONE",
+        lambda reply_ms: _later(1000, lambda: undo(reply_ms)),
+        mode=None,
+    )
+
+
 def _tool_tour():
     """Phase 3: the loopback provider calls one tool after another on the dataset (layers, map,
     files, a new layer, a field calculation), then a slow calculation that the user stops."""
@@ -265,10 +317,19 @@ def _tool_tour():
                     return
                 stop_ms = _now_ms() - pressed_ms
                 _event("stopped", after_ms=stop_ms)
-                finished = [e for e in _STATE["events"] if e["event"] == "tool_finished"]
+                finished = [
+                    e for e in _STATE["events"] if e["event"] == "tool_finished"
+                ]
                 # Stopped for real only if the running tool ended without success.
                 stopped_tool_succeeded = finished[-1]["success"] if finished else None
-                _later(2000, lambda: _quit("done", stop_ms=stop_ms, stopped_tool_succeeded=stopped_tool_succeeded))
+                _later(
+                    2000,
+                    lambda: _quit(
+                        "done",
+                        stop_ms=stop_ms,
+                        stopped_tool_succeeded=stopped_tool_succeeded,
+                    ),
+                )
 
             _later(20, wait_idle)
 
@@ -558,6 +619,13 @@ def _run():
                 _time_map_refreshes("map_during_indexing", 7, after)
 
             _when_indexing(during)
+
+        _later(2000, step)
+    elif scenario == "first_prompt_buffer":
+
+        def step():
+            _open_project()
+            _later(3000, _first_prompt_buffer)
 
         _later(2000, step)
     elif scenario == "tools_on_dataset":

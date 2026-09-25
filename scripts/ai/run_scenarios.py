@@ -38,6 +38,7 @@ SCENARIOS = [
     "idle_memory",
     "map_during_indexing",
     "tools_on_dataset",
+    "first_prompt_buffer",
 ]
 #: Extra lines of the [strata] settings group, per scenario.
 SCENARIO_SETTINGS = {
@@ -63,6 +64,12 @@ CHECKS = {
         "max_exit_ms": 5000,
         "max_stop_ms": 1000,
         "max_tool_errors": 0,
+    },
+    "phase4": {
+        "max_ai_stall_ms": 200,
+        "max_exit_ms": 5000,
+        "max_tool_errors": 0,
+        "first_prompt_mode": "Agent",
     },
 }
 #: Copy of the heavy layer the tool tour adds and edits, so the dataset itself never changes.
@@ -159,6 +166,31 @@ def tool_tour_reply(server, body):
     return "SCENARIO-STOP-REPLY: stopped."
 
 
+def first_prompt_reply(server, body):
+    """Phase 4: "buffer a layer by 100 m" from a new profile, answered with the tools it needs."""
+    messages = body.get("messages", [])
+    results = [m.get("content") or "" for m in messages if m.get("role") == "tool"]
+    results = [r if isinstance(r, str) else json.dumps(r) for r in results]
+    if results:
+        server.tool_results.append(results[-1])
+    if len(results) == 0:
+        return ("list_project_layers", {})
+    if len(results) == 1:
+        layer = _find_layer_id(results[0], "strato_00") or ""
+        return (
+            "run_processing_algorithm",
+            {
+                "algorithm_id": "native:buffer",
+                "parameters": {
+                    "INPUT": layer,
+                    "DISTANCE": 100,
+                    "OUTPUT": "TEMPORARY_OUTPUT",
+                },
+            },
+        )
+    return "SCENARIO-BUFFER-DONE: the buffer is on the map."
+
+
 def search_workspace_reply(server, body):
     """A search_workspace call first, then a text reply."""
     if any(message.get("role") == "tool" for message in body.get("messages", [])):
@@ -167,7 +199,10 @@ def search_workspace_reply(server, body):
 
 
 #: Loopback chat script per scenario.
-CHAT_SCRIPTS = {"tools_on_dataset": tool_tour_reply}
+CHAT_SCRIPTS = {
+    "tools_on_dataset": tool_tour_reply,
+    "first_prompt_buffer": first_prompt_reply,
+}
 
 
 class LoopbackChatHandler(BaseHTTPRequestHandler):
@@ -425,6 +460,10 @@ def run_scenario(args, scenario):
             "map_idle_ms",
             "stop_ms",
             "stopped_tool_succeeded",
+            "first_prompt_mode",
+            "layers_before",
+            "layers_after_buffer",
+            "layers_after_undo",
         ):
             if key in results:
                 summary[key] = results[key]
@@ -500,6 +539,15 @@ def check(summary, thresholds):
             )
         if summary.get("stopped_tool_succeeded") is not False:
             problems.append("Stop did not stop the running tool")
+    if "first_prompt_mode" in thresholds and "first_prompt_mode" in summary:
+        if summary["first_prompt_mode"] != thresholds["first_prompt_mode"]:
+            problems.append(
+                f"a new profile starts in {summary['first_prompt_mode']} mode"
+            )
+        if summary.get("layers_after_buffer") != summary.get("layers_before", -1) + 1:
+            problems.append("the buffer did not add its layer")
+        if summary.get("layers_after_undo") != summary.get("layers_before"):
+            problems.append("Undo this turn did not remove the buffer")
     if "tool_errors" in summary and "max_tool_errors" in thresholds:
         if len(summary["tool_errors"]) > thresholds["max_tool_errors"]:
             problems.append(
