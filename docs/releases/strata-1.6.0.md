@@ -48,3 +48,8 @@ the Windows reference machine measurements are still to be done.
   reuses that embedding. Edits are indexed once saved, not while they are in progress.
   Workspace files are only read again when their modification time changes, and only the
   changed files are rewritten. Layers not seen in any project for 30 days leave the index.
+- Background indexing is gentle on the computer: the local model uses two threads by
+  default instead of every core ("Indexing speed": low 1, normal 2, high up to 4), its
+  threads run at low priority and wait without spinning, and indexing pauses between
+  batches, while the map is being panned or zoomed, and while the computer runs on battery
+  (`strata/index/pause_on_battery`). Indexing asked for explicitly runs at full speed.

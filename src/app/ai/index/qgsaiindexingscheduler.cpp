@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "ai/tools/qgsaitaskrunner.h"
+#include "qgsaiindexingthrottle.h"
 #include "qgsaiworkspaceindex.h"
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
@@ -56,6 +57,7 @@ namespace
 
         // The feedback lives on the interface thread: progress reaches the task queued.
         connect( mFeedback.get(), &QgsFeedback::progressChanged, this, &QgsAiWorkspaceIndexTask::setProgress );
+        const QgsAiIndexingThrottle::BackgroundIndexingScope background;
 
         QString error;
         QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;

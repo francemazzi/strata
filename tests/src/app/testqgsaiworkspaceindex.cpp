@@ -14,6 +14,7 @@
 #include "ai/index/qgsaiembeddingclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
 #include "ai/index/qgsaiindexingscheduler.h"
+#include "ai/index/qgsaiindexingthrottle.h"
 #include "ai/index/qgsailayerchunker.h"
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "ai/qgsaifilecontextprovider.h"
@@ -240,6 +241,7 @@ class TestQgsAiWorkspaceIndex : public QObject
     void e5PreprocessingHelpers();
     void e5ProviderAvailabilityHonorsEnvironmentModelDir();
     void e5ProviderIntegrationWhenModelDirIsConfigured();
+    void e5EmbeddingsDoNotDependOnTheSpeed();
     void embeddingClientDefaultsToOpenAi();
     void embeddingClientUsesOpenRouterSettings();
     void schemaMigrationDropsOldDb();
@@ -646,6 +648,38 @@ void TestQgsAiWorkspaceIndex::e5ProviderIntegrationWhenModelDirIsConfigured()
     for ( float value : vector )
       norm += static_cast<double>( value ) * static_cast<double>( value );
     QVERIFY( std::abs( std::sqrt( norm ) - 1.0 ) < 0.001 );
+  }
+}
+
+void TestQgsAiWorkspaceIndex::e5EmbeddingsDoNotDependOnTheSpeed()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings were not compiled because ONNX Runtime and/or SentencePiece were not found." );
+  if ( qgetenv( "STRATA_AI_EMBEDDING_MODEL_DIR" ).trimmed().isEmpty() )
+    QSKIP( "STRATA_AI_EMBEDDING_MODEL_DIR is not set; skipping optional E5 ONNX integration test." );
+
+  const QStringList texts { u"strade comunali e civici"_s, u"uso del suolo agricolo, particelle catastali"_s, u"alberi monumentali del parco"_s };
+  const auto embedAtSpeed = [&texts]( const QString &speed, QList<QVector<float>> &vectors ) {
+    QgsSettings().setValue( QgsAiIndexingThrottle::speedSettingsKey(), speed );
+    QgsAiE5EmbeddingProvider provider;
+    QString error;
+    const bool ok = provider.embed( texts, QgsAiEmbeddingRole::Passage, vectors, &error );
+    if ( !ok )
+      qWarning() << error;
+    return ok;
+  };
+  const auto restoreSpeed = qScopeGuard( []() { QgsSettings().remove( QgsAiIndexingThrottle::speedSettingsKey() ); } );
+
+  QList<QVector<float>> oneThread;
+  QList<QVector<float>> fourThreads;
+  QVERIFY( embedAtSpeed( u"low"_s, oneThread ) );
+  QVERIFY( embedAtSpeed( u"high"_s, fourThreads ) );
+  QCOMPARE( oneThread.size(), texts.size() );
+  QCOMPARE( fourThreads.size(), texts.size() );
+  for ( int i = 0; i < texts.size(); ++i )
+  {
+    for ( int d = 0; d < oneThread.at( i ).size(); ++d )
+      QVERIFY( std::abs( oneThread.at( i ).at( d ) - fourThreads.at( i ).at( d ) ) < 1e-4f );
   }
 }
 

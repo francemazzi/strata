@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "ai/tools/qgsaitaskrunner.h"
+#include "qgsaiindexingthrottle.h"
 #include "qgsaiworkspaceindex.h"
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
@@ -74,6 +75,7 @@ namespace
         }
 
         QString reindexError;
+        const QgsAiIndexingThrottle::BackgroundIndexingScope background;
         const bool ok = mIndex->reindexLayerSnapshot( mSnapshot, &reindexError, mFeedback.get() );
         mResult = { mSnapshot.scopedLayerId, ok, reindexError };
         if ( !ok && !mIndex->embeddingProviderAvailable() )

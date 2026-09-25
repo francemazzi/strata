@@ -99,6 +99,7 @@ using namespace Qt::StringLiterals;
 #ifdef HAVE_AI_ASSISTANT
 #include "ai/index/qgsaiembeddingprovider.h"
 #include "ai/index/qgsaiindexingscheduler.h"
+#include "ai/index/qgsaiindexingthrottle.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "ai/qgsaiagentsessionmanager.h"
@@ -1442,6 +1443,9 @@ QgisApp::QgisApp(
   // Diagnostics for scripts/ai/run_scenarios.py: log interface stalls and the AI work behind them.
   if ( const int stallThresholdMs = qEnvironmentVariableIntValue( "STRATA_AI_GUI_STALL_MS" ); stallThresholdMs > 0 )
     qgsAiSetGuiStallMonitorThreshold( stallThresholdMs );
+  // Background indexing waits while the user pans or zooms the map. Not on every render: layers
+  // that refresh themselves or a temporal animation would hold indexing back for good.
+  connect( mMapCanvas, &QgsMapCanvas::extentsChanged, this, []() { QgsAiIndexingThrottle::noteUserActivity(); } );
   mAiModelRouter = std::make_unique<QgsAiModelRouter>( this );
   const QString aiWorkspaceRoot = QgsAiFileContextProvider::resolveWorkspaceRoot();
   mAiFileContextProvider = std::make_unique<QgsAiFileContextProvider>( aiWorkspaceRoot, this );

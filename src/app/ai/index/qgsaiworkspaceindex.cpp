@@ -24,6 +24,7 @@
 #include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiembeddingprovider.h"
 #include "qgsaifilecontextprovider.h"
+#include "qgsaiindexingthrottle.h"
 #include "qgsailayerchunker.h"
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
@@ -39,6 +40,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -276,8 +278,19 @@ namespace
   {
     out.clear();
     out.reserve( texts.size() );
+    // Automatic indexing leaves the computer to the user: pauses between batches, and waits
+    // while the map is in use or the computer runs on battery.
+    const bool throttled = QgsAiIndexingThrottle::inBackgroundIndexing();
+    const QgsAiIndexingThrottle::Speed speed = throttled ? QgsAiIndexingThrottle::speed() : QgsAiIndexingThrottle::Speed::High;
+    qint64 lastBatchMs = 0;
     for ( int start = 0; start < texts.size(); start += QgsAiWorkspaceIndex::EMBEDDING_BATCH )
     {
+      if ( throttled && !QgsAiIndexingThrottle::waitBeforeNextBatch( start > 0 ? QgsAiIndexingThrottle::pauseAfterBatchMs( speed, lastBatchMs ) : 0, feedback ) )
+      {
+        if ( errorMessage )
+          *errorMessage = indexCanceledMessage();
+        return false;
+      }
       if ( feedback && feedback->isCanceled() )
       {
         if ( errorMessage )
@@ -289,11 +302,14 @@ namespace
       options.maxBatch = static_cast<int>( batch.size() );
       options.feedback = feedback;
       QList<QVector<float>> vectors;
+      QElapsedTimer batchTimer;
+      batchTimer.start();
       {
         const QMutexLocker locker( &providerUseMutex );
         if ( !provider->embed( batch, role, vectors, errorMessage, options ) )
           return false;
       }
+      lastBatchMs = batchTimer.elapsed();
       // QMutex is not fair: relocking right away would starve a search waiting for this batch.
       for ( int waitedMs = 0; searchesWaiting.load() > 0 && waitedMs < QgsAiWorkspaceIndex::SEARCH_LOCK_TIMEOUT_MS; ++waitedMs )
         QThread::msleep( 1 );

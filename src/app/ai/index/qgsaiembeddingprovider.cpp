@@ -24,12 +24,15 @@
 #include <vector>
 
 #include "qgsaiembeddingclient.h"
+#include "qgsaiindexingthrottle.h"
 #include "qgsapplication.h"
 #include "qgssettings.h"
 
 #include <QString>
 
 #ifdef HAVE_AI_E5_EMBEDDINGS
+#include <thread>
+
 #include <onnxruntime_cxx_api.h>
 #include <sentencepiece_processor.h>
 #endif
@@ -211,6 +214,25 @@ namespace
       mutable QgsAiEmbeddingClient mClient;
       QgsAiEmbeddingClient::Provider mProvider = QgsAiEmbeddingClient::Provider::OpenAi;
   };
+
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  //! Creates ONNX Runtime's worker threads at low priority, so the model never competes with the user.
+  OrtCustomThreadHandle e5CreateLowPriorityThread( void *, OrtThreadWorkerFn work, void *parameter )
+  {
+    auto *thread = new std::thread( [work, parameter]() {
+      QgsAiIndexingThrottle::lowerCurrentThreadPriority();
+      work( parameter );
+    } );
+    return reinterpret_cast<OrtCustomThreadHandle>( thread );
+  }
+
+  void e5JoinLowPriorityThread( OrtCustomThreadHandle handle )
+  {
+    auto *thread = reinterpret_cast<std::thread *>( const_cast<OrtCustomHandleType *>( handle ) );
+    thread->join();
+    delete thread;
+  }
+#endif
 } // namespace
 
 #ifdef HAVE_AI_E5_EMBEDDINGS
@@ -525,9 +547,18 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
       return false;
     }
 
+    // Two threads by default ("Indexing speed" in the settings), not every core: indexing runs
+    // for minutes, and the user keeps working meanwhile.
     Ort::SessionOptions sessionOptions;
     sessionOptions.SetGraphOptimizationLevel( GraphOptimizationLevel::ORT_ENABLE_ALL );
-    sessionOptions.SetIntraOpNumThreads( std::max( 1, std::min( 4, QThread::idealThreadCount() ) ) );
+    sessionOptions.SetIntraOpNumThreads( QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() ) );
+    sessionOptions.SetInterOpNumThreads( 1 );
+    sessionOptions.SetExecutionMode( ExecutionMode::ORT_SEQUENTIAL );
+    // Idle threads wait for work instead of spinning at full CPU between batches.
+    sessionOptions.AddConfigEntry( "session.intra_op.allow_spinning", "0" );
+    sessionOptions.AddConfigEntry( "session.inter_op.allow_spinning", "0" );
+    sessionOptions.SetCustomCreateThreadFn( e5CreateLowPriorityThread );
+    sessionOptions.SetCustomJoinThreadFn( e5JoinLowPriorityThread );
 
 #ifdef _WIN32
     const std::wstring ortModelPath = QDir::toNativeSeparators( onnxPath ).toStdWString();
