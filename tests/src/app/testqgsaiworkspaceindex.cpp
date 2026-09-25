@@ -23,6 +23,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QList>
 #include <QString>
@@ -209,6 +210,7 @@ class TestQgsAiWorkspaceIndex : public QObject
     void chunkerOutputPersistsAsLayerChunks();
     void reindexLayersToolRequiresConfirm();
     void e5AvailabilityDoesNotLoadTheModel();
+    void workspaceScanPrunesExcludedFoldersAtAnyDepth();
 
   private:
     static QgsAiWorkspaceIndex::Chunk makeFileChunk( const QString &rel, int index, const QString &text );
@@ -887,6 +889,35 @@ void TestQgsAiWorkspaceIndex::e5AvailabilityDoesNotLoadTheModel()
   error.clear();
   QVERIFY( !provider.isAvailable( &error ) );
   QVERIFY( !error.isEmpty() );
+}
+
+void TestQgsAiWorkspaceIndex::workspaceScanPrunesExcludedFoldersAtAnyDepth()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QDir dir( root.path() );
+  for ( const QString &relative : { u"a/node_modules/skip.md"_s, u"a/.git/skip.md"_s, u"b/keep.md"_s, u"build/skip.md"_s, u"a/build/keep.md"_s } )
+  {
+    QVERIFY( dir.mkpath( QFileInfo( dir.filePath( relative ) ).path() ) );
+    QFile file( dir.filePath( relative ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "text" );
+  }
+
+  QgsAiFileContextProvider::WorkspaceScanOptions options;
+  const QgsAiFileContextProvider::WorkspaceScanResult result = QgsAiFileContextProvider::scanWorkspace( root.path(), options );
+  QStringList found;
+  for ( const QgsAiFileContextProvider::WorkspaceFile &file : result.files )
+    found << file.relativePath;
+  found.sort();
+  // "build" is excluded at the root only: a project's own build folder deeper down is data.
+  QCOMPARE( found, QStringList( { u"a/build/keep.md"_s, u"b/keep.md"_s } ) );
+  QVERIFY( !result.truncated );
+  // Excluded folders are not even walked.
+  QVERIFY2( result.visitedEntries <= 7, QString::number( result.visitedEntries ).toUtf8().constData() );
+
+  options.maxEntries = 2;
+  QVERIFY( QgsAiFileContextProvider::scanWorkspace( root.path(), options ).truncated );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

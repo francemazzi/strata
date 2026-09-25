@@ -17,3 +17,6 @@ the Windows reference machine measurements are still to be done.
   AI settings OK: checking availability only looks at the files, and the model loads on
   the first embedding, in the background. A damaged tokenizer file is reported instead of
   crashing Strata.
+- Workspace scans skip version control, cache and virtual environment folders at any
+  depth instead of walking them, stop after a time budget, skip network shares unless
+  allowed (`strata/index/allow_network_workspace`) and OneDrive placeholders on Windows.
