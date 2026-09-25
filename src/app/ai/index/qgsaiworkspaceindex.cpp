@@ -310,6 +310,37 @@ namespace
     return true;
   }
 
+  /**
+   * Opens \a path on the connection named \a connection (created if needed) in write-ahead log
+   * mode: readers never wait for a writer and a commit costs one fsync instead of three.
+   */
+  QSqlDatabase indexOpenDatabase( const QString &connection, const QString &path, QString *errorMessage )
+  {
+    QSqlDatabase db = QSqlDatabase::contains( connection ) ? QSqlDatabase::database( connection, false ) : QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+    if ( db.isOpen() && db.databaseName() == path )
+      return db;
+    db.close();
+    db.setDatabaseName( path );
+    db.setConnectOptions( u"QSQLITE_BUSY_TIMEOUT=5000"_s );
+    if ( !db.open() )
+    {
+      if ( errorMessage )
+        *errorMessage = db.lastError().text();
+      return db;
+    }
+    QSqlQuery pragma( db );
+    pragma.exec( u"PRAGMA journal_mode=WAL"_s );
+    pragma.exec( u"PRAGMA synchronous=NORMAL"_s );
+    return db;
+  }
+
+  //! Deletes the database file at \a path together with its write-ahead log files.
+  void indexRemoveDatabaseFiles( const QString &path )
+  {
+    for ( const QString &suffix : { QString(), u"-wal"_s, u"-shm"_s, u"-journal"_s } )
+      QFile::remove( path + suffix );
+  }
+
   //! Serial pool for index database work that must not block the interface thread.
   QThreadPool *indexDatabaseWorkPool()
   {
@@ -497,6 +528,16 @@ void QgsAiWorkspaceIndex::onWorkspaceRootChanged()
 
 void QgsAiWorkspaceIndex::requestLoad()
 {
+  // Once per session, drop the indexes of workspaces not opened for a month.
+  static bool sStaleDatabasesChecked = false;
+  if ( !std::exchange( sStaleDatabasesChecked, true ) )
+  {
+    const QString directory = QgsApplication::qgisSettingsDirPath() + u"ai_index"_s;
+    indexDatabaseWorkPool()->start( [directory, keep = dbPath()]() {
+      if ( const int removed = removeStaleDatabases( directory, keep ) )
+        QgsMessageLog::logMessage( u"Removed %1 AI index databases unused for %2 days."_s.arg( removed ).arg( STALE_DATABASE_DAYS ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+    } );
+  }
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     if ( mLoaded )
@@ -693,14 +734,9 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
     return true;
   }
 
-  QSqlDatabase db = QSqlDatabase::contains( connectionName() ) ? QSqlDatabase::database( connectionName() ) : QSqlDatabase::addDatabase( u"QSQLITE"_s, connectionName() );
-  db.setDatabaseName( path );
-  if ( !db.open() )
-  {
-    if ( errorMessage )
-      *errorMessage = db.lastError().text();
+  QSqlDatabase db = indexOpenDatabase( connectionName(), path, errorMessage );
+  if ( !db.isOpen() )
     return false;
-  }
 
   // Schema migration: read PRAGMA user_version. If older than SCHEMA_VERSION,
   // drop the chunks table — callers will rebuild it on the next reindex.
@@ -715,6 +751,7 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
       QSqlQuery drop( db );
       drop.exec( u"DROP TABLE IF EXISTS chunks"_s );
       drop.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
+      drop.exec( u"VACUUM"_s );
       commit(); // Empty — caller will reindex.
       return true;
     }
@@ -744,6 +781,7 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
         QSqlQuery drop( db );
         drop.exec( u"DROP TABLE IF EXISTS chunks"_s );
         drop.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
+        drop.exec( u"VACUUM"_s );
         commit();
         return true;
       }
@@ -802,14 +840,9 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
     return false;
   }
 
-  QSqlDatabase db = QSqlDatabase::contains( connectionName() ) ? QSqlDatabase::database( connectionName() ) : QSqlDatabase::addDatabase( u"QSQLITE"_s, connectionName() );
-  db.setDatabaseName( path );
-  if ( !db.open() )
-  {
-    if ( errorMessage )
-      *errorMessage = db.lastError().text();
+  QSqlDatabase db = indexOpenDatabase( connectionName(), path, errorMessage );
+  if ( !db.isOpen() )
     return false;
-  }
 
   QSqlQuery q( db );
   q.exec( QStringLiteral(
@@ -1036,28 +1069,89 @@ bool QgsAiWorkspaceIndex::removeLayer( const QString &layerId, QString *errorMes
   }
 
   // The interface thread calls this when a layer is removed: never wait on the database,
-  // which a background reindex may be writing. The delete runs in order with later loads.
+  // which a background reindex may be writing. Removals queued meanwhile, such as a batch of
+  // layers removed together, are deleted in one transaction, in order with later loads.
   const QString path = dbPath();
   if ( path.isEmpty() || !QFileInfo::exists( path ) )
     return true;
-  indexDatabaseWorkPool()->start( [path, layerId]() {
-    const QString connection = u"qgsai_index_remove_%1"_s.arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
-    {
-      QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
-      db.setDatabaseName( path );
-      if ( db.open() )
-      {
-        QSqlQuery del( db );
-        del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
-        del.addBindValue( layerId );
-        if ( !del.exec() )
-          QgsMessageLog::logMessage( u"Layer index: removing %1 from the database failed: %2"_s.arg( layerId, del.lastError().text() ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
-        db.close();
-      }
-    }
-    QSqlDatabase::removeDatabase( connection );
-  } );
+  {
+    const QMutexLocker locker( &mPendingRemovalsMutex );
+    mPendingLayerRemovals[path].insert( layerId );
+    if ( mRemovalScheduled )
+      return true;
+    mRemovalScheduled = true;
+  }
+  indexDatabaseWorkPool()->start( [this]() { flushLayerRemovals(); } );
   return true;
+}
+
+void QgsAiWorkspaceIndex::flushLayerRemovals()
+{
+  QHash<QString, QSet<QString>> pending;
+  {
+    const QMutexLocker locker( &mPendingRemovalsMutex );
+    pending.swap( mPendingLayerRemovals );
+    mRemovalScheduled = false;
+  }
+  const QString connection = u"qgsai_index_remove_%1"_s.arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+  for ( auto it = pending.constBegin(); it != pending.constEnd(); ++it )
+  {
+    QString error;
+    QSqlDatabase db = indexOpenDatabase( connection, it.key(), &error );
+    if ( !db.isOpen() )
+    {
+      QgsMessageLog::logMessage( u"Layer index: cannot open %1 to remove layers: %2"_s.arg( it.key(), error ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
+      continue;
+    }
+    db.transaction();
+    QSqlQuery del( db );
+    del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
+    bool ok = true;
+    for ( const QString &layerId : it.value() )
+    {
+      del.addBindValue( layerId );
+      ok = del.exec() && ok;
+    }
+    if ( !ok || !db.commit() )
+    {
+      QgsMessageLog::logMessage( u"Layer index: removing %1 layers from the database failed: %2"_s.arg( it.value().size() ).arg( del.lastError().text() ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
+      db.rollback();
+    }
+    db.close();
+  }
+  QSqlDatabase::removeDatabase( connection );
+}
+
+qint64 QgsAiWorkspaceIndex::databaseSizeBytes() const
+{
+  const QString path = dbPath();
+  if ( path.isEmpty() )
+    return 0;
+  qint64 bytes = 0;
+  for ( const QString &suffix : { QString(), u"-wal"_s, u"-shm"_s } )
+    bytes += QFileInfo( path + suffix ).size();
+  return bytes;
+}
+
+int QgsAiWorkspaceIndex::removeStaleDatabases( const QString &directory, const QString &keepPath, int maxAgeDays )
+{
+  const QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays( -maxAgeDays );
+  const QString keep = QFileInfo( keepPath ).absoluteFilePath();
+  int removed = 0;
+  const QFileInfoList databases = QDir( directory ).entryInfoList( { u"ws_*.sqlite"_s }, QDir::Files );
+  for ( const QFileInfo &database : databases )
+  {
+    if ( database.absoluteFilePath() == keep )
+      continue;
+    // The write-ahead log is touched on every write: it tells when the index was last used.
+    const QFileInfo wal( database.absoluteFilePath() + u"-wal"_s );
+    const QDateTime lastUsed = std::max( database.lastModified().toUTC(), wal.exists() ? wal.lastModified().toUTC() : QDateTime() );
+    if ( lastUsed >= cutoff )
+      continue;
+    indexRemoveDatabaseFiles( database.absoluteFilePath() );
+    ++removed;
+  }
+  return removed;
 }
 
 bool QgsAiWorkspaceIndex::createWorkspaceFileSnapshot( int maxFiles, QString &workspaceRoot, QList<WorkspaceFileSnapshot> &snapshot, QString *errorMessage ) const
@@ -1493,6 +1587,6 @@ void QgsAiWorkspaceIndex::clear()
     updateStatusSnapshot();
   }
   closeDatabaseConnectionForCurrentThread();
-  if ( !path.isEmpty() && QFileInfo::exists( path ) )
-    QFile::remove( path );
+  if ( !path.isEmpty() )
+    indexRemoveDatabaseFiles( path );
 }

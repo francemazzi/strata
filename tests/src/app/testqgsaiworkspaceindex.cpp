@@ -34,6 +34,8 @@
 #include <QJsonObject>
 #include <QList>
 #include <QScopeGuard>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -245,6 +247,10 @@ class TestQgsAiWorkspaceIndex : public QObject
     void reindexStopsWithinOneBatchWhenCanceled();
     void setEmbeddingProviderDoesNotWaitForTheReindex();
     void schedulerRerunsARequestMadeDuringAPass();
+    void databaseUsesWriteAheadLog();
+    void layerRemovalsReachTheDatabaseTogether();
+    void staleDatabasesAreRemoved();
+    void clearRemovesTheWriteAheadLog();
 
   private:
     //! Writes a workspace file that chunkText() splits into \a chunkCount chunks.
@@ -1107,6 +1113,119 @@ void TestQgsAiWorkspaceIndex::schedulerRerunsARequestMadeDuringAPass()
   QTRY_VERIFY_WITH_TIMEOUT( !scheduler.isRunning(), 10000 );
   disconnect( counter );
   QCOMPARE( passes, 2 );
+}
+
+void TestQgsAiWorkspaceIndex::databaseUsesWriteAheadLog()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+  const QString connection = u"test_wal_check"_s;
+  {
+    QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+    db.setDatabaseName( index.databasePath() );
+    QVERIFY( db.open() );
+    QSqlQuery mode( db );
+    QVERIFY( mode.exec( u"PRAGMA journal_mode"_s ) && mode.next() );
+    QCOMPARE( mode.value( 0 ).toString(), u"wal"_s );
+    db.close();
+  }
+  QSqlDatabase::removeDatabase( connection );
+  QVERIFY( index.databaseSizeBytes() > 0 );
+}
+
+void TestQgsAiWorkspaceIndex::layerRemovalsReachTheDatabaseTogether()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  {
+    QgsAiWorkspaceIndex index( &contextProvider, &provider );
+    QList<QgsAiWorkspaceIndex::Chunk> chunks;
+    QList<QVector<float>> embeddings;
+    for ( int i = 0; i < 20; ++i )
+    {
+      chunks << makeLayerChunk( u"layer_%1"_s.arg( i ), u"Layer %1"_s.arg( i ), 0, 10, 0, u"layer text %1"_s.arg( i ), QByteArray() );
+      embeddings << dummyEmbedding( static_cast<float>( i + 1 ) );
+    }
+    chunks << makeFileChunk( u"notes.md"_s, 0, u"alpha"_s );
+    embeddings << dummyEmbedding( 0.5f );
+    QString err;
+    QVERIFY2( index.persistChunks( chunks, embeddings, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+    // A project closing removes its layers one signal at a time, without waiting on the database.
+    for ( int i = 0; i < 20; ++i )
+      QVERIFY( index.removeLayer( u"layer_%1"_s.arg( i ), &err ) );
+    QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+  }
+
+  // A fresh index reads what reached the database.
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 1 );
+}
+
+void TestQgsAiWorkspaceIndex::staleDatabasesAreRemoved()
+{
+  QTemporaryDir directory;
+  QVERIFY( directory.isValid() );
+  const QDateTime old = QDateTime::currentDateTimeUtc().addDays( -( QgsAiWorkspaceIndex::STALE_DATABASE_DAYS + 5 ) );
+  const auto writeFile = [&directory]( const QString &name, const QDateTime &modified ) {
+    QFile file( QDir( directory.path() ).filePath( name ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "x" );
+    // Written data reaches the file first, or closing it would set the time again.
+    QVERIFY( file.flush() );
+    if ( modified.isValid() )
+      QVERIFY( file.setFileTime( modified, QFileDevice::FileModificationTime ) );
+    file.close();
+  };
+  writeFile( u"ws_old_e5.sqlite"_s, old );
+  writeFile( u"ws_old_e5.sqlite-wal"_s, old );
+  writeFile( u"ws_fresh_e5.sqlite"_s, QDateTime() );
+  writeFile( u"ws_current_e5.sqlite"_s, old );
+  writeFile( u"ws_recentwal_e5.sqlite"_s, old );
+  writeFile( u"ws_recentwal_e5.sqlite-wal"_s, QDateTime() );
+  writeFile( u"history.sqlite"_s, old );
+
+  const QString keep = QDir( directory.path() ).filePath( u"ws_current_e5.sqlite"_s );
+  QCOMPARE( QgsAiWorkspaceIndex::removeStaleDatabases( directory.path(), keep ), 1 );
+
+  const QDir dir( directory.path() );
+  QVERIFY( !dir.exists( u"ws_old_e5.sqlite"_s ) );
+  QVERIFY( !dir.exists( u"ws_old_e5.sqlite-wal"_s ) );
+  QVERIFY( dir.exists( u"ws_fresh_e5.sqlite"_s ) );
+  QVERIFY( dir.exists( u"ws_current_e5.sqlite"_s ) );
+  // Recently written through its log: still in use.
+  QVERIFY( dir.exists( u"ws_recentwal_e5.sqlite"_s ) );
+  // Only index databases are touched.
+  QVERIFY( dir.exists( u"history.sqlite"_s ) );
+}
+
+void TestQgsAiWorkspaceIndex::clearRemovesTheWriteAheadLog()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+  const QString path = index.databasePath();
+  QVERIFY( QFileInfo::exists( path ) );
+
+  index.clear();
+  QVERIFY( !QFileInfo::exists( path ) );
+  QVERIFY( !QFileInfo::exists( path + u"-wal"_s ) );
+  QVERIFY( !QFileInfo::exists( path + u"-shm"_s ) );
+  QCOMPARE( index.databaseSizeBytes(), 0 );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

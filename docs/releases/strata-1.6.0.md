@@ -35,3 +35,10 @@ the Windows reference machine measurements are still to be done.
   the background. It used to read up to 200 features of every vector layer on the interface
   thread whenever layers changed (about 0.85 s with 100 layers) and again before every
   model round; the model context now reuses the last completed check.
+
+### Indexing is lighter
+
+- The index database runs in write-ahead log mode, so searches never wait for a write and
+  each write costs one disk sync. Layers removed together leave the database in one
+  transaction, off the interface thread. Indexes of workspaces not opened for 30 days are
+  deleted, and clearing the index also removes its log files.

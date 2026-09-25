@@ -22,11 +22,13 @@
 #include "qgis_app.h"
 
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QMutex>
 #include <QObject>
 #include <QPointer>
 #include <QRecursiveMutex>
+#include <QSet>
 #include <QString>
 #include <QVector>
 
@@ -74,6 +76,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     static constexpr int FILE_SCAN_TIME_BUDGET_MS = 5000;
     //! Bumped when the on-disk SQLite schema changes; older DBs are dropped on first load.
     static constexpr int SCHEMA_VERSION = 4;
+    //! Index databases of other workspaces unused for this many days are deleted.
+    static constexpr int STALE_DATABASE_DAYS = 30;
 
     //! Discriminates between workspace-file chunks and layer-data chunks.
     static constexpr const char *SOURCE_TYPE_FILE = "file";
@@ -231,6 +235,18 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
      */
     void clear();
 
+    //! Size on disk of the current workspace's index, write-ahead log included.
+    qint64 databaseSizeBytes() const;
+
+    //! SQLite file of the current workspace's index with the active embedding provider.
+    QString databasePath() const { return dbPath(); }
+
+    /**
+     * Deletes the index databases in \a directory unused for more than \a maxAgeDays, except
+     * \a keepPath. Returns how many were deleted. Safe on any thread.
+     */
+    static int removeStaleDatabases( const QString &directory, const QString &keepPath, int maxAgeDays = STALE_DATABASE_DAYS );
+
     /**
      * Writes \a chunks (with their precomputed \a embeddings) to the SQLite store
      * and updates the in-memory cache. Existing rows are replaced according to
@@ -300,6 +316,8 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     QString dbPathForRoot( const QString &workspaceRoot ) const;
     static QString dbPathForRoot( const QString &workspaceRoot, const QString &providerId );
     QString connectionName() const;
+    //! Deletes the queued layer removals, one transaction per database. Runs in the database pool.
+    void flushLayerRemovals();
     //! Refreshes the snapshot returned by status(). Call with mMutex held after changing mCache.
     void updateStatusSnapshot();
     //! True if the cache holds \a workspaceRoot (or nothing loaded yet). Call with mMutex held.
@@ -329,6 +347,10 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     mutable QMutex mStatusMutex;
     Status mStatus;
     QPointer<QgsTask> mLoadTask;
+    //! Layers waiting to be deleted from each database by flushLayerRemovals().
+    QHash<QString, QSet<QString>> mPendingLayerRemovals;
+    bool mRemovalScheduled = false;
+    QMutex mPendingRemovalsMutex;
 };
 
 #endif // QGSAIWORKSPACEINDEX_H
