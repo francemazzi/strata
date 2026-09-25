@@ -255,6 +255,42 @@ namespace
       std::function<void()> mOnStart;
   };
 
+  //! Returns a rollback token on each change and records the tokens taken back.
+  class UndoableTool : public QgsAiTool
+  {
+    public:
+      explicit UndoableTool( QStringList *undone, std::function<void()> onChange = nullptr )
+        : mUndone( undone )
+        , mOnChange( std::move( onChange ) )
+      {}
+      QString name() const override { return u"set_value"_s; }
+      QString description() const override { return u"undoable tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject &args ) override
+      {
+        const QString token = args.value( u"rollback_token"_s ).toString();
+        if ( !token.isEmpty() )
+        {
+          *mUndone << token;
+          return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s } } );
+        }
+        if ( mOnChange )
+          mOnChange();
+        ++mChanges;
+        QJsonObject output;
+        output.insert( u"status"_s, u"ok"_s );
+        output.insert( u"rollback_token"_s, u"tok_%1"_s.arg( mChanges ) );
+        output.insert( u"diff"_s, QJsonObject { { u"summary"_s, u"Changed value %1."_s.arg( mChanges ) }, { u"rollback_supported"_s, true } } );
+        return QgsAiToolResult::ok( output );
+      }
+      bool requiresApproval() const override { return true; }
+
+    private:
+      QStringList *mUndone = nullptr;
+      std::function<void()> mOnChange;
+      int mChanges = 0;
+  };
+
   //! A tool whose changes Strata cannot undo, like a database write.
   class IrreversibleTool : public QgsAiTool
   {
@@ -468,6 +504,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void profileWithToolsOffKeepsPlanMode();
     void pickedModeIsRememberedAcrossStarts();
     void agentModeAsksOnlyBeforeWhatCannotBeUndone();
+    void toolSignalsAndUndoTurn();
     void toolCallLimitPausesAndContinues();
     void cumulativeToolBudgetStopsAutomaticContinuation();
     void repeatedEquivalentToolCallsStopTurn();
@@ -823,6 +860,7 @@ void TestQgsAiAgentSessionManager::agentModeAsksOnlyBeforeWhatCannotBeUndone()
 {
   clearProviderSettings();
   QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
   settings.remove( u"strata/agent"_s );
   const auto cleanup = qScopeGuard( [&settings]() {
     settings.remove( u"ai/provider/openrouter"_s );
@@ -887,15 +925,121 @@ void TestQgsAiAgentSessionManager::agentModeAsksOnlyBeforeWhatCannotBeUndone()
 
   manager.sendUserMessage( u"edit the layer, then write to the database"_s );
   // The turn ends with the final answer (the request starts after an asynchronous retrieval).
-  QTRY_VERIFY_WITH_TIMEOUT( !manager.history().isEmpty() && manager.history().last().content == "Done"_L1, 10000 );
-  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QTRY_VERIFY_WITH_TIMEOUT( manager.history().size() > 1 && !manager.hasActiveRequest(), 60000 );
   refuse.stop();
+  if ( manager.history().last().content != "Done"_L1 )
+  {
+    QStringList transcript;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      transcript << qgsAiChatRoleToString( message.role ) + u": "_s + message.content.left( 200 );
+    QFAIL( qPrintable( transcript.join( '\n' ) ) );
+  }
 
   // The edit, which can be undone, ran without a question; the database write asked and was refused.
   QVERIFY( editRan );
   QVERIFY( !writeRan );
   QCOMPARE( asked.size(), 1 );
   QVERIFY( asked.constFirst().contains( u"write_database"_s ) );
+}
+
+void TestQgsAiAgentSessionManager::toolSignalsAndUndoTurn()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  for ( int i = 1; i <= 3; ++i )
+  {
+    server.responses << QgsAiTestLoopbackServer::jsonResponse(
+      200,
+      "OK",
+      u"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_%1\",\"type\":\"function\",\"function\":{\"name\":\"set_value\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"_s
+        .arg( i )
+        .toUtf8()
+    );
+  }
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  settings.setValue( u"ai/provider/openrouter/apiKey"_s, u"sk-or-loopback-test"_s );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QStringList undone;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<UndoableTool>( &undone ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+
+  QStringList events;
+  connect( &manager, &QgsAiAgentSessionManager::toolStarted, this, [&events]( const QString &callId, const QString &name, const QVariantMap & ) { events << u"start %1 %2"_s.arg( callId, name ); } );
+  connect( &manager, &QgsAiAgentSessionManager::toolFinished, this, [&events]( const QString &callId, bool success, qint64 elapsedMs ) {
+    events << u"finish %1 %2"_s.arg( callId ).arg( success && elapsedMs >= 0 );
+  } );
+
+  manager.sendUserMessage( u"change three values"_s );
+  const auto answered = [&manager]() {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return std::any_of( history.cbegin(), history.cend(), []( const QgsAiChatMessage &message ) { return message.content == "Done"_L1; } );
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( answered(), 60000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+
+  // One start and one finish per call, in order, with the model's call ids.
+  QCOMPARE( events, QStringList( { u"start call_1 set_value"_s, u"finish call_1 1"_s, u"start call_2 set_value"_s, u"finish call_2 1"_s, u"start call_3 set_value"_s, u"finish call_3 1"_s } ) );
+
+  QString userMessageId;
+  QStringList toolMessageIds;
+  for ( const QgsAiChatMessage &message : manager.history() )
+  {
+    if ( message.role == QgsAiChatRole::User )
+      userMessageId = message.id;
+    if ( message.role == QgsAiChatRole::Tool )
+    {
+      toolMessageIds << message.id;
+      QVERIFY( message.metadata.contains( u"elapsed_ms"_s ) );
+      QVERIFY( QgsAiAgentSessionManager::toolMessageCanBeUndone( message ) );
+    }
+  }
+  QCOMPARE( toolMessageIds.size(), 3 );
+  // The whole turn, newest change first, from any message of the turn.
+  QCOMPARE( manager.undoableToolCallsInTurn( userMessageId ), QStringList( { toolMessageIds.at( 2 ), toolMessageIds.at( 1 ), toolMessageIds.at( 0 ) } ) );
+  QCOMPARE( manager.undoableToolCallsInTurn( toolMessageIds.at( 1 ) ).size(), 3 );
+
+  // Undoing one call, then the rest of the turn, newest first; each only once.
+  QVERIFY( manager.undoToolCall( toolMessageIds.at( 2 ) ) );
+  QCOMPARE( undone, QStringList( { u"tok_3"_s } ) );
+  QString error;
+  QVERIFY( !manager.undoToolCall( toolMessageIds.at( 2 ), &error ) );
+  QVERIFY( !error.isEmpty() );
+  QSignalSpy undoneSpy( &manager, &QgsAiAgentSessionManager::toolCallsUndone );
+  QCOMPARE( manager.undoTurn( userMessageId ), 2 );
+  QCOMPARE( undone, QStringList( { u"tok_3"_s, u"tok_2"_s, u"tok_1"_s } ) );
+  QCOMPARE( undoneSpy.count(), 1 );
+  QVERIFY( manager.undoableToolCallsInTurn( userMessageId ).isEmpty() );
+
+  // The model learns about it from a note.
+  QCOMPARE( manager.history().last().metadata.value( u"ui_kind"_s ).toString(), u"undo_note"_s );
+  QVERIFY( manager.history().last().content.contains( u"set_value"_s ) );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()

@@ -580,6 +580,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
 
   qgsAiSetBackgroundToolProgressHandler( [this]( const QString &label, double progress ) {
     emit requestStateChanged( u"tool_use"_s, tr( "%1… %2%" ).arg( label, QString::number( static_cast<int>( std::round( progress ) ) ) ) );
+    if ( !mRunningToolCallId.isEmpty() )
+      emit toolProgress( mRunningToolCallId, progress, label );
   } );
 
   if ( mRouter )
@@ -771,6 +773,119 @@ bool QgsAiAgentSessionManager::updateMessageMetadata( const QString &messageId, 
   }
 
   return false;
+}
+
+bool QgsAiAgentSessionManager::toolMessageCanBeUndone( const QgsAiChatMessage &message )
+{
+  if ( message.role != QgsAiChatRole::Tool || message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1 )
+    return false;
+  const QJsonObject output = QJsonDocument::fromJson( message.content.toUtf8() ).object();
+  return !output.value( u"rollback_token"_s ).toString().isEmpty() && !message.metadata.value( u"tool_name"_s ).toString().isEmpty();
+}
+
+bool QgsAiAgentSessionManager::undoToolCall( const QString &toolMessageId, QString *error )
+{
+  QString toolName;
+  if ( !undoToolCallWithoutNote( toolMessageId, error, &toolName ) )
+    return false;
+  recordUndoNote( { toolName } );
+  emit toolCallsUndone();
+  return true;
+}
+
+bool QgsAiAgentSessionManager::undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName )
+{
+  const auto fail = [error]( const QString &message ) {
+    if ( error )
+      *error = message;
+    return false;
+  };
+  if ( hasActiveRequest() )
+    return fail( tr( "Wait for the assistant to finish before undoing." ) );
+  if ( !mToolRegistry )
+    return fail( tr( "No tools are available." ) );
+
+  for ( const QgsAiChatMessage &message : std::as_const( mHistory ) )
+  {
+    if ( message.id != toolMessageId )
+      continue;
+    if ( !toolMessageCanBeUndone( message ) )
+      return fail( tr( "This change cannot be undone from the chat." ) );
+
+    const QString name = message.metadata.value( u"tool_name"_s ).toString();
+    const QString token = QJsonDocument::fromJson( message.content.toUtf8() ).object().value( u"rollback_token"_s ).toString();
+    // The same tool takes its own rollback token back, as the model would call it.
+    const QgsAiToolResult result = mToolRegistry->execute( name, QJsonObject { { u"rollback_token"_s, token } } );
+    QVariantMap memory;
+    memory.insert( u"tool_name"_s, name );
+    memory.insert( u"success"_s, result.success );
+    rememberAgentEvent( u"tool_undone_by_user"_s, memory );
+    if ( !result.success )
+      return fail( result.errorMessage.isEmpty() ? tr( "Undo failed." ) : result.errorMessage );
+
+    QVariantMap metadata = message.metadata;
+    metadata.insert( u"undo_status"_s, u"undone"_s );
+    updateMessageMetadata( message.id, metadata );
+    if ( toolName )
+      *toolName = name;
+    return true;
+  }
+  return fail( tr( "The change was not found in this chat." ) );
+}
+
+void QgsAiAgentSessionManager::recordUndoNote( const QStringList &toolNames )
+{
+  if ( toolNames.isEmpty() )
+    return;
+  // The model sees the undo on the next turn and does not assume the change is still there.
+  QgsAiChatMessage note = buildAssistantMessage( tr( "The user undid %1 from the chat; those changes are no longer in the project." ).arg( toolNames.join( ", "_L1 ) ) );
+  note.metadata.insert( u"ui_kind"_s, u"undo_note"_s );
+  recordHistoryMessage( note );
+}
+
+QStringList QgsAiAgentSessionManager::undoableToolCallsInTurn( const QString &messageId ) const
+{
+  int index = -1;
+  for ( int i = 0; i < mHistory.size(); ++i )
+  {
+    if ( mHistory.at( i ).id == messageId )
+    {
+      index = i;
+      break;
+    }
+  }
+  if ( index < 0 )
+    return QStringList();
+  // A turn runs from a user message to the next one.
+  int start = index;
+  while ( start > 0 && mHistory.at( start ).role != QgsAiChatRole::User )
+    --start;
+  QStringList undoable;
+  for ( int i = start + 1; i < mHistory.size() && mHistory.at( i ).role != QgsAiChatRole::User; ++i )
+  {
+    if ( toolMessageCanBeUndone( mHistory.at( i ) ) )
+      undoable.prepend( mHistory.at( i ).id );
+  }
+  return undoable;
+}
+
+int QgsAiAgentSessionManager::undoTurn( const QString &messageId, QStringList *failures )
+{
+  QStringList undoneTools;
+  const QStringList ids = undoableToolCallsInTurn( messageId );
+  for ( const QString &id : ids )
+  {
+    QString error;
+    QString toolName;
+    if ( undoToolCallWithoutNote( id, &error, &toolName ) )
+      undoneTools << toolName;
+    else if ( failures )
+      *failures << error;
+  }
+  recordUndoNote( undoneTools );
+  if ( !undoneTools.isEmpty() )
+    emit toolCallsUndone();
+  return static_cast<int>( undoneTools.size() );
 }
 
 bool QgsAiAgentSessionManager::continueAfterToolLimit( const QString &messageId )
@@ -3283,6 +3398,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
 
       QgsAiToolResult result;
+      qint64 toolElapsedMs = -1;
       const QgsAiTool *calledTool = mToolRegistry->find( call.name );
       const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
       const bool genericApproval = ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating );
@@ -3309,9 +3425,16 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       {
         QElapsedTimer toolTimer;
         toolTimer.start();
-        QgsAiPerfScope perf( u"tool"_s, call.name, 200 );
-        result = mToolRegistry->execute( call.name, call.args, call.id );
-        QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
+        mRunningToolCallId = call.id;
+        emit toolStarted( call.id, call.name, call.args.toVariantMap() );
+        {
+          QgsAiPerfScope perf( u"tool"_s, call.name, 200 );
+          result = mToolRegistry->execute( call.name, call.args, call.id );
+        }
+        toolElapsedMs = toolTimer.elapsed();
+        mRunningToolCallId.clear();
+        emit toolFinished( call.id, result.success, toolElapsedMs );
+        QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolElapsedMs ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
       }
 
       if ( generation != mSessionGeneration )
@@ -3340,7 +3463,9 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         }
       }
       rememberAgentEvent( u"tool_result"_s, memory );
-      const QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
+      QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
+      if ( toolElapsedMs >= 0 )
+        resultMessage.metadata.insert( u"elapsed_ms"_s, toolElapsedMs );
       if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
         roundHadError = true;
       recordHistoryMessage( resultMessage );

@@ -123,3 +123,12 @@ the Windows reference machine measurements are still to be done.
   MCP tools that change data). The mode picked in the chat is the one Strata starts with
   next time, and a long task pauses for Continue after 20 rounds of tool calls instead of 5.
   Profiles that turned tools off in the AI settings keep their settings and start in Plan.
+- Each tool call shows up in the chat while it runs: what it does ("calculate_field ·
+  Parcels · AREA = $area"), how long it has been running, its progress, and Stop. The result
+  card says what changed in the tool's own words and how long it took; the raw result is
+  under "Result details", closed, and rollback tokens no longer show.
+- Undo from the chat: changes that can be undone have an Undo button on their card, and the
+  user message has "Undo this turn", which undoes every change of that answer, newest first.
+  Strata runs the tool's own rollback directly, without asking the model, and tells the
+  model in the chat which changes were undone. Changes Strata cannot undo say so on their
+  card.

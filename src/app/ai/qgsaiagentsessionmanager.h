@@ -111,6 +111,25 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     void clearHistory();
     bool updateMessageMetadata( const QString &messageId, const QVariantMap &metadata );
 
+    //! TRUE if the tool result \a message carries a rollback token and was not undone yet.
+    static bool toolMessageCanBeUndone( const QgsAiChatMessage &message );
+
+    /**
+     * Undoes the tool call behind the tool result message \a toolMessageId directly, without the
+     * model, with the rollback token the tool returned. The message is marked undone and a note
+     * tells the model. Not while a request runs. Returns FALSE with \a error when it fails.
+     */
+    bool undoToolCall( const QString &toolMessageId, QString *error = nullptr );
+
+    //! Tool result messages of the turn that contains \a messageId which can still be undone, newest first.
+    QStringList undoableToolCallsInTurn( const QString &messageId ) const;
+
+    /**
+     * Undoes every tool call of the turn containing \a messageId that can be undone, newest first.
+     * Returns how many were undone; \a failures lists the ones that could not be.
+     */
+    int undoTurn( const QString &messageId, QStringList *failures = nullptr );
+
     /**
      * Sets the persistent chat history store. When set, every message appended
      * to the in-memory history is also written to SQLite when the current
@@ -296,6 +315,15 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     void requestStateChanged( const QString &state, const QString &detail );
     void requestRunningChanged( bool running );
 
+    //! A tool call starts running, after any approval.
+    void toolStarted( const QString &callId, const QString &toolName, const QVariantMap &args );
+    //! Progress of the running tool call, 0 to 100, with what it is doing.
+    void toolProgress( const QString &callId, double percent, const QString &label );
+    //! The tool call ended; its result message follows through messageAdded().
+    void toolFinished( const QString &callId, bool success, qint64 elapsedMs );
+    //! Tool calls were undone from the chat; the transcript should render again.
+    void toolCallsUndone();
+
     /**
      * Emitted whenever the cumulative per-session token/cost accounting changes:
      * after every model response carrying usage, and with an empty total when a
@@ -350,6 +378,10 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QList<QgsAiChatMessage> buildOutgoingMessages() const;
     void onToolCallsRequested( const QString &requestId, const QString &providerName, const QString &assistantText, const QList<QgsAiToolCall> &calls );
     void rememberAgentEvent( const QString &event, const QVariantMap &metadata );
+    //! Undoes one tool call and marks its message; the caller adds the note for the model.
+    bool undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName );
+    //! Tells the model which tool calls the user undid.
+    void recordUndoNote( const QStringList &toolNames );
 
     void loadPersistedBehaviorSettings();
     void persistBehaviorSettings() const;
@@ -383,6 +415,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QList<QgsAiChatMessage> mHistory;
     QList<QgsAiModelRouter::Provider> mPendingProviders;
     QString mActiveRequestId;
+    //! Id of the tool call running now, for its progress.
+    QString mRunningToolCallId;
     QgsAiModelRouter::Provider mActiveProvider = QgsAiModelRouter::Provider::OpenAi;
     QString mCurrentPrompt;
     QList<QgsAiChatContextFile> mCurrentContextFiles;

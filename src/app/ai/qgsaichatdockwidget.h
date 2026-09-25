@@ -21,6 +21,7 @@
 #include "qgsaigissuggestionengine.h"
 #include "qgsdockwidget.h"
 
+#include <QElapsedTimer>
 #include <QList>
 #include <QPointer>
 
@@ -95,6 +96,18 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void ensureWorkspaceTrustDecision();
     void appendTranscriptMessage( const QString &role, const QString &content );
     void appendTranscriptMessage( const QgsAiChatMessage &message );
+    //! Undo button or "cannot be undone" note under a tool result card.
+    QWidget *createToolResultActionsWidget( const QgsAiChatMessage &message );
+    //! Shows "Undo this turn" on the user messages whose turn has changes that can be undone.
+    void refreshUndoTurnButtons();
+    void undoToolFromChat( const QString &toolMessageId );
+    void undoTurnFromChat( const QString &messageId );
+    //! The card of the tool running now: what it does, for how long, and Stop.
+    void showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args );
+    void updateLiveToolProgress( const QString &callId, double percent, const QString &label );
+    void closeLiveToolCard( const QString &callId );
+    //! One line describing a tool call for the user ("calculate_field · Parcels · AREA").
+    static QString toolCallSummary( const QString &toolName, const QVariantMap &args );
     QString renderToolMessageMarkdown( const QgsAiChatMessage &message ) const;
     static QString renderMarkdown( const QString &md );
     QWidget *createMessageWidget(
@@ -220,6 +233,14 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     bool mStreamingInProgress = false;
     QTextEdit *mStreamingTextEdit = nullptr;
     bool mRequestRunning = false;
+
+    QPointer<QFrame> mLiveToolCard;
+    QLabel *mLiveToolElapsed = nullptr;
+    QLabel *mLiveToolProgress = nullptr;
+    QTimer *mLiveToolTimer = nullptr;
+    QElapsedTimer mLiveToolClock;
+    QString mLiveToolCallId;
+    QList<QPointer<QPushButton>> mUndoTurnButtons;
 };
 
 #endif // QGSAICHATDOCKWIDGET_H

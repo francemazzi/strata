@@ -22,6 +22,7 @@
 #include "ai/tools/qgsaiechotool.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaisecretstoretestutils.h"
+#include "qgsaitestloopbackserver.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
@@ -180,6 +181,38 @@ namespace
         qputenv( entry.first.constData(), entry.second );
     } );
   }
+
+  //! Returns a rollback token on each change, records the tokens taken back, and runs onChange meanwhile.
+  class DockUndoableTool : public QgsAiTool
+  {
+    public:
+      DockUndoableTool( QStringList *undone, std::function<void()> onChange )
+        : mUndone( undone )
+        , mOnChange( std::move( onChange ) )
+      {}
+      QString name() const override { return u"set_value"_s; }
+      QString description() const override { return u"undoable tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject &args ) override
+      {
+        const QString token = args.value( u"rollback_token"_s ).toString();
+        if ( !token.isEmpty() )
+        {
+          *mUndone << token;
+          return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s } } );
+        }
+        mOnChange();
+        QJsonObject output;
+        output.insert( u"status"_s, u"ok"_s );
+        output.insert( u"rollback_token"_s, u"tok_1"_s );
+        output.insert( u"diff"_s, QJsonObject { { u"summary"_s, u"Changed value 1."_s }, { u"rollback_supported"_s, true } } );
+        return QgsAiToolResult::ok( output );
+      }
+
+    private:
+      QStringList *mUndone = nullptr;
+      std::function<void()> mOnChange;
+  };
 } // namespace
 
 class TestQgsAiChatDockWidget : public QObject
@@ -205,6 +238,7 @@ class TestQgsAiChatDockWidget : public QObject
     void acceptingAgentPlanJsonSwitchesToAgent();
     void acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks();
     void pickedModeIsRemembered();
+    void toolCardsShowLiveStateAndUndo();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -963,6 +997,94 @@ void TestQgsAiChatDockWidget::pickedModeIsRemembered()
   }
   QCOMPARE( manager.activeAgent(), u"reviewer"_s );
   QCOMPARE( QgsSettings().value( QgsAiAgentSessionManager::startAgentSettingsKey() ).toString(), u"reviewer"_s );
+}
+
+void TestQgsAiChatDockWidget::toolCardsShowLiveStateAndUndo()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::
+         jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"set_value","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  // The key through the environment: this test has no secret store (the guard above unsets it again).
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QStringList undone;
+  QString liveTitle;
+  QgsAiChatDockWidget *dockPtr = nullptr;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<DockUndoableTool>( &undone, [&dockPtr, &liveTitle]() {
+    // While the tool runs, its card shows what it does.
+    QFrame *card = dockPtr ? dockPtr->findChild<QFrame *>( u"aiLiveToolCard"_s ) : nullptr;
+    QLabel *title = card ? card->findChild<QLabel *>( u"aiLiveToolTitle"_s ) : nullptr;
+    liveTitle = title ? title->text() : QString();
+  } ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dockPtr = &dock;
+  dock.show();
+
+  manager.sendUserMessage( u"change a value"_s );
+  const auto answered = [&manager]() {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return std::any_of( history.cbegin(), history.cend(), []( const QgsAiChatMessage &message ) { return message.content == "Done"_L1; } );
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( answered() || ( manager.history().size() > 1 && !manager.hasActiveRequest() ), 60000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  if ( !answered() )
+  {
+    QStringList transcript;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      transcript << qgsAiChatRoleToString( message.role ) + u": "_s + message.content.left( 200 );
+    QFAIL( qPrintable( transcript.join( '\n' ) ) );
+  }
+
+  QVERIFY2( liveTitle.startsWith( "set_value"_L1 ), qPrintable( liveTitle ) );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiLiveToolCard"_s ) );
+
+  // The result card says what changed, without raw tokens, and can be undone.
+  bool summaryShown = false;
+  for ( QLabel *body : dock.findChildren<QLabel *>( u"aiMessageBody"_s ) )
+  {
+    summaryShown = summaryShown || body->text().contains( u"Changed value 1."_s );
+    QVERIFY( !body->text().contains( u"tok_1"_s ) );
+  }
+  QVERIFY( summaryShown );
+  QPushButton *undo = dock.findChild<QPushButton *>( u"aiUndoToolButton"_s );
+  QVERIFY( undo && undo->isEnabled() );
+  QPushButton *undoTurn = dock.findChild<QPushButton *>( u"aiUndoTurnButton"_s );
+  QVERIFY( undoTurn && !undoTurn->isHidden() );
+
+  undoTurn->click();
+  QCOMPARE( undone, QStringList( { u"tok_1"_s } ) );
+  QTRY_VERIFY( dock.findChild<QLabel *>( u"aiToolUndoneLabel"_s ) );
+  QTRY_VERIFY( !dock.findChild<QPushButton *>( u"aiUndoToolButton"_s ) );
 }
 
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()

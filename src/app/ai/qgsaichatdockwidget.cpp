@@ -55,6 +55,7 @@
 #include "qgsmessagebaritem.h"
 #include "qgsnetworkaccessmanager.h"
 #include "qgspdfrenderer.h"
+#include "qgsmaplayer.h"
 #include "qgsproject.h"
 #include "qgsrasterlayer.h"
 #include "qgsscrollarea.h"
@@ -658,7 +659,12 @@ namespace
       visible += content.mid( lastEnd, match.capturedStart() - lastEnd );
 
       const QString language = match.captured( 1 ).trimmed();
-      if ( language != "qgis_ai_questions"_L1 )
+      if ( language == "strata_result"_L1 )
+      {
+        // The whole tool result, closed by default under the readable summary.
+        result.technicalSections << TechnicalSection { QObject::tr( "Result details" ), match.captured( 2 ), u"json"_s };
+      }
+      else if ( language != "qgis_ai_questions"_L1 )
       {
         TechnicalSection section;
         section.language = language;
@@ -1097,6 +1103,10 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
     connect( mSessionManager, &QgsAiAgentSessionManager::requestStateChanged, this, &QgsAiChatDockWidget::updateRuntimeState );
     connect( mSessionManager, &QgsAiAgentSessionManager::requestRunningChanged, this, &QgsAiChatDockWidget::setRequestRunning );
     connect( mSessionManager, &QgsAiAgentSessionManager::historyReplaced, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolStarted, this, &QgsAiChatDockWidget::showLiveToolCard );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolProgress, this, &QgsAiChatDockWidget::updateLiveToolProgress );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolFinished, this, [this]( const QString &callId, bool, qint64 ) { closeLiveToolCard( callId ); } );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolCallsUndone, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionUsageChanged, this, &QgsAiChatDockWidget::updateSessionUsage );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionListChanged, this, &QgsAiChatDockWidget::rebuildHistoryMenu );
   }
@@ -1500,9 +1510,206 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
   if ( !messageWidget || !mTranscriptLayout )
     return;
 
+  if ( QVBoxLayout *cardLayout = qobject_cast<QVBoxLayout *>( messageWidget->layout() ) )
+  {
+    if ( message.role == QgsAiChatRole::Tool )
+    {
+      if ( QWidget *actions = createToolResultActionsWidget( message ) )
+        cardLayout->addWidget( actions );
+    }
+    else if ( message.role == QgsAiChatRole::User )
+    {
+      // Shown once the turn has changes that can be undone (refreshUndoTurnButtons).
+      QPushButton *undoTurn = new QPushButton( tr( "Undo this turn" ), messageWidget );
+      undoTurn->setObjectName( u"aiUndoTurnButton"_s );
+      undoTurn->setToolTip( tr( "Undo every change the assistant made in answer to this message." ) );
+      undoTurn->setProperty( "message_id", message.id );
+      undoTurn->setVisible( false );
+      undoTurn->setStyleSheet( u"QPushButton#aiUndoTurnButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
+      const QString messageId = message.id;
+      connect( undoTurn, &QPushButton::clicked, this, [this, messageId]() { undoTurnFromChat( messageId ); } );
+      QHBoxLayout *row = new QHBoxLayout();
+      row->addStretch( 1 );
+      row->addWidget( undoTurn );
+      cardLayout->addLayout( row );
+      mUndoTurnButtons << undoTurn;
+    }
+  }
+
   const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
   mTranscriptLayout->insertWidget( insertIndex, messageWidget );
+  if ( message.role == QgsAiChatRole::Tool )
+    refreshUndoTurnButtons();
   scrollTranscriptToBottom();
+}
+
+QWidget *QgsAiChatDockWidget::createToolResultActionsWidget( const QgsAiChatMessage &message )
+{
+  const QJsonObject output = QJsonDocument::fromJson( message.content.toUtf8() ).object();
+  const bool undone = message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1;
+  const bool undoable = QgsAiAgentSessionManager::toolMessageCanBeUndone( message );
+  const bool declaredPermanent = output.value( u"diff"_s ).toObject().contains( u"rollback_supported"_s ) && !output.value( u"diff"_s ).toObject().value( u"rollback_supported"_s ).toBool();
+  if ( !undone && !undoable && !declaredPermanent )
+    return nullptr;
+
+  QWidget *row = new QWidget( mTranscriptContainer );
+  QHBoxLayout *layout = new QHBoxLayout( row );
+  layout->setContentsMargins( 0, 0, 0, 0 );
+  if ( undone )
+  {
+    QLabel *label = new QLabel( tr( "Undone" ), row );
+    label->setObjectName( u"aiToolUndoneLabel"_s );
+    label->setStyleSheet( u"color: palette(mid); font-style: italic;"_s );
+    layout->addWidget( label );
+  }
+  else if ( undoable )
+  {
+    QPushButton *undo = new QPushButton( tr( "Undo" ), row );
+    undo->setObjectName( u"aiUndoToolButton"_s );
+    undo->setToolTip( tr( "Undo this change without asking the assistant." ) );
+    undo->setEnabled( !mRequestRunning );
+    undo->setStyleSheet(
+      u"QPushButton#aiUndoToolButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; } QPushButton#aiUndoToolButton:disabled { color: palette(mid); }"_s
+    );
+    const QString messageId = message.id;
+    connect( undo, &QPushButton::clicked, this, [this, messageId]() { undoToolFromChat( messageId ); } );
+    layout->addWidget( undo );
+  }
+  else
+  {
+    QLabel *label = new QLabel( tr( "Cannot be undone from Strata" ), row );
+    label->setObjectName( u"aiToolPermanentLabel"_s );
+    label->setStyleSheet( u"color: palette(mid);"_s );
+    layout->addWidget( label );
+  }
+  layout->addStretch( 1 );
+  return row;
+}
+
+void QgsAiChatDockWidget::refreshUndoTurnButtons()
+{
+  for ( const QPointer<QPushButton> &button : std::as_const( mUndoTurnButtons ) )
+  {
+    if ( !button || !mSessionManager )
+      continue;
+    button->setVisible( !mRequestRunning && !mSessionManager->undoableToolCallsInTurn( button->property( "message_id" ).toString() ).isEmpty() );
+  }
+}
+
+void QgsAiChatDockWidget::undoToolFromChat( const QString &toolMessageId )
+{
+  if ( !mSessionManager )
+    return;
+  QString error;
+  if ( !mSessionManager->undoToolCall( toolMessageId, &error ) )
+    QMessageBox::warning( this, tr( "Undo" ), error );
+}
+
+void QgsAiChatDockWidget::undoTurnFromChat( const QString &messageId )
+{
+  if ( !mSessionManager )
+    return;
+  QStringList failures;
+  mSessionManager->undoTurn( messageId, &failures );
+  if ( !failures.isEmpty() )
+    QMessageBox::warning( this, tr( "Undo this turn" ), tr( "Some changes could not be undone:\n%1" ).arg( failures.join( '\n' ) ) );
+}
+
+QString QgsAiChatDockWidget::toolCallSummary( const QString &toolName, const QVariantMap &args )
+{
+  QStringList parts { toolName };
+  const QString layerId = args.value( u"layer_id"_s ).toString();
+  if ( !layerId.isEmpty() )
+  {
+    const QgsMapLayer *layer = QgsProject::instance()->mapLayer( layerId );
+    parts << ( layer ? layer->name() : layerId );
+  }
+  const auto shortened = []( const QString &text ) { return text.size() > 60 ? text.left( 57 ) + u"…"_s : text; };
+  if ( args.contains( u"field_name"_s ) )
+    parts << args.value( u"field_name"_s ).toString() + ( args.contains( u"expression"_s ) ? u" = "_s + shortened( args.value( u"expression"_s ).toString() ) : QString() );
+  for ( const QString &key : { u"algorithm_id"_s, u"query"_s, u"sql"_s, u"name"_s } )
+  {
+    if ( args.contains( key ) )
+      parts << shortened( args.value( key ).toString().simplified() );
+  }
+  if ( args.contains( u"path"_s ) )
+    parts << QFileInfo( args.value( u"path"_s ).toString() ).fileName();
+  return parts.join( u" · "_s );
+}
+
+void QgsAiChatDockWidget::showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args )
+{
+  closeLiveToolCard( mLiveToolCallId );
+  if ( !mTranscriptLayout )
+    return;
+  mLiveToolCallId = callId;
+  mLiveToolClock.start();
+
+  mLiveToolCard = new QFrame( mTranscriptContainer );
+  mLiveToolCard->setObjectName( u"aiLiveToolCard"_s );
+  applyTranscriptWidthPolicy( mLiveToolCard );
+  mLiveToolCard->setStyleSheet( u"QFrame#aiLiveToolCard { background: palette(alternate-base); border-radius: 6px; }"_s );
+  QVBoxLayout *layout = new QVBoxLayout( mLiveToolCard );
+  layout->setContentsMargins( 8, 6, 8, 6 );
+  layout->setSpacing( 2 );
+  QHBoxLayout *header = new QHBoxLayout();
+  QLabel *title = new QLabel( toolCallSummary( toolName, args ), mLiveToolCard );
+  title->setObjectName( u"aiLiveToolTitle"_s );
+  title->setWordWrap( true );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  header->addWidget( title, 1 );
+  mLiveToolElapsed = new QLabel( tr( "Running…" ), mLiveToolCard );
+  mLiveToolElapsed->setObjectName( u"aiLiveToolElapsed"_s );
+  header->addWidget( mLiveToolElapsed );
+  QToolButton *stop = new QToolButton( mLiveToolCard );
+  stop->setObjectName( u"aiLiveToolStopButton"_s );
+  stop->setText( tr( "Stop" ) );
+  stop->setAutoRaise( true );
+  connect( stop, &QToolButton::clicked, this, &QgsAiChatDockWidget::cancelRunningRequest );
+  header->addWidget( stop );
+  layout->addLayout( header );
+  mLiveToolProgress = new QLabel( mLiveToolCard );
+  mLiveToolProgress->setObjectName( u"aiLiveToolProgress"_s );
+  mLiveToolProgress->setStyleSheet( u"color: palette(mid);"_s );
+  mLiveToolProgress->setVisible( false );
+  layout->addWidget( mLiveToolProgress );
+
+  const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
+  mTranscriptLayout->insertWidget( insertIndex, mLiveToolCard );
+  scrollTranscriptToBottom();
+
+  if ( !mLiveToolTimer )
+  {
+    mLiveToolTimer = new QTimer( this );
+    mLiveToolTimer->setInterval( 200 );
+    connect( mLiveToolTimer, &QTimer::timeout, this, [this]() {
+      if ( mLiveToolCard && mLiveToolElapsed )
+        mLiveToolElapsed->setText( tr( "Running… %1 s" ).arg( mLiveToolClock.elapsed() / 1000.0, 0, 'f', 1 ) );
+    } );
+  }
+  mLiveToolTimer->start();
+}
+
+void QgsAiChatDockWidget::updateLiveToolProgress( const QString &callId, double percent, const QString &label )
+{
+  if ( callId != mLiveToolCallId || !mLiveToolProgress )
+    return;
+  mLiveToolProgress->setText( tr( "%1 · %2%" ).arg( label ).arg( static_cast<int>( percent ) ) );
+  mLiveToolProgress->setVisible( true );
+}
+
+void QgsAiChatDockWidget::closeLiveToolCard( const QString &callId )
+{
+  if ( callId != mLiveToolCallId )
+    return;
+  if ( mLiveToolTimer )
+    mLiveToolTimer->stop();
+  if ( mLiveToolCard )
+    mLiveToolCard->deleteLater();
+  mLiveToolCard = nullptr;
+  mLiveToolElapsed = nullptr;
+  mLiveToolProgress = nullptr;
+  mLiveToolCallId.clear();
 }
 
 QWidget *QgsAiChatDockWidget::createMessageWidget( const QString &role, const QString &content, const QVariantMap &metadata, const QString &messageId, QgsAiChatRole messageRole )
@@ -2237,7 +2444,11 @@ QString QgsAiChatDockWidget::renderToolMessageMarkdown( const QgsAiChatMessage &
   const QVariantMap args = message.metadata.value( u"tool_args"_s ).toMap();
   const QString status = output.value( u"status"_s ).toString( isError ? u"error"_s : u"ok"_s );
 
-  QString md = u"**%1** - `%2`\n"_s.arg( toolName.isEmpty() ? u"tool"_s : toolName, status );
+  QString md = u"**%1** - `%2`"_s.arg( toolName.isEmpty() ? u"tool"_s : toolName, status );
+  const qint64 elapsedMs = message.metadata.value( u"elapsed_ms"_s, -1 ).toLongLong();
+  if ( elapsedMs >= 0 )
+    md += elapsedMs < 1000 ? tr( " · %1 ms" ).arg( elapsedMs ) : tr( " · %1 s" ).arg( elapsedMs / 1000.0, 0, 'f', 1 );
+  md += "\n"_L1;
 
   if ( toolName == "run_python"_L1 )
   {
@@ -2377,16 +2588,22 @@ QString QgsAiChatDockWidget::renderToolMessageMarkdown( const QgsAiChatMessage &
     return md.trimmed();
   }
 
+  // What changed, in the tool's own words, before the details.
+  const QString summary = output.value( u"diff"_s ).toObject().value( u"summary"_s ).toString().trimmed();
+  if ( !summary.isEmpty() )
+    md += u"\n%1\n"_s.arg( summary );
+  static const QSet<QString> technicalKeys { u"status"_s, u"rollback_token"_s, u"rollback"_s, u"verification"_s, u"diff"_s };
   int shown = 0;
   for ( auto it = output.constBegin(); it != output.constEnd() && shown < 6; ++it )
   {
-    if ( it.value().isObject() || it.value().isArray() )
+    if ( it.value().isObject() || it.value().isArray() || technicalKeys.contains( it.key() ) )
       continue;
     md += u"\n- %1: `%2`"_s.arg( it.key(), truncateForTranscript( scalarForTranscript( it.value() ), 160 ) );
     ++shown;
   }
-  if ( shown == 0 )
+  if ( shown == 0 && summary.isEmpty() )
     md += "\nResult received."_L1;
+  md += u"\n\n```strata_result\n%1\n```"_s.arg( truncateForTranscript( QString::fromUtf8( QJsonDocument( output ).toJson( QJsonDocument::Indented ) ).trimmed(), 20000 ) );
   return md.trimmed();
 }
 
@@ -2404,6 +2621,7 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
   hideRequestError();
   closeStreamingAssistantMessage();
   clearTranscriptWidgets();
+  mUndoTurnButtons.clear();
   if ( !mSessionManager )
     return;
   const QList<QgsAiChatMessage> history = mSessionManager->history();
@@ -2413,6 +2631,7 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
       continue;
     appendTranscriptMessage( m );
   }
+  refreshUndoTurnButtons();
 }
 
 void QgsAiChatDockWidget::rebuildHistoryMenu()
@@ -2691,6 +2910,13 @@ void QgsAiChatDockWidget::updateSessionUsage( const QgsAiUsage &total )
 void QgsAiChatDockWidget::setRequestRunning( bool running )
 {
   mRequestRunning = running;
+  // Undo waits for the assistant to finish.
+  const QList<QPushButton *> undoButtons = findChildren<QPushButton *>( u"aiUndoToolButton"_s );
+  for ( QPushButton *undo : undoButtons )
+    undo->setEnabled( !running );
+  if ( !running )
+    closeLiveToolCard( mLiveToolCallId );
+  refreshUndoTurnButtons();
   if ( mSendButton )
   {
     mSendButton->setText( running ? u"◼"_s : u"↑"_s );
