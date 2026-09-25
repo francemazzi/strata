@@ -254,6 +254,17 @@ class APP_EXPORT QgsAiEmbeddingProviderRegistry
     static QStringList providerIds();
     static QString displayNameForProviderId( const QString &providerId );
     static bool isRemoteProviderId( const QString &providerId );
+
+    /**
+     * True once the user agreed that workspace content (file text, layer attributes and
+     * coordinates) is sent to the remote embedding provider \a providerId. Local providers
+     * need no consent.
+     */
+    static bool remoteEmbeddingConsented( const QString &providerId );
+    //! Records the user's answer about sending workspace content to \a providerId.
+    static void setRemoteEmbeddingConsent( const QString &providerId, bool consented );
+    static QString remoteEmbeddingConsentSettingsKey( const QString &providerId );
+
     static std::unique_ptr<QgsAiEmbeddingProvider> createProviderFromSettings( QObject *parent = nullptr );
     static std::unique_ptr<QgsAiEmbeddingProvider> createProvider( const QString &providerId, QObject *parent = nullptr );
 };

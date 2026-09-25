@@ -2515,6 +2515,20 @@ QString QgsAiAgentSessionManager::wrapUntrusted( const QString &sourceLabel, con
   return u"<untrusted-data source=\"%1\">\n%2\n</untrusted-data>"_s.arg( sanitizeUntrustedLabel( sourceLabel ), body );
 }
 
+QList<QgsAiWorkspaceIndex::Chunk> QgsAiAgentSessionManager::filterRetrievedChunks( const QList<QgsAiWorkspaceIndex::Chunk> &hits, float spread )
+{
+  if ( hits.isEmpty() )
+    return hits;
+  const float best = hits.first().score;
+  QList<QgsAiWorkspaceIndex::Chunk> kept;
+  for ( const QgsAiWorkspaceIndex::Chunk &hit : hits )
+  {
+    if ( hit.score >= best - spread )
+      kept.append( hit );
+  }
+  return kept;
+}
+
 QString QgsAiAgentSessionManager::formatRetrievedContext( const QList<QgsAiWorkspaceIndex::Chunk> &chunks, int byteCap )
 {
   const QgsSettings settings;
@@ -2603,7 +2617,7 @@ namespace
       return QString();
 
     QString err;
-    const QList<QgsAiWorkspaceIndex::Chunk> hits = index->search( query, QgsAiAgentSessionManager::RETRIEVAL_TOP_K, &err, feedback );
+    const QList<QgsAiWorkspaceIndex::Chunk> hits = QgsAiAgentSessionManager::filterRetrievedChunks( index->search( query, QgsAiAgentSessionManager::RETRIEVAL_TOP_K, &err, feedback ) );
     QgsMessageLog::logMessage( u"Retrieval: hits=%1 err=%2"_s.arg( hits.size() ).arg( err.isEmpty() ? u"(none)"_s : err ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
 
     if ( hits.isEmpty() )

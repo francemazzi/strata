@@ -1072,6 +1072,26 @@ QString QgsAiEmbeddingProviderRegistry::displayNameForProviderId( const QString 
   return u"Local multilingual E5 small (recommended)"_s;
 }
 
+QString QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsentSettingsKey( const QString &providerId )
+{
+  QString slug;
+  for ( const QChar ch : providerId.toLower() )
+    slug.append( ch.isLetterOrNumber() ? ch : QChar( u'_' ) );
+  return u"strata/privacy/remote_embedding_consent/%1"_s.arg( slug );
+}
+
+bool QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( const QString &providerId )
+{
+  if ( !isRemoteProviderId( providerId ) )
+    return true;
+  return QgsSettings().value( remoteEmbeddingConsentSettingsKey( providerId ), false ).toBool();
+}
+
+void QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( const QString &providerId, bool consented )
+{
+  QgsSettings().setValue( remoteEmbeddingConsentSettingsKey( providerId ), consented );
+}
+
 bool QgsAiEmbeddingProviderRegistry::isRemoteProviderId( const QString &providerId )
 {
   const QString normalized = providerId.trimmed().toLower();

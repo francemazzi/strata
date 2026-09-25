@@ -270,6 +270,8 @@ class TestQgsAiWorkspaceIndex : public QObject
     void unchangedFilesAreNotReadAgain();
     void searchSkipsLayersOutsideTheProject();
     void layersUnseenForAMonthExpire();
+    void remoteProviderNeedsConsent();
+    void projectChangeDuringAReindexKeepsProjectsApart();
 
   private:
     //! Writes a workspace file that chunkText() splits into \a chunkCount chunks.
@@ -1598,6 +1600,85 @@ void TestQgsAiWorkspaceIndex::layersUnseenForAMonthExpire()
   QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
   QVERIFY( reloaded.ensureLoaded() );
   QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+}
+
+void TestQgsAiWorkspaceIndex::remoteProviderNeedsConsent()
+{
+  class RemoteProvider : public SlowEmbeddingProvider
+  {
+    public:
+      RemoteProvider()
+        : SlowEmbeddingProvider( 0 )
+      {}
+      QString providerId() const override { return u"openai"_s; }
+      QString displayName() const override { return u"OpenAI"_s; }
+      bool isRemote() const override { return true; }
+  };
+
+  const QString consentKey = QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsentSettingsKey( u"openai"_s );
+  QgsSettings().remove( consentKey );
+  const auto restore = qScopeGuard( [consentKey]() { QgsSettings().remove( consentKey ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QFile file( QDir( root.path() ).filePath( u"notes.md"_s ) );
+  QVERIFY( file.open( QIODevice::WriteOnly ) );
+  file.write( "private notes" );
+  file.close();
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  RemoteProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  // Nothing leaves the computer until the user agrees.
+  QVERIFY( !index.embeddingProviderAvailable() );
+  QString err;
+  QVERIFY( !index.reindex( 10, &err ) );
+  QVERIFY2( err.contains( u"OpenAI"_s ) && err.contains( u"AI settings"_s ), err.toUtf8().constData() );
+  QVERIFY( index.search( u"notes"_s, 3, &err ).isEmpty() );
+  QCOMPARE( provider.calls.load(), 0 );
+  QVERIFY( !QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( u"openai"_s ) );
+  // Local providers need no consent.
+  QVERIFY( QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( QgsAiE5EmbeddingProvider::staticProviderId() ) );
+
+  QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( u"openai"_s, true );
+  QVERIFY( index.embeddingProviderAvailable() );
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QVERIFY( provider.calls > 0 );
+}
+
+void TestQgsAiWorkspaceIndex::projectChangeDuringAReindexKeepsProjectsApart()
+{
+  QTemporaryDir first;
+  QTemporaryDir second;
+  QVERIFY( first.isValid() && second.isValid() );
+  writeManyChunkFile( QDir( first.path() ).filePath( u"big.md"_s ), 5 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( first.path() );
+  SlowEmbeddingProvider provider( 150 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
+  QString err;
+  QVERIFY( QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( first.path(), 10, snapshot, &err ) );
+
+  std::thread worker( [&index, &snapshot, &first]() {
+    QString reindexError;
+    index.reindex( snapshot, first.path(), &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+  } );
+  QThread::msleep( 250 );
+  // Another project opens in another folder while the first one is still being indexed.
+  contextProvider.setWorkspaceRoot( second.path() );
+  worker.join();
+
+  // The new project's index holds nothing of the first one…
+  QVERIFY( index.ensureLoaded() );
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 0 );
+  // …which went to its own database.
+  QgsAiFileContextProvider firstProvider( first.path() );
+  QgsAiWorkspaceIndex firstIndex( &firstProvider, &provider );
+  QVERIFY( firstIndex.ensureLoaded() );
+  QCOMPARE( firstIndex.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 5 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

@@ -209,7 +209,6 @@ class TestQgsAiChatDockWidget : public QObject
     void workflowComposerExportsReportAndDryRun();
     void questionCardSendsStructuredAnswers();
     void toolLimitMessageShowsContinueButton();
-    void layerIndexingConsentPolicy();
     void settingsDialogContainsManualIndexingControls();
     void settingsSaveFailureStaysOpen();
     void settingsSessionOnlyRequiresChoice();
@@ -1262,50 +1261,6 @@ void TestQgsAiChatDockWidget::toolLimitMessageShowsContinueButton()
     QVERIFY( continueButton );
     QVERIFY( !continueButton->isEnabled() );
   }
-}
-
-void TestQgsAiChatDockWidget::layerIndexingConsentPolicy()
-{
-  // Round-trip the single key in the user's QSettings without redirecting the
-  // global path (which would break sibling tests that read other AI settings).
-  QSettings settings;
-  const QString key = u"strata/index/layer_indexing_consented"_s;
-  const QString geoAiLegacyKey = u"geoai/index/layer_indexing_consented"_s;
-  const QString qgisAiLegacyKey = u"qgis_ai/index/layer_indexing_consented"_s;
-  const QVariant savedValue = settings.value( key );
-  const QVariant savedGeoAiLegacyValue = settings.value( geoAiLegacyKey );
-  const QVariant savedQgisAiLegacyValue = settings.value( qgisAiLegacyKey );
-
-  settings.remove( key );
-  settings.remove( geoAiLegacyKey );
-  settings.remove( qgisAiLegacyKey );
-  QVERIFY( QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-
-  settings.setValue( geoAiLegacyKey, true );
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-  settings.remove( geoAiLegacyKey );
-
-  settings.setValue( qgisAiLegacyKey, true );
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-  settings.remove( qgisAiLegacyKey );
-
-  QgsAiChatDockWidget::recordLayerIndexingConsent();
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-
-  if ( savedValue.isValid() )
-    settings.setValue( key, savedValue );
-  else
-    settings.remove( key );
-
-  if ( savedGeoAiLegacyValue.isValid() )
-    settings.setValue( geoAiLegacyKey, savedGeoAiLegacyValue );
-  else
-    settings.remove( geoAiLegacyKey );
-
-  if ( savedQgisAiLegacyValue.isValid() )
-    settings.setValue( qgisAiLegacyKey, savedQgisAiLegacyValue );
-  else
-    settings.remove( qgisAiLegacyKey );
 }
 
 void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()

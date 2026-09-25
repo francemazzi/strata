@@ -3536,20 +3536,6 @@ void QgsAiChatDockWidget::setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *
   mLayerIndexCoordinator = coordinator;
 }
 
-bool QgsAiChatDockWidget::requiresLayerIndexingConsent()
-{
-  QgsSettings settings;
-  return !settingValueWithLegacy( settings, u"strata/index/layer_indexing_consented"_s, QStringList { u"geoai/index/layer_indexing_consented"_s, u"qgis_ai/index/layer_indexing_consented"_s }, false ).toBool();
-}
-
-void QgsAiChatDockWidget::recordLayerIndexingConsent()
-{
-  QgsSettings settings;
-  settings.setValue( u"strata/index/layer_indexing_consented"_s, true );
-  settings.remove( u"geoai/index/layer_indexing_consented"_s );
-  settings.remove( u"qgis_ai/index/layer_indexing_consented"_s );
-}
-
 void QgsAiChatDockWidget::setDiscoveryController( QgsAiDiscoveryController *controller )
 {
   connect( controller, &QgsAiDiscoveryController::previewReady, this, [this]( QgsAiDiscoveryPreview *preview ) {

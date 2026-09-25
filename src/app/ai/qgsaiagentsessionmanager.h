@@ -205,8 +205,16 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
 
     //! Maximum number of chunks injected into the system prompt for a single turn.
     static constexpr int RETRIEVAL_TOP_K = 8;
-    //! Hard byte cap for the "Retrieved context" block appended to the system prompt.
-    static constexpr int RETRIEVAL_BYTE_CAP = 64 * 1024;
+    //! Hard byte cap for the "Retrieved context" block appended to the system prompt, every turn.
+    static constexpr int RETRIEVAL_BYTE_CAP = 16 * 1024;
+    //! Retrieved chunks scoring more than this below the best one are left out.
+    static constexpr float RETRIEVAL_SCORE_SPREAD = 0.1f;
+
+    /**
+     * Keeps the \a hits (sorted best first) within \a spread of the best score: when a chunk
+     * matches the question well, weaker ones are noise that costs tokens every turn.
+     */
+    static QList<QgsAiWorkspaceIndex::Chunk> filterRetrievedChunks( const QList<QgsAiWorkspaceIndex::Chunk> &hits, float spread = RETRIEVAL_SCORE_SPREAD );
 
     /**
      * Renders \a chunks as a textual block ready to be appended to the system prompt.

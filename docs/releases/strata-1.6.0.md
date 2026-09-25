@@ -63,3 +63,10 @@ the Windows reference machine measurements are still to be done.
   row count and sample rows; features, geometry types and extent; project layers, CRS and
   layouts, without credentials) instead of their raw text; CSV files larger than 256 KB are
   summarized from their start instead of skipped. The index is rebuilt once after updating.
+- Workspace content reaches a remote embedding service (OpenAI, OpenRouter, Strata Cloud)
+  only after the user agrees, once per service, in a dialog that lists what is sent; until
+  then indexing and search with that service do nothing. With the local model nothing
+  leaves the computer and no question is asked (the layer indexing question used to appear
+  on OK in the AI settings, after the layers were already processed). Each turn of chat
+  adds at most 16 KB of retrieved context, and matches much weaker than the best are left
+  out.

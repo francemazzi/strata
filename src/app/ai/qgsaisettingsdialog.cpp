@@ -3163,6 +3163,37 @@ bool QgsAiSettingsDialog::applySettings()
     if ( !mTrustRootForCheckbox.isEmpty() )
       QgsAiWorkspaceTrust::setState( mTrustRootForCheckbox, mTrustWorkspace->isChecked() ? QgsAiWorkspaceTrust::State::Trusted : QgsAiWorkspaceTrust::State::Untrusted );
 
+    // Workspace content goes to a remote embedding service only with the user's consent, asked
+    // once per service. Declining keeps indexing on this computer.
+    const QString embeddingProviderId = mEmbeddingProvider->currentData().toString();
+    if ( QgsAiEmbeddingProviderRegistry::isRemoteProviderId( embeddingProviderId ) && !QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( embeddingProviderId ) )
+    {
+      const QString service = QgsAiEmbeddingProviderRegistry::displayNameForProviderId( embeddingProviderId );
+      const bool agreed = QMessageBox::question(
+                            this,
+                            tr( "Send workspace content to %1?" ).arg( service ),
+                            tr(
+                              "Indexing with %1 sends to that service:\n"
+                              "• the text of the files in the AI workspace (up to 500 files: notes, tables, JSON, SQL, project files);\n"
+                              "• sampled attribute values and bounding boxes of the project layers;\n"
+                              "• your chat questions, to search the index.\n\n"
+                              "The index itself stays on this computer. The local model sends nothing.\n\n"
+                              "Send workspace content to %1?"
+                            )
+                              .arg( service ),
+                            QMessageBox::Yes | QMessageBox::No,
+                            QMessageBox::No
+                          )
+                          == QMessageBox::Yes;
+      QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( embeddingProviderId, agreed );
+      if ( !agreed )
+      {
+        const int local = mEmbeddingProvider->findData( QgsAiE5EmbeddingProvider::staticProviderId() );
+        if ( local >= 0 )
+          mEmbeddingProvider->setCurrentIndex( local );
+      }
+    }
+
     QgsAiEmbeddingProviderRegistry::setConfiguredProviderId( mEmbeddingProvider->currentData().toString() );
     if ( QgsAiEmbeddingProviderRegistry::isRemoteProviderId( mEmbeddingProvider->currentData().toString() ) )
     {
@@ -3214,30 +3245,6 @@ bool QgsAiSettingsDialog::applySettings()
     {
       errorMessages += tr( "Layer indexing requires the selected embedding provider to be available." ) + '\n';
       mEnableLayerIndexing->setChecked( false );
-    }
-
-    // Gate first-time layer indexing so users explicitly acknowledge the local
-    // background work and local cache before it starts.
-    if ( layerIndexingChoice && QgsAiChatDockWidget::requiresLayerIndexingConsent() )
-    {
-      const auto choice = QMessageBox::question(
-        this,
-        tr( "Enable layer indexing" ),
-        QgsAiEmbeddingProviderRegistry::isRemoteProviderId( mEmbeddingProvider->currentData().toString() )
-          ? tr( "Enabling layer indexing means Strata will send sampled layer attributes and bounding boxes to the selected remote embedding provider and store the resulting index locally.\n\nProceed?" )
-          : tr( "Enabling layer indexing means Strata will process sampled layer attributes and bounding boxes on this computer and store the resulting index locally.\n\nProceed?" ),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No
-      );
-      if ( choice != QMessageBox::Yes )
-      {
-        layerIndexingChoice = false;
-        mEnableLayerIndexing->setChecked( false );
-      }
-      else
-      {
-        QgsAiChatDockWidget::recordLayerIndexingConsent();
-      }
     }
 
     QgsSettings layerSettings;

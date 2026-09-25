@@ -63,17 +63,6 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
   public slots:
     void rebuildHistoryMenu();
 
-  public:
-    /**
-     * Returns true when the user has not yet consented to layer indexing
-     * (i.e. attributes + bounding boxes being processed for retrieval).
-     * Callers must surface a confirmation dialog before flipping the toggle on.
-     */
-    static bool requiresLayerIndexingConsent();
-
-    //! Persists the user's explicit acceptance so the consent dialog never re-appears.
-    static void recordLayerIndexingConsent();
-
   protected:
     bool eventFilter( QObject *watched, QEvent *event ) override;
     void showEvent( QShowEvent *event ) override;

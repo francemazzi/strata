@@ -98,8 +98,23 @@ namespace
     return v;
   }
 
+  //! Why workspace content may not go to \a provider, or an empty string if it may.
+  QString indexRemoteConsentMissing( const QgsAiEmbeddingProvider *provider )
+  {
+    if ( !provider || !provider->isRemote() || QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( provider->providerId() ) )
+      return QString();
+    return u"Indexing with %1 sends file text, layer attributes and coordinates to that service. Agree to it in the AI settings (Indexing) first."_s.arg( provider->displayName() );
+  }
+
   bool ensureEmbeddingProviderAvailable( QgsAiEmbeddingProvider *provider, QString *errorMessage )
   {
+    // Nothing leaves the computer for a remote embedding service without the user's consent.
+    if ( const QString consentMissing = indexRemoteConsentMissing( provider ); !consentMissing.isEmpty() )
+    {
+      if ( errorMessage )
+        *errorMessage = consentMissing;
+      return false;
+    }
     QString providerError;
     if ( provider && provider->isAvailable( &providerError ) )
       return true;
@@ -557,10 +572,11 @@ bool QgsAiWorkspaceIndex::embeddingProviderAvailable() const
 {
   // Cheap and never blocking: timers and the interface thread call this. Providers must
   // answer without loading models or waiting on the network (see QgsAiE5EmbeddingProvider).
+  // A remote provider the user did not agree to send content to counts as unavailable.
   const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
   const QgsAiPerfScope perf( u"index"_s, u"provider_available"_s, 5 );
   QString ignored;
-  return provider && provider->isAvailable( &ignored );
+  return provider && indexRemoteConsentMissing( provider.get() ).isEmpty() && provider->isAvailable( &ignored );
 }
 
 void QgsAiWorkspaceIndex::onWorkspaceRootChanged()

@@ -303,11 +303,13 @@ namespace
     QJsonArray calls;
     for ( const QString &toolName : toolNames )
     {
-      calls.append( QJsonObject {
-        { u"id"_s, u"call_%1"_s.arg( toolName ) },
-        { u"type"_s, u"function"_s },
-        { u"function"_s, QJsonObject { { u"name"_s, toolName }, { u"arguments"_s, u"{}"_s } } },
-      } );
+      calls.append(
+        QJsonObject {
+          { u"id"_s, u"call_%1"_s.arg( toolName ) },
+          { u"type"_s, u"function"_s },
+          { u"function"_s, QJsonObject { { u"name"_s, toolName }, { u"arguments"_s, u"{}"_s } } },
+        }
+      );
     }
     const QJsonObject message { { u"role"_s, u"assistant"_s }, { u"content"_s, QJsonValue() }, { u"tool_calls"_s, calls } };
     const QJsonObject choice { { u"message"_s, message }, { u"finish_reason"_s, u"tool_calls"_s } };
@@ -479,6 +481,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void unsavedProjectFirstSavePromotesCurrentChat();
     void formatRetrievedContextRendersFileAndLayerHeaders();
     void formatRetrievedContextTruncatesOverBudget();
+    void retrievalLeavesOutWeakMatches();
     void retrievalSkippedWithoutWorkspaceIndex();
     void asyncRetrievalPopulatesCacheAndDispatches();
     void retrievalFailureDoesNotSwitchProviders();
@@ -1567,8 +1570,9 @@ void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
   // A provider error delivered inside a 200 stream after a tool round must reach the user,
   // not be replaced by a local summary of the tools.
   QgsAiTestLoopbackServer server;
-  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s } ) )
-                   << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}\n\n" ), QByteArrayLiteral( "data: [DONE]\n\n" ) } );
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s } ) )
+    << QgsAiTestLoopbackServer::sseResponse( { QByteArrayLiteral( "data: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}\n\n" ), QByteArrayLiteral( "data: [DONE]\n\n" ) } );
   QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
 
   QgsAiToolRegistry registry;
@@ -1612,8 +1616,9 @@ void TestQgsAiAgentSessionManager::modeSwitchDuringToolKeepsRoundApproval()
   } );
 
   QgsAiTestLoopbackServer server;
-  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s, u"approval_tool"_s } ) )
-                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"echo"_s, u"approval_tool"_s } ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
   QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
 
   QgsAiAgentSessionManager *managerPtr = nullptr;
@@ -1681,8 +1686,9 @@ void TestQgsAiAgentSessionManager::sendWhileRunningDoesNotTouchHistory()
   } );
 
   QgsAiTestLoopbackServer server;
-  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"busy_tool"_s } ) )
-                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"busy_tool"_s } ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
   QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
 
   QgsAiAgentSessionManager *managerPtr = nullptr;
@@ -3388,6 +3394,23 @@ void TestQgsAiAgentSessionManager::unresolvedPlanToolsNormalizesNearMissNames()
 
   // with an empty allowlist, real tool requests stay blocked but pseudo-tools don't
   QCOMPARE( QgsAiAgentSessionManager::unresolvedPlanTools( { u"add_layer"_s, u"optional_user_input"_s }, QStringList() ), QStringList { u"add_layer"_s } );
+}
+
+void TestQgsAiAgentSessionManager::retrievalLeavesOutWeakMatches()
+{
+  QList<QgsAiWorkspaceIndex::Chunk> hits;
+  for ( const float score : { 0.91f, 0.88f, 0.82f, 0.79f, 0.60f } )
+  {
+    QgsAiWorkspaceIndex::Chunk chunk;
+    chunk.text = QString::number( score );
+    chunk.score = score;
+    hits.append( chunk );
+  }
+  const QList<QgsAiWorkspaceIndex::Chunk> kept = QgsAiAgentSessionManager::filterRetrievedChunks( hits );
+  QCOMPARE( kept.size(), 3 );
+  QCOMPARE( kept.last().text, u"0.82"_s );
+  QVERIFY( QgsAiAgentSessionManager::filterRetrievedChunks( {} ).isEmpty() );
+  QVERIFY( QgsAiAgentSessionManager::RETRIEVAL_BYTE_CAP <= 16 * 1024 );
 }
 
 QGSTEST_MAIN( TestQgsAiAgentSessionManager )
