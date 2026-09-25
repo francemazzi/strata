@@ -19,14 +19,20 @@
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/tools/qgsaiindextools.h"
 #include "qgsapplication.h"
+#include "qgsfeature.h"
+#include "qgsfeatureiterator.h"
 #include "qgsfeedback.h"
+#include "qgsgeometry.h"
+#include "qgspointxy.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
+#include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
 
 #include <QByteArray>
+#include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -161,11 +167,13 @@ namespace
       bool embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage = nullptr, int maxBatch = 64 ) override
       {
         ++calls;
+        embeddedTexts += static_cast<int>( texts.size() );
         QThread::msleep( mDelayMs );
         return FakeEmbeddingProvider::embed( texts, out, errorMessage, maxBatch );
       }
 
       std::atomic_int calls { 0 };
+      std::atomic_int embeddedTexts { 0 };
 
     private:
       int mDelayMs = 0;
@@ -251,6 +259,11 @@ class TestQgsAiWorkspaceIndex : public QObject
     void layerRemovalsReachTheDatabaseTogether();
     void staleDatabasesAreRemoved();
     void clearRemovesTheWriteAheadLog();
+    void unchangedLayerIsNotEmbeddedAgain();
+    void editedLayerReusesUnchangedChunks();
+    void unchangedFilesAreNotReadAgain();
+    void searchSkipsLayersOutsideTheProject();
+    void layersUnseenForAMonthExpire();
 
   private:
     //! Writes a workspace file that chunkText() splits into \a chunkCount chunks.
@@ -1226,6 +1239,238 @@ void TestQgsAiWorkspaceIndex::clearRemovesTheWriteAheadLog()
   QVERIFY( !QFileInfo::exists( path + u"-wal"_s ) );
   QVERIFY( !QFileInfo::exists( path + u"-shm"_s ) );
   QCOMPARE( index.databaseSizeBytes(), 0 );
+}
+
+void TestQgsAiWorkspaceIndex::unchangedLayerIsNotEmbeddedAgain()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  for ( const QString &ext : { u".shp"_s, u".shx"_s, u".dbf"_s, u".prj"_s } )
+    QFile::copy( QStringLiteral( TEST_DATA_DIR ) + u"/points"_s + ext, root.path() + u"/points"_s + ext );
+  QgsVectorLayer *layer = new QgsVectorLayer( root.path() + u"/points.shp"_s, u"points"_s, u"ogr"_s );
+  QVERIFY( layer->isValid() );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  const auto reindex = [&index, layer]() {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QString err;
+    const bool ok = index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) && index.reindexLayerSnapshot( snapshot, &err );
+    if ( !ok )
+      qWarning() << err;
+    return ok;
+  };
+
+  QVERIFY( reindex() );
+  const int firstTexts = provider.embeddedTexts;
+  QVERIFY( firstTexts > 0 );
+  const int chunkCount = static_cast<int>( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size() );
+
+  // Same files, same settings: nothing is read or embedded.
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+
+  // Another index of the same workspace (Strata started again) knows the layer too.
+  QgsAiWorkspaceIndex reopened( &contextProvider, &provider );
+  QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+  QString err;
+  QVERIFY( reopened.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) );
+  QVERIFY2( reopened.reindexLayerSnapshot( snapshot, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+  QCOMPARE( reopened.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size(), chunkCount );
+
+  // A newer .dbf (attributes saved) means reading the layer again; its unchanged chunks keep their embeddings.
+  QFile dbf( root.path() + u"/points.dbf"_s );
+  QVERIFY( dbf.open( QIODevice::ReadWrite ) );
+  QVERIFY( dbf.setFileTime( QDateTime::currentDateTime().addSecs( 60 ), QFileDevice::FileModificationTime ) );
+  dbf.close();
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size(), chunkCount );
+}
+
+void TestQgsAiWorkspaceIndex::editedLayerReusesUnchangedChunks()
+{
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=name:string"_s, u"memory points"_s, u"memory"_s );
+  QgsFeatureList features;
+  for ( int i = 0; i < 150; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, u"feature number %1 with a reasonably long descriptive name"_s.arg( i ) );
+    feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( i, i ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  const auto reindex = [&index, layer]() {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QString err;
+    return index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) && index.reindexLayerSnapshot( snapshot, &err );
+  };
+
+  QVERIFY( reindex() );
+  const int firstTexts = provider.embeddedTexts;
+  QVERIFY( firstTexts > 2 );
+
+  // A memory layer has no file to compare: it is read again, but only new text is embedded.
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+
+  // Editing the last feature changes its chunk only.
+  QgsFeature last;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( last ) )
+    ;
+  QVERIFY( layer->dataProvider()->changeAttributeValues( { { last.id(), { { 0, u"renamed feature"_s } } } } ) );
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts + 1 );
+}
+
+void TestQgsAiWorkspaceIndex::unchangedFilesAreNotReadAgain()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QString notesPath = QDir( root.path() ).filePath( u"notes.md"_s );
+  const QString otherPath = QDir( root.path() ).filePath( u"other.md"_s );
+  const auto writeText = []( const QString &path, const QString &text ) {
+    QFile file( path );
+    QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    file.write( text.toUtf8() );
+  };
+  writeText( notesPath, u"original notes about parcels"_s );
+  writeText( otherPath, u"other notes about roads"_s );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 2 );
+
+  // New content with the old modification time: the file is not read, so the old text stays.
+  const QDateTime modified = QFileInfo( notesPath ).lastModified();
+  writeText( notesPath, u"rewritten without touching the time"_s );
+  {
+    QFile file( notesPath );
+    QVERIFY( file.open( QIODevice::ReadWrite ) );
+    QVERIFY( file.setFileTime( modified, QFileDevice::FileModificationTime ) );
+  }
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 2 );
+  const auto textOf = [&index]( const QString &relativePath ) {
+    for ( const QgsAiWorkspaceIndex::Chunk &chunk : index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ) )
+    {
+      if ( chunk.relativePath == relativePath )
+        return chunk.text;
+    }
+    return QString();
+  };
+  QCOMPARE( textOf( u"notes.md"_s ), u"original notes about parcels"_s );
+
+  // A newer time: read again. The removed file leaves the index; the other one is untouched.
+  {
+    QFile file( notesPath );
+    QVERIFY( file.open( QIODevice::ReadWrite ) );
+    QVERIFY( file.setFileTime( modified.addSecs( 60 ), QFileDevice::FileModificationTime ) );
+  }
+  QVERIFY( QFile::remove( otherPath ) );
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 3 );
+  QCOMPARE( textOf( u"notes.md"_s ), u"rewritten without touching the time"_s );
+  QVERIFY( textOf( u"other.md"_s ).isEmpty() );
+
+  // What reached the database matches.
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  const QList<QgsAiWorkspaceIndex::Chunk> stored = reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles );
+  QCOMPARE( stored.size(), 1 );
+  QCOMPARE( stored.first().text, u"rewritten without touching the time"_s );
+}
+
+void TestQgsAiWorkspaceIndex::searchSkipsLayersOutsideTheProject()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY( index.persistChunks(
+    { makeLayerChunk( u"open_layer"_s, u"Open"_s, 0, 1, 0, u"parcels"_s, QByteArray() ),
+      makeLayerChunk( u"closed_layer"_s, u"Closed"_s, 0, 1, 0, u"parcels"_s, QByteArray() ),
+      makeFileChunk( u"notes.md"_s, 0, u"parcels"_s ) },
+    { dummyEmbedding( 1.0f ), dummyEmbedding( 1.0f ), dummyEmbedding( 1.0f ) },
+    QgsAiWorkspaceIndex::ReplaceScope::All,
+    QString(),
+    &err
+  ) );
+
+  QCOMPARE( index.search( u"parcels"_s, 10, &err ).size(), 3 );
+
+  index.setActiveLayerIds( { u"open_layer"_s } );
+  const QList<QgsAiWorkspaceIndex::Chunk> hits = index.search( u"parcels"_s, 10, &err );
+  QCOMPARE( hits.size(), 2 );
+  for ( const QgsAiWorkspaceIndex::Chunk &hit : hits )
+    QVERIFY( hit.layerId != "closed_layer"_L1 );
+  // The closed project's layer is still indexed, for when it opens again.
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, u"closed_layer"_s ).size(), 1 );
+}
+
+void TestQgsAiWorkspaceIndex::layersUnseenForAMonthExpire()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=name:string"_s, u"memory points"_s, u"memory"_s );
+  QgsFeature feature( layer->fields() );
+  feature.setAttribute( 0, u"a"_s );
+  feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 1, 1 ) ) );
+  QVERIFY( layer->dataProvider()->addFeature( feature ) );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QString path;
+  {
+    QgsAiWorkspaceIndex index( &contextProvider, &provider );
+    QString err;
+    QVERIFY2(
+      index.persistChunks( { makeLayerChunk( u"old_layer"_s, u"Old"_s, 0, 1, 0, u"old"_s, QByteArray() ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ),
+      err.toUtf8().constData()
+    );
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QVERIFY( index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) );
+    QVERIFY2( index.reindexLayerSnapshot( snapshot, &err ), err.toUtf8().constData() );
+    path = index.databasePath();
+  }
+
+  // Age both layers: the one with a recorded sighting through layer_state, the other through its rows.
+  const QString connection = u"test_age_layers"_s;
+  {
+    QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+    db.setDatabaseName( path );
+    QVERIFY( db.open() );
+    QSqlQuery q( db );
+    const qint64 old = QDateTime::currentDateTimeUtc().addDays( -( QgsAiWorkspaceIndex::STALE_DATABASE_DAYS + 1 ) ).toMSecsSinceEpoch();
+    QVERIFY( q.exec( u"UPDATE chunks SET last_sync = %1"_s.arg( old ) ) );
+    QVERIFY( q.exec( u"INSERT OR REPLACE INTO layer_state (layer_id, fingerprint, last_seen) VALUES ('%1', 'x', %2)"_s.arg( layer->id() ).arg( old ) ) );
+    db.close();
+  }
+  QSqlDatabase::removeDatabase( connection );
+
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

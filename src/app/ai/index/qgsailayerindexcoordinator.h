@@ -100,6 +100,8 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     void scheduleDirty( const QString &layerId );
     void startDebounceTimer();
     void scheduleNextFlush();
+    //! Tells the index which layers are open, so search leaves out the others.
+    void publishActiveLayers();
 
     QgsAiWorkspaceIndex *mIndex = nullptr;
     QgsProject *mProject = nullptr;
@@ -107,6 +109,12 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     QTimer mDebounceTimer;
     QPointer<QgsTask> mRunningTask;
     QString mRunningLayerId;
+    //! Layers of the open project.
+    QSet<QString> mActiveLayerIds;
+    //! The project is being cleared: its layers leave, but their chunks stay for the next time it opens.
+    bool mProjectClosing = false;
+    //! Layers the user removed while their task was running, whose chunks it may still write.
+    QSet<QString> mRemovedWhileRunning;
     bool mEnabled = false;
     bool mShutdown = false;
     bool mUseBulkDebounce = false;

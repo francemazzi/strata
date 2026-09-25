@@ -54,6 +54,10 @@ struct APP_EXPORT QgsAiPreparedLayer
     bool includeWkt = false;
     //! Feature source snapshot, null for metadata-only layers.
     std::shared_ptr<QgsAbstractFeatureSource> source;
+    //! What prepare() read that shapes the chunks; QgsAiLayerChunker::fingerprint() adds the files.
+    QString fingerprintBase;
+    //! Local file the features come from. Empty for memory, database and service layers.
+    QString sourceFilePath;
 };
 
 /**
@@ -89,10 +93,22 @@ class APP_EXPORT QgsAiLayerChunker
     //! True if \a layer reads its data from a remote service or database.
     static bool isRemoteLayer( const QgsMapLayer *layer );
 
+    /**
+     * Fingerprint of a prepared layer: while it stays the same, chunk() builds the same chunks.
+     * It covers the modification time and size of the layer's files, sidecars included (.dbf,
+     * .gpkg-wal…), so it reads the file system: call it on a worker thread. Empty when changes
+     * cannot be detected without reading the features (memory and database layers).
+     */
+    static QString fingerprint( const QgsAiPreparedLayer &prepared );
+
     //! Convenience for prepare() followed by chunk(), on the calling thread.
     static QList<QgsAiWorkspaceIndex::Chunk> chunkVector( QgsVectorLayer *layer );
     //! Convenience for prepare() followed by chunk(), on the calling thread.
     static QList<QgsAiWorkspaceIndex::Chunk> chunkRaster( QgsRasterLayer *layer );
+
+  private:
+    //! prepare() without the fingerprint.
+    static QgsAiPreparedLayer prepareUnfingerprinted( QgsMapLayer *layer );
 };
 
 #endif // QGSAILAYERCHUNKER_H

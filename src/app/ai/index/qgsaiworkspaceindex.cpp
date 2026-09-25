@@ -334,6 +334,16 @@ namespace
     return db;
   }
 
+  //! Layers stay indexed this long after they were last seen in a project.
+  constexpr qint64 INDEX_LAYER_RETENTION_MS = static_cast<qint64>( QgsAiWorkspaceIndex::STALE_DATABASE_DAYS ) * 24 * 3600 * 1000;
+
+  //! Fingerprint and last sighting of each indexed layer, so an unchanged layer is not read again.
+  bool indexEnsureLayerStateTable( QSqlDatabase &db )
+  {
+    QSqlQuery q( db );
+    return q.exec( u"CREATE TABLE IF NOT EXISTS layer_state (layer_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, last_seen INTEGER NOT NULL)"_s );
+  }
+
   //! Deletes the database file at \a path together with its write-ahead log files.
   void indexRemoveDatabaseFiles( const QString &path )
   {
@@ -488,6 +498,7 @@ void QgsAiWorkspaceIndex::setEmbeddingProvider( std::shared_ptr<QgsAiEmbeddingPr
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     mCache.clear();
+    mLayerFingerprints.clear();
     mCacheRoot.clear();
     mLastSync = QDateTime();
     mLoaded = false;
@@ -517,6 +528,7 @@ void QgsAiWorkspaceIndex::onWorkspaceRootChanged()
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     mCache.clear();
+    mLayerFingerprints.clear();
     mCacheRoot.clear();
     mLastSync = QDateTime();
     mLoaded = false;
@@ -621,6 +633,7 @@ bool QgsAiWorkspaceIndex::ensureLoaded()
     // Treat missing/corrupt DB as empty rather than fatal.
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     mCache.clear();
+    mLayerFingerprints.clear();
     mCacheRoot = workspaceRoot();
     mLastSync = QDateTime();
     mLoaded = true;
@@ -716,12 +729,14 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
   const QString path = dbPathForRoot( root, indexDatabaseProviderId( provider.get() ) );
 
   QList<CachedChunk> loadedChunks;
+  QHash<QString, QString> loadedFingerprints;
   qint64 maxSync = 0;
   const auto commit = [&]() {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     if ( QDir::cleanPath( root ) != QDir::cleanPath( workspaceRoot() ) )
       return; // The workspace changed while loading: the next load reads the new one.
     mCache = loadedChunks;
+    mLayerFingerprints = loadedFingerprints;
     mCacheRoot = root;
     mLastSync = maxSync > 0 ? QDateTime::fromMSecsSinceEpoch( maxSync ) : QDateTime();
     mLoaded = true;
@@ -788,6 +803,37 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
     }
   }
 
+  // Layers stay indexed after their project closes, so reopening it costs nothing; those not
+  // seen in any project for a month are dropped.
+  indexEnsureLayerStateTable( db );
+  {
+    const qint64 cutoff = QDateTime::currentMSecsSinceEpoch() - INDEX_LAYER_RETENTION_MS;
+    QSqlQuery expire( db );
+    db.transaction();
+    expire.prepare(
+      u"DELETE FROM chunks WHERE source_type = 'layer' AND (layer_id IN (SELECT layer_id FROM layer_state WHERE last_seen < ?) OR (last_sync < ? AND layer_id NOT IN (SELECT layer_id FROM layer_state)))"_s
+    );
+    expire.addBindValue( cutoff );
+    expire.addBindValue( cutoff );
+    expire.exec();
+    const int expiredRows = expire.numRowsAffected();
+    QSqlQuery expireState( db );
+    expireState.prepare( u"DELETE FROM layer_state WHERE last_seen < ?"_s );
+    expireState.addBindValue( cutoff );
+    expireState.exec();
+    db.commit();
+    if ( expiredRows > 0 )
+      QgsMessageLog::logMessage( u"Workspace index: dropped %1 chunks of layers not seen for %2 days."_s.arg( expiredRows ).arg( STALE_DATABASE_DAYS ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+  }
+  {
+    QSqlQuery states( db );
+    if ( states.exec( u"SELECT layer_id, fingerprint FROM layer_state"_s ) )
+    {
+      while ( states.next() )
+        loadedFingerprints.insert( states.value( 0 ).toString(), states.value( 1 ).toString() );
+    }
+  }
+
   QSqlQuery q( db );
   if ( !q.exec(
          u"SELECT source_type, relative_path, layer_id, feature_id_min, feature_id_max, chunk_index, text, wkt_blob, embedding, last_sync, provider_id, model_id, model_revision, embedding_dimension, content_hash, source_mtime FROM chunks ORDER BY id"_s
@@ -828,7 +874,16 @@ bool QgsAiWorkspaceIndex::loadAll( QString *errorMessage )
   return true;
 }
 
-bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, const QString &databaseProviderId, QString *errorMessage )
+bool QgsAiWorkspaceIndex::persistAll(
+  const QList<CachedChunk> &chunks,
+  ReplaceScope scope,
+  const QString &scopedLayerId,
+  const QString &workspaceRoot,
+  const QString &databaseProviderId,
+  QString *errorMessage,
+  const QHash<QString, QString> &layerFingerprints,
+  const QStringList *replacedFilePaths
+)
 {
   // Runs without mMutex: the database write can take a while, and each thread has its own
   // SQLite connection. Callers update the cache under mMutex afterwards.
@@ -869,6 +924,7 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
   q.exec( u"CREATE INDEX IF NOT EXISTS idx_chunks_layer ON chunks(layer_id) WHERE layer_id IS NOT NULL"_s );
   q.exec( u"CREATE INDEX IF NOT EXISTS idx_chunks_source_hash ON chunks(source_type, relative_path, chunk_index, content_hash)"_s );
   q.exec( u"PRAGMA user_version = %1"_s.arg( SCHEMA_VERSION ) );
+  indexEnsureLayerStateTable( db );
 
   // Encrypt-at-rest when the data key is available; otherwise warn once and
   // persist plaintext (or refuse when the user requires encryption).
@@ -898,12 +954,27 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
   {
     case ReplaceScope::All:
       q.exec( u"DELETE FROM chunks"_s );
+      q.exec( u"DELETE FROM layer_state"_s );
       break;
     case ReplaceScope::AllFiles:
-      q.exec( u"DELETE FROM chunks WHERE source_type = 'file'"_s );
+      if ( replacedFilePaths )
+      {
+        QSqlQuery del( db );
+        del.prepare( u"DELETE FROM chunks WHERE source_type = 'file' AND relative_path = ?"_s );
+        for ( const QString &path : *replacedFilePaths )
+        {
+          del.addBindValue( path );
+          del.exec();
+        }
+      }
+      else
+      {
+        q.exec( u"DELETE FROM chunks WHERE source_type = 'file'"_s );
+      }
       break;
     case ReplaceScope::AllLayers:
       q.exec( u"DELETE FROM chunks WHERE source_type = 'layer'"_s );
+      q.exec( u"DELETE FROM layer_state"_s );
       break;
     case ReplaceScope::SingleLayer:
     {
@@ -911,6 +982,10 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
       del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
       del.addBindValue( scopedLayerId );
       del.exec();
+      QSqlQuery delState( db );
+      delState.prepare( u"DELETE FROM layer_state WHERE layer_id = ?"_s );
+      delState.addBindValue( scopedLayerId );
+      delState.exec();
       break;
     }
   }
@@ -970,6 +1045,20 @@ bool QgsAiWorkspaceIndex::persistAll( const QList<CachedChunk> &chunks, ReplaceS
       return false;
     }
   }
+  if ( !layerFingerprints.isEmpty() )
+  {
+    QSqlQuery state( db );
+    state.prepare( u"INSERT OR REPLACE INTO layer_state (layer_id, fingerprint, last_seen) VALUES (?, ?, ?)"_s );
+    for ( auto it = layerFingerprints.constBegin(); it != layerFingerprints.constEnd(); ++it )
+    {
+      if ( it.value().isEmpty() )
+        continue;
+      state.addBindValue( it.key() );
+      state.addBindValue( it.value() );
+      state.addBindValue( nowMs );
+      state.exec();
+    }
+  }
   if ( !db.commit() )
   {
     if ( errorMessage )
@@ -1012,27 +1101,42 @@ bool QgsAiWorkspaceIndex::persistChunks(
     built.append( cc );
   }
 
+  return storeChunks( built, scope, scopedLayerId, root, indexDatabaseProviderId( provider.get() ), {}, errorMessage );
+}
+
+bool QgsAiWorkspaceIndex::storeChunks(
+  const QList<CachedChunk> &built,
+  ReplaceScope scope,
+  const QString &scopedLayerId,
+  const QString &workspaceRoot,
+  const QString &databaseProviderId,
+  const QHash<QString, QString> &layerFingerprints,
+  QString *errorMessage
+)
+{
   {
     const QgsAiPerfScope persistPerf( u"index_task"_s, u"persist_chunks"_s );
-    if ( !persistAll( built, scope, scopedLayerId, root, indexDatabaseProviderId( provider.get() ), errorMessage ) )
+    if ( !persistAll( built, scope, scopedLayerId, workspaceRoot, databaseProviderId, errorMessage, layerFingerprints ) )
       return false;
   }
 
   // Reflect the change in the in-memory cache without re-reading the DB, unless the cache
   // now holds another workspace (the project changed while the chunks were computed).
   const QMutexLocker<QRecursiveMutex> locker( &mMutex );
-  if ( !cacheHoldsRoot( root ) )
+  if ( !cacheHoldsRoot( workspaceRoot ) )
     return true;
   switch ( scope )
   {
     case ReplaceScope::All:
       mCache.clear();
+      mLayerFingerprints.clear();
       break;
     case ReplaceScope::AllFiles:
       mCache.erase( std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ); } ), mCache.end() );
       break;
     case ReplaceScope::AllLayers:
       mCache.erase( std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ); } ), mCache.end() );
+      mLayerFingerprints.clear();
       break;
     case ReplaceScope::SingleLayer:
       mCache.erase(
@@ -1041,13 +1145,48 @@ bool QgsAiWorkspaceIndex::persistChunks(
         ),
         mCache.end()
       );
+      mLayerFingerprints.remove( scopedLayerId );
       break;
   }
   mCache.append( built );
+  for ( auto it = layerFingerprints.constBegin(); it != layerFingerprints.constEnd(); ++it )
+  {
+    if ( !it.value().isEmpty() )
+      mLayerFingerprints.insert( it.key(), it.value() );
+  }
   mLastSync = QDateTime::currentDateTimeUtc();
   mLoaded = true;
   updateStatusSnapshot();
   return true;
+}
+
+void QgsAiWorkspaceIndex::touchLayers( const QStringList &layerIds, const QString &workspaceRoot, const QString &databaseProviderId )
+{
+  const QString path = dbPathForRoot( workspaceRoot, databaseProviderId );
+  if ( path.isEmpty() || layerIds.isEmpty() )
+    return;
+  QString error;
+  QSqlDatabase db = indexOpenDatabase( connectionName(), path, &error );
+  if ( !db.isOpen() )
+    return;
+  indexEnsureLayerStateTable( db );
+  db.transaction();
+  QSqlQuery touch( db );
+  touch.prepare( u"UPDATE layer_state SET last_seen = ? WHERE layer_id = ?"_s );
+  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+  for ( const QString &layerId : layerIds )
+  {
+    touch.addBindValue( nowMs );
+    touch.addBindValue( layerId );
+    touch.exec();
+  }
+  db.commit();
+}
+
+void QgsAiWorkspaceIndex::setActiveLayerIds( const QSet<QString> &layerIds )
+{
+  const QMutexLocker locker( &mActiveLayersMutex );
+  mActiveLayerIds = layerIds;
 }
 
 bool QgsAiWorkspaceIndex::removeLayer( const QString &layerId, QString *errorMessage )
@@ -1065,6 +1204,7 @@ bool QgsAiWorkspaceIndex::removeLayer( const QString &layerId, QString *errorMes
       std::remove_if( mCache.begin(), mCache.end(), [&layerId]( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ) && c.chunk.layerId == layerId; } ),
       mCache.end()
     );
+    mLayerFingerprints.remove( layerId );
     updateStatusSnapshot();
   }
 
@@ -1103,14 +1243,19 @@ void QgsAiWorkspaceIndex::flushLayerRemovals()
       QgsMessageLog::logMessage( u"Layer index: cannot open %1 to remove layers: %2"_s.arg( it.key(), error ), u"AI/Index"_s, Qgis::MessageLevel::Warning, false );
       continue;
     }
+    indexEnsureLayerStateTable( db );
     db.transaction();
     QSqlQuery del( db );
     del.prepare( u"DELETE FROM chunks WHERE source_type = 'layer' AND layer_id = ?"_s );
+    QSqlQuery delState( db );
+    delState.prepare( u"DELETE FROM layer_state WHERE layer_id = ?"_s );
     bool ok = true;
     for ( const QString &layerId : it.value() )
     {
       del.addBindValue( layerId );
       ok = del.exec() && ok;
+      delState.addBindValue( layerId );
+      ok = delState.exec() && ok;
     }
     if ( !ok || !db.commit() )
     {
@@ -1236,6 +1381,8 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
 
   ensureLoaded();
 
+  // The index already holds these file chunks for this provider, by file and by chunk position.
+  QHash<QString, QList<CachedChunk>> cachedFileChunks;
   QHash<QString, CachedChunk> reusableFileChunks;
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
@@ -1246,6 +1393,7 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
         if ( ( cached.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || cached.chunk.sourceType.isEmpty() )
              && metadataMatchesProvider( cached.providerId, cached.modelId, cached.modelRevision, cached.embeddingDimension, activeProvider ) )
         {
+          cachedFileChunks[cached.chunk.relativePath].append( cached );
           reusableFileChunks.insert( chunkReuseKey( QString::fromLatin1( SOURCE_TYPE_FILE ), cached.chunk.relativePath, QString(), cached.chunk.chunkIndex ), cached );
         }
       }
@@ -1258,9 +1406,13 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
       feedback->setProgress( percent );
   };
 
+  // Only files that changed since they were indexed are read and written again.
   QList<CachedChunk> built;
+  QList<CachedChunk> unchangedChunks;
+  QStringList changedFiles;
   QStringList textsToEmbed;
   QList<int> backRefIndex;
+  int unchangedFileCount = 0;
   {
     const QgsAiPerfScope readPerf( u"index_task"_s, u"read_files files=%1"_s.arg( snapshot.size() ) );
     for ( int fileIdx = 0; fileIdx < snapshot.size(); ++fileIdx )
@@ -1274,6 +1426,16 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
       const WorkspaceFileSnapshot &file = snapshot.at( fileIdx );
       emit progress( fileIdx + 1, snapshot.size(), file.relativePath );
       reportProgress( 20.0 * ( fileIdx + 1 ) / snapshot.size() );
+
+      const QList<CachedChunk> cached = cachedFileChunks.value( file.relativePath );
+      const bool unchanged = !cached.isEmpty() && std::all_of( cached.cbegin(), cached.cend(), [&file]( const CachedChunk &c ) { return c.sourceMTime == file.sourceMTime && !c.embedding.isEmpty(); } );
+      if ( unchanged )
+      {
+        ++unchangedFileCount;
+        unchangedChunks.append( cached );
+        continue;
+      }
+      changedFiles << file.relativePath;
 
       const QString fileText = readSnapshotTextFile( file.absolutePath, MAX_FILE_BYTES );
       if ( fileText.isEmpty() )
@@ -1295,7 +1457,7 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
 
         const QString reuseKey = chunkReuseKey( QString::fromLatin1( SOURCE_TYPE_FILE ), file.relativePath, QString(), ci );
         const auto reusableIt = reusableFileChunks.constFind( reuseKey );
-        if ( reusableIt != reusableFileChunks.constEnd() && reusableIt->contentHash == c.contentHash && reusableIt->sourceMTime == c.sourceMTime && !reusableIt->embedding.isEmpty() )
+        if ( reusableIt != reusableFileChunks.constEnd() && reusableIt->contentHash == c.contentHash && !reusableIt->embedding.isEmpty() )
         {
           c.embedding = reusableIt->embedding;
           c.embeddingDimension = reusableIt->embeddingDimension;
@@ -1308,6 +1470,17 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
         textsToEmbed.append( c.chunk.text );
       }
     }
+  }
+
+  // Files indexed before but no longer in the workspace.
+  QSet<QString> snapshotPaths;
+  for ( const WorkspaceFileSnapshot &file : snapshot )
+    snapshotPaths.insert( file.relativePath );
+  QStringList replacedFiles = changedFiles;
+  for ( auto it = cachedFileChunks.constBegin(); it != cachedFileChunks.constEnd(); ++it )
+  {
+    if ( !snapshotPaths.contains( it.key() ) )
+      replacedFiles << it.key();
   }
 
   if ( !textsToEmbed.isEmpty() )
@@ -1333,9 +1506,23 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
     return false;
   }
 
+  // When the cache mirrors this workspace's database, the rows of unchanged files stay as they
+  // are. Otherwise (another workspace or embedding model in the cache) every file row is rewritten.
+  bool partial = false;
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    partial = cacheHoldsRoot( workspaceRoot ) && std::none_of( mCache.cbegin(), mCache.cend(), [&activeProvider]( const CachedChunk &c ) {
+                return ( c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty() )
+                       && !metadataMatchesProvider( c.providerId, c.modelId, c.modelRevision, c.embeddingDimension, activeProvider );
+              } );
+  }
+  if ( !partial )
+    built.append( unchangedChunks );
+
+  if ( !partial || !replacedFiles.isEmpty() )
   {
     const QgsAiPerfScope persistPerf( u"index_task"_s, u"persist_files"_s );
-    if ( !persistAll( built, ReplaceScope::AllFiles, QString(), workspaceRoot, indexDatabaseProviderId( provider.get() ), errorMessage ) )
+    if ( !persistAll( built, ReplaceScope::AllFiles, QString(), workspaceRoot, indexDatabaseProviderId( provider.get() ), errorMessage, {}, partial ? &replacedFiles : nullptr ) )
       return false;
   }
   reportProgress( 100.0 );
@@ -1344,8 +1531,17 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     if ( cacheHoldsRoot( workspaceRoot ) )
     {
+      const QSet<QString> replaced( replacedFiles.cbegin(), replacedFiles.cend() );
       mCache.erase(
-        std::remove_if( mCache.begin(), mCache.end(), []( const CachedChunk &c ) { return c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty(); } ), mCache.end()
+        std::remove_if(
+          mCache.begin(),
+          mCache.end(),
+          [partial, &replaced]( const CachedChunk &c ) {
+            const bool isFile = c.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_FILE ) || c.chunk.sourceType.isEmpty();
+            return isFile && ( !partial || replaced.contains( c.chunk.relativePath ) );
+          }
+        ),
+        mCache.end()
       );
       mCache.append( built );
       mLastSync = QDateTime::currentDateTimeUtc();
@@ -1353,7 +1549,16 @@ bool QgsAiWorkspaceIndex::reindex( const QList<WorkspaceFileSnapshot> &snapshot,
       updateStatusSnapshot();
     }
   }
-  QgsMessageLog::logMessage( u"Workspace index built: files=%1 chunks=%2 embedded=%3"_s.arg( snapshot.size() ).arg( built.size() ).arg( textsToEmbed.size() ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
+  QgsMessageLog::logMessage(
+    u"Workspace index built: files=%1 unchanged=%2 changed=%3 removed=%4 embedded=%5"_s.arg( snapshot.size() )
+      .arg( unchangedFileCount )
+      .arg( changedFiles.size() )
+      .arg( replacedFiles.size() - changedFiles.size() )
+      .arg( textsToEmbed.size() ),
+    u"AI/Index"_s,
+    Qgis::MessageLevel::Info,
+    false
+  );
   return true;
 }
 
@@ -1373,10 +1578,22 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::search( const QString &qu
     return results;
 
   ensureLoaded();
+  std::optional<QSet<QString>> activeLayers;
+  {
+    const QMutexLocker locker( &mActiveLayersMutex );
+    activeLayers = mActiveLayerIds;
+  }
   QList<CachedChunk> cache;
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
-    cache = mCache;
+    cache.reserve( mCache.size() );
+    for ( const CachedChunk &cached : std::as_const( mCache ) )
+    {
+      // Layers of projects that are not open stay indexed for when they open again.
+      if ( activeLayers && cached.chunk.sourceType == QString::fromLatin1( SOURCE_TYPE_LAYER ) && !activeLayers->contains( cached.chunk.layerId ) )
+        continue;
+      cache.append( cached );
+    }
   }
 
   if ( cache.isEmpty() )
@@ -1513,8 +1730,65 @@ bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &pr
   const std::shared_ptr<QgsAiEmbeddingProvider> provider = providerSnapshot();
   if ( !ensureEmbeddingProviderAvailable( provider.get(), errorMessage ) )
     return false;
+  const ProviderInfo activeProvider = providerInfo( provider.get() );
+  const QString databaseProviderId = indexDatabaseProviderId( provider.get() );
+  const QString root = preparedSnapshot.workspaceRoot.trimmed().isEmpty() ? workspaceRoot() : preparedSnapshot.workspaceRoot;
+  ensureLoaded();
 
+  // What the index already holds for this provider: layer chunks by layer and embeddings by text.
+  QHash<QString, QList<CachedChunk>> cachedLayerChunks;
+  QHash<QString, CachedChunk> embeddingsByHash;
+  QHash<QString, QString> storedFingerprints;
+  {
+    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    if ( cacheHoldsRoot( root ) )
+    {
+      for ( const CachedChunk &cached : std::as_const( mCache ) )
+      {
+        if ( cached.chunk.sourceType != QString::fromLatin1( SOURCE_TYPE_LAYER )
+             || cached.embedding.isEmpty()
+             || !metadataMatchesProvider( cached.providerId, cached.modelId, cached.modelRevision, cached.embeddingDimension, activeProvider ) )
+          continue;
+        cachedLayerChunks[cached.chunk.layerId].append( cached );
+        embeddingsByHash.insert( cached.contentHash, cached );
+      }
+      storedFingerprints = mLayerFingerprints;
+    }
+  }
+
+  // Layers whose settings and files did not change since they were indexed are not read again.
   WorkspaceLayerSnapshot snapshot = preparedSnapshot;
+  QHash<QString, QString> fingerprints;
+  QStringList unchangedLayerIds;
+  QList<CachedChunk> unchangedChunks;
+  if ( !snapshot.preparedLayers.isEmpty() )
+  {
+    const QgsAiPerfScope checkPerf( u"index_task"_s, u"check_layers"_s, 20 );
+    QList<std::shared_ptr<const QgsAiPreparedLayer>> changed;
+    for ( const std::shared_ptr<const QgsAiPreparedLayer> &prepared : std::as_const( snapshot.preparedLayers ) )
+    {
+      if ( !prepared )
+        continue;
+      const QString fingerprint = QgsAiLayerChunker::fingerprint( *prepared );
+      fingerprints.insert( prepared->layerId, fingerprint );
+      if ( !fingerprint.isEmpty() && storedFingerprints.value( prepared->layerId ) == fingerprint && cachedLayerChunks.contains( prepared->layerId ) )
+      {
+        unchangedLayerIds << prepared->layerId;
+        unchangedChunks.append( cachedLayerChunks.value( prepared->layerId ) );
+        continue;
+      }
+      changed.append( prepared );
+    }
+    snapshot.preparedLayers = changed;
+  }
+
+  if ( snapshot.scope == ReplaceScope::SingleLayer && !unchangedLayerIds.isEmpty() )
+  {
+    touchLayers( unchangedLayerIds, root, databaseProviderId );
+    qgsAiLogPerf( u"index_task"_s, u"layer_unchanged"_s, 0 );
+    return true;
+  }
+
   if ( !snapshot.preparedLayers.isEmpty() )
   {
     const QgsAiPerfScope chunkPerf( u"index_task"_s, u"read_layer"_s );
@@ -1526,27 +1800,63 @@ bool QgsAiWorkspaceIndex::reindexLayerSnapshot( const WorkspaceLayerSnapshot &pr
     }
   }
 
-  if ( snapshot.chunks.isEmpty() )
-    return persistChunks( {}, {}, snapshot.scope, snapshot.scopedLayerId, errorMessage, snapshot.workspaceRoot );
-
+  // Chunks whose text was embedded before, for this layer or another, reuse that embedding.
+  QList<CachedChunk> built;
+  built.reserve( snapshot.chunks.size() + unchangedChunks.size() );
   QStringList textsToEmbed;
-  textsToEmbed.reserve( snapshot.chunks.size() );
-  for ( const Chunk &c : std::as_const( snapshot.chunks ) )
-    textsToEmbed.append( c.text );
-
-  QList<QVector<float>> vectors;
+  QList<int> backRefIndex;
+  for ( const Chunk &chunk : std::as_const( snapshot.chunks ) )
   {
-    const QgsAiPerfScope embedPerf( u"index_task"_s, u"embed_layer chunks=%1"_s.arg( textsToEmbed.size() ) );
-    if ( !indexEmbedInBatches( mProviderUseMutex, mSearchesWaiting, provider.get(), textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, feedback ) )
-      return false;
+    CachedChunk c;
+    c.chunk = chunk;
+    c.chunk.sourceType = QString::fromLatin1( SOURCE_TYPE_LAYER );
+    c.providerId = activeProvider.providerId;
+    c.modelId = activeProvider.modelId;
+    c.modelRevision = activeProvider.modelRevision;
+    c.contentHash = textHash( c.chunk.text, c.chunk.wktBlob );
+    const auto reusable = embeddingsByHash.constFind( c.contentHash );
+    if ( reusable != embeddingsByHash.constEnd() )
+    {
+      c.embedding = reusable->embedding;
+      c.embeddingDimension = reusable->embeddingDimension;
+    }
+    else
+    {
+      backRefIndex.append( static_cast<int>( built.size() ) );
+      textsToEmbed.append( c.chunk.text );
+    }
+    built.append( c );
   }
 
-  if ( !persistChunks( snapshot.chunks, vectors, snapshot.scope, snapshot.scopedLayerId, errorMessage, snapshot.workspaceRoot ) )
+  if ( !textsToEmbed.isEmpty() )
+  {
+    QList<QVector<float>> vectors;
+    const QgsAiPerfScope embedPerf( u"index_task"_s, u"embed_layer chunks=%1 reused=%2"_s.arg( textsToEmbed.size() ).arg( built.size() - textsToEmbed.size() ) );
+    if ( !indexEmbedInBatches( mProviderUseMutex, mSearchesWaiting, provider.get(), textsToEmbed, QgsAiEmbeddingRole::Passage, vectors, errorMessage, feedback ) )
+      return false;
+    for ( int i = 0; i < vectors.size(); ++i )
+    {
+      CachedChunk &chunk = built[backRefIndex.at( i )];
+      chunk.embedding = vectors.at( i );
+      chunk.embeddingDimension = storageDimension( activeProvider, chunk.embedding );
+    }
+  }
+  if ( feedback && feedback->isCanceled() )
+  {
+    if ( errorMessage )
+      *errorMessage = indexCanceledMessage();
+    return false;
+  }
+
+  // AllLayers replaces every layer row: unchanged layers keep theirs by being written back.
+  built.append( unchangedChunks );
+  if ( !storeChunks( built, snapshot.scope, snapshot.scopedLayerId, root, databaseProviderId, fingerprints, errorMessage ) )
     return false;
 
   QgsMessageLog::logMessage(
-    snapshot.scope == ReplaceScope::AllLayers ? u"Workspace index: layer reindex done — layers=%1 chunks=%2"_s.arg( snapshot.layerCount ).arg( snapshot.chunks.size() )
-                                              : u"Workspace index: layer reindex done — layer=%1 chunks=%2"_s.arg( snapshot.scopedLayerId, QString::number( snapshot.chunks.size() ) ),
+    snapshot.scope == ReplaceScope::AllLayers
+      ? u"Workspace index: layer reindex done — layers=%1 unchanged=%2 chunks=%3 embedded=%4"_s.arg( snapshot.layerCount ).arg( unchangedLayerIds.size() ).arg( built.size() ).arg( textsToEmbed.size() )
+      : u"Workspace index: layer reindex done — layer=%1 chunks=%2 embedded=%3"_s.arg( snapshot.scopedLayerId ).arg( built.size() ).arg( textsToEmbed.size() ),
     u"AI/Index"_s,
     Qgis::MessageLevel::Info,
     false
@@ -1583,6 +1893,7 @@ void QgsAiWorkspaceIndex::clear()
   {
     const QMutexLocker<QRecursiveMutex> locker( &mMutex );
     mCache.clear();
+    mLayerFingerprints.clear();
     mLastSync = QDateTime();
     updateStatusSnapshot();
   }

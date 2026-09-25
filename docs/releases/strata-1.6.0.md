@@ -42,3 +42,9 @@ the Windows reference machine measurements are still to be done.
   each write costs one disk sync. Layers removed together leave the database in one
   transaction, off the interface thread. Indexes of workspaces not opened for 30 days are
   deleted, and clearing the index also removes its log files.
+- Reopening a project no longer embeds its layers again. Closing a project keeps its layers
+  in the index (search only uses the layers of the open project); a layer whose files and
+  settings did not change is not read again, and any chunk whose text was embedded before
+  reuses that embedding. Edits are indexed once saved, not while they are in progress.
+  Workspace files are only read again when their modification time changes, and only the
+  changed files are rewritten. Layers not seen in any project for 30 days leave the index.

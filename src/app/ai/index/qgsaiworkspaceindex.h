@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 
 #include "qgis_app.h"
 
@@ -242,6 +243,12 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     QString databasePath() const { return dbPath(); }
 
     /**
+     * Layers of the open project. search() leaves out the chunks of other layers, which are kept
+     * so that reopening their project reuses them. Until this is called, search() uses them all.
+     */
+    void setActiveLayerIds( const QSet<QString> &layerIds );
+
+    /**
      * Deletes the index databases in \a directory unused for more than \a maxAgeDays, except
      * \a keepPath. Returns how many were deleted. Safe on any thread.
      */
@@ -310,7 +317,33 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
 
     //! The provider in use, kept alive by the returned pointer even if it is replaced meanwhile.
     std::shared_ptr<QgsAiEmbeddingProvider> providerSnapshot() const;
-    bool persistAll( const QList<CachedChunk> &chunks, ReplaceScope scope, const QString &scopedLayerId, const QString &workspaceRoot, const QString &databaseProviderId, QString *errorMessage );
+    /**
+     * Writes \a chunks in one transaction, replacing the rows of \a scope. With \a replacedFilePaths
+     * and ReplaceScope::AllFiles, only the rows of those files are replaced. \a layerFingerprints
+     * records the fingerprint of the layers written (see QgsAiLayerChunker::fingerprint()).
+     */
+    bool persistAll(
+      const QList<CachedChunk> &chunks,
+      ReplaceScope scope,
+      const QString &scopedLayerId,
+      const QString &workspaceRoot,
+      const QString &databaseProviderId,
+      QString *errorMessage,
+      const QHash<QString, QString> &layerFingerprints = {},
+      const QStringList *replacedFilePaths = nullptr
+    );
+    //! persistAll() and the matching cache update.
+    bool storeChunks(
+      const QList<CachedChunk> &built,
+      ReplaceScope scope,
+      const QString &scopedLayerId,
+      const QString &workspaceRoot,
+      const QString &databaseProviderId,
+      const QHash<QString, QString> &layerFingerprints,
+      QString *errorMessage
+    );
+    //! Records that \a layerIds were seen unchanged, which keeps their chunks from expiring.
+    void touchLayers( const QStringList &layerIds, const QString &workspaceRoot, const QString &databaseProviderId );
     bool loadAll( QString *errorMessage );
     QString dbPath() const;
     QString dbPathForRoot( const QString &workspaceRoot ) const;
@@ -335,6 +368,11 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
     //! Serializes cache loads; never taken by the interface thread.
     QMutex mLoadMutex;
     QList<CachedChunk> mCache;
+    //! Fingerprint of each layer whose chunks are in mCache, from the layer_state table.
+    QHash<QString, QString> mLayerFingerprints;
+    //! See setActiveLayerIds().
+    std::optional<QSet<QString>> mActiveLayerIds;
+    mutable QMutex mActiveLayersMutex;
     //! Workspace whose chunks are in mCache.
     QString mCacheRoot;
     QDateTime mLastSync;

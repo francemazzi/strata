@@ -114,6 +114,9 @@ void QgsAiLayerIndexCoordinator::setEnabled( bool enabled )
     mDirtyLayers.clear();
     mUseBulkDebounce = false;
     disconnectProjectSignals();
+    // Layer indexing is off: search uses no layer chunk.
+    mActiveLayerIds.clear();
+    publishActiveLayers();
   }
 }
 
@@ -145,10 +148,28 @@ void QgsAiLayerIndexCoordinator::connectProjectSignals()
     return;
   connect( mProject, &QgsProject::layerWasAdded, this, &QgsAiLayerIndexCoordinator::onLayerAdded );
   connect( mProject, qOverload<const QString &>( &QgsProject::layerWillBeRemoved ), this, &QgsAiLayerIndexCoordinator::onLayerWillBeRemoved );
+  connect( mProject, &QgsProject::aboutToBeCleared, this, [this]() { mProjectClosing = true; } );
+  connect( mProject, &QgsProject::cleared, this, [this]() {
+    mProjectClosing = false;
+    mActiveLayerIds.clear();
+    publishActiveLayers();
+  } );
+  mActiveLayerIds.clear();
   const QMap<QString, QgsMapLayer *> existing = mProject->mapLayers();
   for ( auto it = existing.constBegin(); it != existing.constEnd(); ++it )
+  {
     connectLayerSignals( it.value() );
+    if ( it.value() )
+      mActiveLayerIds.insert( it.key() );
+  }
+  publishActiveLayers();
   scheduleAllLayers();
+}
+
+void QgsAiLayerIndexCoordinator::publishActiveLayers()
+{
+  if ( mIndex )
+    mIndex->setActiveLayerIds( mActiveLayerIds );
 }
 
 void QgsAiLayerIndexCoordinator::disconnectProjectSignals()
@@ -169,12 +190,22 @@ void QgsAiLayerIndexCoordinator::connectLayerSignals( QgsMapLayer *layer )
   if ( !layer )
     return;
 
-  connect( layer, &QgsMapLayer::layerModified, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
-  connect( layer, &QgsMapLayer::dataChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
+  // The chunks carry the name and CRS of the layer, and come from its data source.
+  connect( layer, &QgsMapLayer::nameChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
+  connect( layer, &QgsMapLayer::crsChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
   connect( layer, &QgsMapLayer::dataSourceChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
-  connect( layer, &QgsMapLayer::editingStopped, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
 
-  if ( QgsVectorLayer *v = qobject_cast<QgsVectorLayer *>( layer ) )
+  QgsVectorLayer *v = qobject_cast<QgsVectorLayer *>( layer );
+  if ( !v )
+  {
+    connect( layer, &QgsMapLayer::dataChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
+    return;
+  }
+
+  // Vector edits are indexed once saved: edits in progress change on every keystroke and may be
+  // rolled back. Saving emits the committed* signals, then editingStopped.
+  connect( v, &QgsVectorLayer::subsetStringChanged, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
+  connect( v, &QgsMapLayer::editingStopped, this, &QgsAiLayerIndexCoordinator::onLayerChanged, Qt::UniqueConnection );
   {
     connect( v, &QgsVectorLayer::committedAttributesDeleted, this, &QgsAiLayerIndexCoordinator::onVectorLayerCommitted, Qt::UniqueConnection );
     connect( v, &QgsVectorLayer::committedAttributesAdded, this, &QgsAiLayerIndexCoordinator::onVectorLayerCommitted, Qt::UniqueConnection );
@@ -190,17 +221,24 @@ void QgsAiLayerIndexCoordinator::onLayerAdded( QgsMapLayer *layer )
   if ( !layer )
     return;
   connectLayerSignals( layer );
+  mActiveLayerIds.insert( layer->id() );
+  publishActiveLayers();
   scheduleDirty( layer->id() );
 }
 
 void QgsAiLayerIndexCoordinator::onLayerWillBeRemoved( const QString &layerId )
 {
   mDirtyLayers.remove( layerId );
+  mActiveLayerIds.remove( layerId );
+  publishActiveLayers();
   // Its chunks would be written back after the removal below.
   if ( mRunningTask && mRunningLayerId == layerId )
     mRunningTask->cancel();
-  if ( !mIndex )
+  // Closing the project keeps its layers indexed: reopening it reuses them.
+  if ( !mIndex || mProjectClosing )
     return;
+  if ( mRunningTask && mRunningLayerId == layerId )
+    mRemovedWhileRunning.insert( layerId );
   const QgsAiPerfScope perf( u"index"_s, u"remove_layer"_s, 5 );
   QString err;
   if ( !mIndex->removeLayer( layerId, &err ) )
@@ -378,6 +416,13 @@ void QgsAiLayerIndexCoordinator::flushDirty()
     {
       mRunningTask = nullptr;
       mRunningLayerId.clear();
+    }
+
+    // The user removed the layer while its chunks were being written: remove them again.
+    if ( mRemovedWhileRunning.remove( result.layerId ) && mIndex )
+    {
+      QString err;
+      mIndex->removeLayer( result.layerId, &err );
     }
 
     if ( mEnabled && !mDirtyLayers.isEmpty() && mIndex ) // provider availability is re-checked when the flush fires

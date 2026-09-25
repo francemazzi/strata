@@ -24,6 +24,7 @@
 #include "qgsfields.h"
 #include "qgsgeometry.h"
 #include "qgsmaplayer.h"
+#include "qgsproviderregistry.h"
 #include "qgsrasterdataprovider.h"
 #include "qgsrasterlayer.h"
 #include "qgsrectangle.h"
@@ -33,6 +34,9 @@
 #include "qgswkbtypes.h"
 
 #include <QByteArray>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFileInfo>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -42,6 +46,8 @@ using namespace Qt::StringLiterals;
 namespace
 {
   constexpr int MAX_VECTOR_FEATURE_SAMPLE = 200;
+  //! Bump when the chunk text changes, so every layer is chunked again.
+  constexpr const char *LAYER_CHUNK_FORMAT_VERSION = "layer-chunks-2";
   constexpr int MAX_VECTOR_CHUNKS = 20;
 
   QString fieldsSummary( const QgsFields &fields )
@@ -179,6 +185,64 @@ bool QgsAiLayerChunker::isRemoteLayer( const QgsMapLayer *layer )
 }
 
 QgsAiPreparedLayer QgsAiLayerChunker::prepare( QgsMapLayer *layer )
+{
+  QgsAiPreparedLayer prepared = prepareUnfingerprinted( layer );
+  if ( prepared.layerId.isEmpty() )
+    return prepared;
+
+  // The data source is hashed, never stored: it can hold database credentials.
+  const QByteArray sourceHash = QCryptographicHash::hash( layer->source().toUtf8(), QCryptographicHash::Sha1 ).toHex();
+  QStringList parts { QString::fromLatin1( LAYER_CHUNK_FORMAT_VERSION ), prepared.name, prepared.providerType, prepared.crsAuthId, QString::fromLatin1( sourceHash ), prepared.metadataText };
+  if ( prepared.source )
+  {
+    const QgsVectorLayer *vector = qobject_cast<const QgsVectorLayer *>( layer );
+    parts << prepared.geometryType << fieldsSummary( prepared.fields ) << prepared.extent.toString( 6 ) << ( prepared.includeWkt ? u"wkt"_s : u"nowkt"_s );
+    if ( vector )
+      parts << vector->subsetString() << QString::number( vector->featureCount() );
+    const QVariantMap uriParts = QgsProviderRegistry::instance()->decodeUri( prepared.providerType, layer->source() );
+    const QString path = uriParts.value( u"path"_s ).toString();
+    // Only the path string is checked here: the file itself is read by fingerprint(), off the interface thread.
+    if ( !path.isEmpty() && QFileInfo( path ).isAbsolute() )
+      prepared.sourceFilePath = path;
+  }
+  prepared.fingerprintBase = parts.join( QChar( 0x1f ) );
+  return prepared;
+}
+
+QString QgsAiLayerChunker::fingerprint( const QgsAiPreparedLayer &prepared )
+{
+  if ( prepared.fingerprintBase.isEmpty() )
+    return QString();
+  // A feature source without a local file (memory, database) can change without notice.
+  if ( prepared.source && prepared.sourceFilePath.isEmpty() )
+    return QString();
+
+  QCryptographicHash hash( QCryptographicHash::Sha1 );
+  hash.addData( prepared.fingerprintBase.toUtf8() );
+  if ( prepared.source )
+  {
+    const QFileInfo main( prepared.sourceFilePath );
+    if ( !main.exists() )
+      return QString();
+    // Editing attributes of a shapefile writes only its .dbf, and a GeoPackage writes its -wal first.
+    QStringList files { main.absoluteFilePath(), main.absoluteFilePath() + u"-wal"_s };
+    const QString suffix = main.suffix().toLower();
+    if ( suffix == "shp"_L1 )
+    {
+      for ( const QString &sidecar : { u"dbf"_s, u"shx"_s, u"prj"_s, u"cpg"_s } )
+        files << main.absoluteDir().filePath( main.completeBaseName() + '.' + sidecar );
+    }
+    for ( const QString &file : std::as_const( files ) )
+    {
+      const QFileInfo info( file );
+      if ( info.exists() )
+        hash.addData( u"%1|%2|%3;"_s.arg( info.fileName() ).arg( info.size() ).arg( info.lastModified().toMSecsSinceEpoch() ).toUtf8() );
+    }
+  }
+  return QString::fromLatin1( hash.result().toHex() );
+}
+
+QgsAiPreparedLayer QgsAiLayerChunker::prepareUnfingerprinted( QgsMapLayer *layer )
 {
   QgsAiPreparedLayer prepared;
   if ( !layer )

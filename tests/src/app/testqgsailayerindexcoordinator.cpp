@@ -45,6 +45,8 @@ class TestQgsAiLayerIndexCoordinator : public QObject
     void bulkReindexUsesLongerDebounceWindow();
     void bulkOperationPausesFlushWithoutClearingDirtySet();
     void nestedBulkOperationsResumeOnlyAtDepthZero();
+    void closingTheProjectKeepsLayerChunks();
+    void editsAreIndexedOnceSaved();
 
   private:
     /**
@@ -522,6 +524,75 @@ void TestQgsAiLayerIndexCoordinator::nestedBulkOperationsResumeOnlyAtDepthZero()
   QVERIFY( !coord.isBulkOperationActive() );
 
   coord.setEnabled( false );
+}
+
+void TestQgsAiLayerIndexCoordinator::closingTheProjectKeepsLayerChunks()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiWorkspaceIndex index( &contextProvider, nullptr );
+
+  const QString shpPath = copyPointsShapefile( tempDir.path() );
+  auto layer = std::make_unique<QgsVectorLayer>( shpPath, u"points"_s, u"ogr"_s );
+  QVERIFY( layer->isValid() );
+  const auto chunks = QgsAiLayerChunker::chunkVector( layer.get() );
+  QList<QVector<float>> embeddings;
+  for ( int i = 0; i < chunks.size(); ++i )
+    embeddings.append( QVector<float> { 0.1f * i, 1.0f, 0.0f, 0.0f } );
+  QString err;
+  QVERIFY( index.persistChunks( chunks, embeddings, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ) );
+
+  QgsAiLayerIndexCoordinator coord( &index );
+  coord.setDebounceMs( 50 );
+  coord.setBulkDebounceMs( 50 );
+  const QString layerId = layer->id();
+  QgsProject::instance()->addMapLayer( layer.release(), false );
+  coord.setEnabled( true );
+
+  // Closing the project (or opening another) keeps the chunks: reopening it reuses them.
+  QgsProject::instance()->clear();
+  QVERIFY( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layerId ).size() > 0 );
+}
+
+void TestQgsAiLayerIndexCoordinator::editsAreIndexedOnceSaved()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  CountingWorkspaceIndex index( &contextProvider );
+
+  QgsAiLayerIndexCoordinator coord( &index );
+  coord.setDebounceMs( 100 );
+  coord.setBulkDebounceMs( 100 );
+
+  const QString shpPath = copyPointsShapefile( tempDir.path() );
+  auto layer = std::make_unique<QgsVectorLayer>( shpPath, u"points"_s, u"ogr"_s );
+  QVERIFY( layer->isValid() );
+  QgsProject::instance()->addMapLayer( layer.get(), false );
+
+  QSignalSpy doneSpy( &coord, &QgsAiLayerIndexCoordinator::reindexFinished );
+  coord.setEnabled( true );
+  QVERIFY( doneSpy.wait( 5000 ) );
+  doneSpy.clear();
+  index.reindexedLayerIds.clear();
+
+  // Edits in progress are not indexed…
+  QVERIFY( layer->startEditing() );
+  QgsFeature feature( layer->fields() );
+  feature.setGeometry( QgsGeometry::fromWkt( u"Point(1 1)"_s ) );
+  QVERIFY( layer->addFeature( feature ) );
+  QVERIFY( layer->changeAttributeValue( feature.id(), 0, u"edited"_s ) );
+  QVERIFY( !doneSpy.wait( 500 ) );
+  QVERIFY( index.reindexedLayerIds.isEmpty() );
+
+  // …the saved result is, once.
+  QVERIFY( layer->commitChanges() );
+  QVERIFY( doneSpy.wait( 5000 ) );
+  QVERIFY( !doneSpy.wait( 400 ) );
+  QCOMPARE( index.reindexedLayerIds, QStringList { layer->id() } );
+
+  QgsProject::instance()->removeMapLayer( layer.release() );
 }
 
 QGSTEST_MAIN( TestQgsAiLayerIndexCoordinator )
