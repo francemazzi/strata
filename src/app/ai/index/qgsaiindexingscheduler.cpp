@@ -170,6 +170,7 @@ void QgsAiIndexingScheduler::shutdown()
 
 void QgsAiIndexingScheduler::startWorkspaceIndexing()
 {
+  const QgsAiPerfScope perf( u"index"_s, u"start_files_pass"_s, 20 );
   if ( mShutdown || !mAutomaticEnabled || !mIndex || !mIndex->embeddingProviderAvailable() )
     return;
   if ( mPaused )

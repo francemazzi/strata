@@ -393,6 +393,7 @@ void QgsAiLayerIndexCoordinator::shutdown()
 
 void QgsAiLayerIndexCoordinator::flushDirty()
 {
+  const QgsAiPerfScope perf( u"index"_s, u"flush_dirty"_s, 20 );
   if ( mBulkOperationDepth > 0 || mShutdown || mPaused )
     return;
 

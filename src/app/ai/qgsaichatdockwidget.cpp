@@ -3573,6 +3573,7 @@ void QgsAiChatDockWidget::setIndexingActivity( QgsAiIndexingActivity *activity )
 
 void QgsAiChatDockWidget::refreshIndexingIndicator()
 {
+  const QgsAiPerfScope perf( u"chat"_s, u"indexing_indicator"_s, 20 );
   if ( !mIndexingIndicator )
     return;
   if ( !mIndexingActivity )

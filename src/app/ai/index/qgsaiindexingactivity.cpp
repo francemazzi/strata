@@ -17,6 +17,7 @@
 
 #include <cmath>
 
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiindexingscheduler.h"
 #include "qgsaiindexingthrottle.h"
 #include "qgsailayerindexcoordinator.h"
@@ -96,6 +97,7 @@ void QgsAiIndexingActivity::setPaused( bool paused )
 
 void QgsAiIndexingActivity::refresh()
 {
+  const QgsAiPerfScope perf( u"index"_s, u"activity_refresh"_s, 20 );
   const bool indexingWanted = ( mScheduler && mScheduler->automaticEnabled() ) || ( mCoordinator && mCoordinator->isEnabled() );
   const QString problem = indexingWanted && mIndex && !mIndex->embeddingProviderAvailable() ? mIndex->unavailableReason() : QString();
   if ( problem != mAvailabilityProblem )
