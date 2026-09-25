@@ -17,7 +17,9 @@ from qgis.core import (
     QgsPointXY,
     QgsProcessing,
     QgsProcessingAlgorithm,
+    QgsProcessingContext,
     QgsProcessingException,
+    QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
     QgsProcessingParameterNumber,
     QgsProcessingProvider,
@@ -156,6 +158,47 @@ class TestStrataAiRunPython(QgisTestCase):
         self.assertIn("OUTPUT", result)
         self.assertIsInstance(result["OUTPUT"], QgsVectorLayer)
         QgsProject.instance().removeMapLayer(layer.id())
+
+    def test_off_thread_run_declares_project_input_layers(self):
+        layer = _memory_points(8)
+        QgsProject.instance().addMapLayer(layer)
+        self.addCleanup(QgsProject.instance().removeMapLayer, layer.id())
+        declared = {"count": 0}
+        QTimer.singleShot(
+            0,
+            lambda: declared.__setitem__(
+                "count",
+                len(QgsApplication.taskManager().tasksDependentOnLayer(layer)),
+            ),
+        )
+        with session(0, 30):
+            processing.run("native:buffer", _buffer_parameters(layer))
+        # While the run pumps events, QGIS refuses to remove the input or close the project.
+        self.assertEqual(declared["count"], 1)
+
+    def test_input_project_layers_resolves_references_without_loading(self):
+        in_project = _memory_points(1, "in_project")
+        QgsProject.instance().addMapLayer(in_project)
+        self.addCleanup(QgsProject.instance().removeMapLayer, in_project.id())
+        outside = _memory_points(1, "outside")
+        alg = QgsApplication.processingRegistry().algorithmById("native:buffer")
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+
+        def resolved(value):
+            layers = run_python._input_project_layers(
+                alg, {"INPUT": value, "OUTPUT": "TEMPORARY_OUTPUT"}, context
+            )
+            return [layer.id() for layer in layers]
+
+        self.assertEqual(resolved(in_project), [in_project.id()])
+        self.assertEqual(resolved(in_project.id()), [in_project.id()])
+        self.assertEqual(
+            resolved(QgsProcessingFeatureSourceDefinition(in_project.id(), True)),
+            [in_project.id()],
+        )
+        self.assertEqual(resolved(outside), [])
+        self.assertEqual(resolved("/does/not/exist.gpkg"), [])
 
     def test_run_and_load_results_adds_layer(self):
         layer = _memory_points(4, "load-src")

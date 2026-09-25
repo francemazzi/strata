@@ -44,6 +44,7 @@
 #include "qgsrenderer.h"
 #include "qgssettings.h"
 #include "qgssinglesymbolrenderer.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
@@ -182,6 +183,7 @@ class TestQgsAiToolRegistry : public QObject
     void processingToolAcceptsJsonEnumAndRunsOffThread();
     void processingToolRunsNoThreadingOnMainThread();
     void processingPrepareFailureIsAnErrorNotACancel();
+    void processingToolDeclaresInputLayers();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -1167,6 +1169,40 @@ void TestQgsAiToolRegistry::processingPrepareFailureIsAnErrorNotACancel()
   QVERIFY( !result.success );
   QVERIFY( !result.canceled );
   QVERIFY2( result.errorMessage.contains( u"prepare boom"_s ), qPrintable( result.errorMessage ) );
+}
+
+void TestQgsAiToolRegistry::processingToolDeclaresInputLayers()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  // The task manager tracks dependencies on the global project only.
+  QgsProject *project = QgsProject::instance();
+  const auto cleanup = qScopeGuard( [project]() { project->clear(); } );
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"points"_s, u"memory"_s );
+  QVERIFY( points->isValid() );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project->addMapLayer( points );
+  const QString pointsId = points->id();
+
+  QgsAiRunProcessingAlgorithmTool tool( project );
+  QJsonObject parameters;
+  parameters.insert( u"INPUT"_s, pointsId );
+  parameters.insert( u"DISTANCE"_s, 1 );
+  parameters.insert( u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:buffer"_s );
+  args.insert( u"parameters"_s, parameters );
+
+  // While the algorithm runs, QGIS refuses to remove its input or close the project.
+  bool inputDeclared = false;
+  QTimer::singleShot( 0, [&inputDeclared, points]() { inputDeclared = !QgsApplication::taskManager()->tasksDependentOnLayer( points ).isEmpty(); } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QVERIFY( inputDeclared );
+  QVERIFY( QgsApplication::taskManager()->tasksDependentOnLayer( project->mapLayer( pointsId ) ).isEmpty() );
 }
 
 void TestQgsAiToolRegistry::clearEmptiesRegistry()

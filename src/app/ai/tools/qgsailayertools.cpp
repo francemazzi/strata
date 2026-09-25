@@ -69,6 +69,7 @@
 #include "qgsprocessingregistry.h"
 #include "qgsprocessingutils.h"
 #include "qgsproject.h"
+#include "qgsproperty.h"
 #include "qgsprovidermetadata.h"
 #include "qgsproviderregistry.h"
 #include "qgsrasterlayer.h"
@@ -1579,6 +1580,67 @@ QString QgsAiRunProcessingAlgorithmTool::availabilityReason() const
 
 namespace
 {
+  /**
+   * Project layers read by the algorithm's input parameters. Declared as the task's dependent
+   * layers, they make QGIS refuse to remove them or close the project until the task ends.
+   * Never loads a layer: only references already resolvable in the context are returned.
+   */
+  QList<QgsMapLayer *> processingToolInputProjectLayers( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, QgsProcessingContext &context, QgsProject *project )
+  {
+    QList<QgsMapLayer *> layers;
+    if ( !algorithm || !project )
+      return layers;
+
+    static const QSet<QString> layerParameterTypes {
+      QgsProcessingParameterFeatureSource::typeName(),
+      QgsProcessingParameterVectorLayer::typeName(),
+      QgsProcessingParameterRasterLayer::typeName(),
+      QgsProcessingParameterMapLayer::typeName(),
+      QgsProcessingParameterMultipleLayers::typeName(),
+      QgsProcessingParameterMeshLayer::typeName(),
+      QgsProcessingParameterPointCloudLayer::typeName(),
+      QgsProcessingParameterAnnotationLayer::typeName(),
+    };
+
+    std::function<void( const QVariant & )> collect;
+    collect = [&collect, &layers, &context, project]( const QVariant &value ) {
+      if ( value.userType() == QMetaType::Type::QVariantList || value.userType() == QMetaType::Type::QStringList )
+      {
+        const QVariantList values = value.toList();
+        for ( const QVariant &item : values )
+          collect( item );
+        return;
+      }
+      if ( value.userType() == qMetaTypeId<QgsProcessingFeatureSourceDefinition>() )
+      {
+        collect( value.value<QgsProcessingFeatureSourceDefinition>().source.staticValue() );
+        return;
+      }
+      if ( value.userType() == qMetaTypeId<QgsProperty>() )
+      {
+        const QgsProperty property = value.value<QgsProperty>();
+        if ( property.propertyType() == Qgis::PropertyType::Static )
+          collect( property.staticValue() );
+        return;
+      }
+
+      QgsMapLayer *layer = qobject_cast<QgsMapLayer *>( qvariant_cast<QObject *>( value ) );
+      if ( !layer && value.userType() == QMetaType::Type::QString )
+        layer = QgsProcessingUtils::mapLayerFromString( value.toString(), context, false );
+      if ( layer && project->mapLayer( layer->id() ) == layer && !layers.contains( layer ) )
+        layers << layer;
+    };
+
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      if ( definition->isDestination() || !layerParameterTypes.contains( definition->type() ) )
+        continue;
+      collect( parameters.value( definition->name() ) );
+    }
+    return layers;
+  }
+
   // Same thread split as QgsProcessingAlgRunnerTask (prepare on the GUI thread,
   // runPrepared on the worker, postProcess back on the GUI thread) and keeps the
   // optional algorithm configuration map, which the stock task drops.
@@ -1709,6 +1771,11 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
     return QgsAiToolResult::error( u"Processing algorithm failed: %1"_s.arg( log.isEmpty() ? u"unknown error"_s : log ) );
   };
 
+  // Read everything needed from the registry's algorithm now: reloading scripts or providers
+  // during the background wait below would delete it.
+  QJsonObject output = processingAlgorithmMetadataJson( algorithm );
+  const QString resolvedAlgorithmId = algorithm->id();
+
   QVariantMap results;
   if ( algorithm->flags() & Qgis::ProcessingAlgorithmFlag::NoThreading )
   {
@@ -1734,25 +1801,39 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
     // prepare() runs on this thread; runPrepared() runs on the task thread.
     // The nested event loop keeps the window painting and lets Stop cancel the feedback.
     auto *task = new AiProcessingRunnerTask( algorithm, parameters, configuration, context, feedback );
+    task->setDependentLayers( processingToolInputProjectLayers( algorithm, parameters, *context, project ) );
+
+    // Inputs that are files, not project layers, do not block closing the project: notice it,
+    // so the outputs never land in the project opened meanwhile.
+    bool projectCleared = false;
+    QMetaObject::Connection clearedConnection;
+    if ( project )
+      clearedConnection = QObject::connect( project, &QgsProject::cleared, [&projectCleared]() { projectCleared = true; } );
+
     bool successful = false;
     const QgsAiTaskWaitResult wait = qgsAiRunTaskWithEventLoop( task, algorithm->displayName(), [task, &successful, &results]() {
       successful = task->succeeded();
       results = task->results();
     } );
+    QObject::disconnect( clearedConnection );
+
     if ( wait.abandoned )
       return QgsAiToolResult::canceledResult( wait.error );
+    if ( wait.layerRemoved )
+      return QgsAiToolResult::error( u"An input layer was removed while the algorithm was running."_s );
     // A failed prepare() also cancels the feedback, but only a user cancel stops the turn.
     if ( wait.canceled )
       return QgsAiToolResult::canceledResult( u"Processing algorithm was canceled."_s );
     if ( !successful )
       return failedResult();
+    if ( projectCleared )
+      return QgsAiToolResult::error( u"The project was closed while the algorithm was running; its outputs were not loaded."_s );
   }
 
-  QJsonObject output = processingAlgorithmMetadataJson( algorithm );
   const QJsonArray loadedLayers = loadProcessingResultsIntoProject( *context, project );
   QJsonObject diff;
   diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
-  diff.insert( u"algorithm_id"_s, algorithm->id() );
+  diff.insert( u"algorithm_id"_s, resolvedAlgorithmId );
   diff.insert( u"rollback_supported"_s, false );
   output.insert( u"dry_run"_s, false );
   output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );

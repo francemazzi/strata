@@ -10,10 +10,23 @@ from contextlib import contextmanager
 from qgis.core import (
     Qgis,
     QgsApplication,
+    QgsMapLayer,
     QgsProcessingAlgorithm,
     QgsProcessingAlgRunnerTask,
     QgsProcessingException,
+    QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
+    QgsProcessingParameterAnnotationLayer,
+    QgsProcessingParameterFeatureSource,
+    QgsProcessingParameterMapLayer,
+    QgsProcessingParameterMeshLayer,
+    QgsProcessingParameterMultipleLayers,
+    QgsProcessingParameterPointCloudLayer,
+    QgsProcessingParameterRasterLayer,
+    QgsProcessingParameterVectorLayer,
+    QgsProcessingUtils,
+    QgsProject,
+    QgsProperty,
     QgsTask,
 )
 from qgis.PyQt import sip
@@ -71,6 +84,52 @@ def _algorithm_is_no_threading(alg):
     return flag is not None and bool(flags & flag)
 
 
+_LAYER_PARAMETER_TYPES = {
+    QgsProcessingParameterFeatureSource.typeName(),
+    QgsProcessingParameterVectorLayer.typeName(),
+    QgsProcessingParameterRasterLayer.typeName(),
+    QgsProcessingParameterMapLayer.typeName(),
+    QgsProcessingParameterMultipleLayers.typeName(),
+    QgsProcessingParameterMeshLayer.typeName(),
+    QgsProcessingParameterPointCloudLayer.typeName(),
+    QgsProcessingParameterAnnotationLayer.typeName(),
+}
+
+
+def _input_project_layers(alg, parameters, context):
+    """Project layers read by alg's inputs. Never loads a layer.
+
+    Declared as the task's dependent layers, they make QGIS refuse to remove them or
+    close the project while the run is pumping events.
+    """
+    project = QgsProject.instance()
+    layers = {}
+
+    def collect(value):
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+            return
+        if isinstance(value, QgsProcessingFeatureSourceDefinition):
+            collect(value.source.staticValue())
+            return
+        if isinstance(value, QgsProperty):
+            if value.propertyType() == Qgis.PropertyType.Static:
+                collect(value.staticValue())
+            return
+        layer = value if isinstance(value, QgsMapLayer) else None
+        if layer is None and isinstance(value, str) and value:
+            layer = QgsProcessingUtils.mapLayerFromString(value, context, False)
+        if layer is not None and project.mapLayer(layer.id()) is not None:
+            layers[layer.id()] = layer
+
+    for definition in alg.parameterDefinitions():
+        if definition.isDestination() or definition.type() not in _LAYER_PARAMETER_TYPES:
+            continue
+        collect((parameters or {}).get(definition.name()))
+    return list(layers.values())
+
+
 def _raise_async(thread_id, message):
     global _interrupt_message
     _interrupt_message = message
@@ -98,6 +157,7 @@ def _run_off_thread(alg, parameters, context, feedback, catch_exceptions):
         QgsTask.Flag.CanCancel | QgsTask.Flag.CancelWithoutPrompt | QgsTask.Flag.Silent
     )
     task = QgsProcessingAlgRunnerTask(alg, parameters, context, feedback, flags)
+    task.setDependentLayers(_input_project_layers(alg, parameters, context))
     if task.isCanceled():
         # prepare() failed in the constructor: the task never runs and never emits
         # executed, so report the failure now instead of waiting forever.
