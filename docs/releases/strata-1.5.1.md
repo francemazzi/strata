@@ -30,6 +30,8 @@ signed assets and receipts match this tag.
   receive `.qml` and `.qmd` drops.
 - While a turn runs, the mode and model selectors are locked, and each tool
   round keeps the approval rules of the mode it started in.
+- The project suggestion Analyze buttons are disabled while a turn runs, and a
+  message sent meanwhile no longer breaks the running tool round.
 
 ## Known limitations
 

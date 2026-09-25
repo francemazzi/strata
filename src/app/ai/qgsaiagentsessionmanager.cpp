@@ -1704,8 +1704,10 @@ void QgsAiAgentSessionManager::sendUserMessage( const QString &text, const QList
 {
   if ( hasActiveRequest() )
   {
-    const QgsAiChatMessage assistant = buildAssistantMessage( u"A request is already running. Please wait or cancel it first."_s );
-    recordHistoryMessage( assistant );
+    // Never write to the history here: during a tool round the notice would land between the
+    // tool call and its result, and the history clean-up would then drop the whole round.
+    QgsMessageLog::logMessage( u"Ignored a message sent while a request is running."_s, u"AI"_s, Qgis::MessageLevel::Info, false );
+    emit requestStateChanged( u"busy"_s, tr( "A request is already running. Please wait or stop it first." ) );
     return;
   }
   mToolRunCanceled = false;

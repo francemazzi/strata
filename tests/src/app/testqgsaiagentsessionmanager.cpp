@@ -453,6 +453,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void emptyReplyWithoutToolsIsRequestError();
     void streamErrorAfterToolsIsRequestError();
     void modeSwitchDuringToolKeepsRoundApproval();
+    void sendWhileRunningDoesNotTouchHistory();
     void agentBehaviorTogglePropagatesToRouter();
     void planModeDoesNotAdvertiseTools();
     void unresolvedPlanToolsNormalizesNearMissNames();
@@ -1664,6 +1665,58 @@ void TestQgsAiAgentSessionManager::modeSwitchDuringToolKeepsRoundApproval()
   QVERIFY( approvalAsked );
   QVERIFY( !approvalToolRan );
   QCOMPARE( manager.activeAgent(), u"editor"_s );
+}
+
+void TestQgsAiAgentSessionManager::sendWhileRunningDoesNotTouchHistory()
+{
+  clearProviderSettings();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+    clearProviderSettings();
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", toolCallsResponseBody( { u"busy_tool"_s } ) )
+                   << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiAgentSessionManager *managerPtr = nullptr;
+  QgsAiToolRegistry registry;
+  // Something (e.g. a suggestion button) sends a message while the tool runs.
+  registry.registerTool( std::make_unique<CallbackTool>( u"busy_tool"_s, false, [&managerPtr]() {
+    if ( managerPtr )
+      managerPtr->sendUserMessage( u"another request"_s );
+  } ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  configureOpenRouterLoopback( router, server.serverPort() );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  managerPtr = &manager;
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+  manager.setActiveAgent( u"editor"_s );
+  QSignalSpy stateSpy( &manager, &QgsAiAgentSessionManager::requestStateChanged );
+
+  manager.sendUserMessage( u"run the busy tool"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 2 );
+  QVERIFY( !historyContains( manager.history(), u"already running"_s ) );
+  QVERIFY( !historyContains( manager.history(), u"another request"_s ) );
+  QCOMPARE( manager.history().last().content, u"done"_s );
+  const bool reportedBusy = std::any_of( stateSpy.cbegin(), stateSpy.cend(), []( const QList<QVariant> &args ) { return args.at( 0 ).toString() == "busy"_L1; } );
+  QVERIFY( reportedBusy );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorTogglePropagatesToRouter()
