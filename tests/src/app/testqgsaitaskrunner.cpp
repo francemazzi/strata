@@ -12,6 +12,7 @@
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
 #include "qgsproject.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectorlayer.h"
 
@@ -62,6 +63,8 @@ class TestQgsAiTaskRunner : public QObject
     void failedWorkIsNotCanceled();
     void abandonedWaitLeavesTaskSafe();
     void dependentLayerRemovalStopsTask();
+    void waitForActiveTasksReturnsWhenWorkersStop();
+    void waitForActiveTasksTimesOut();
     void guiThreadWorkRunsInline();
     void tasksAreSilentAndCancelWithoutPrompt();
     void cancelHookRunsOnStop();
@@ -203,6 +206,45 @@ void TestQgsAiTaskRunner::dependentLayerRemovalStopsTask()
   );
   QVERIFY( !result.succeeded );
   QVERIFY( !QgsProject::instance()->mapLayer( layerId ) );
+}
+
+void TestQgsAiTaskRunner::waitForActiveTasksReturnsWhenWorkersStop()
+{
+  // Nothing running: returns at once.
+  QVERIFY( qgsAiWaitForActiveTasks( 0 ) );
+
+  auto *task = new QgsAiFunctionTask( u"quit-wait"_s, []( QgsFeedback *feedback ) {
+    while ( !feedback->isCanceled() )
+      QThread::msleep( 5 );
+    return false;
+  } );
+  const QPointer<QgsAiFunctionTask> taskGuard( task );
+  QgsApplication::taskManager()->addTask( task );
+  QTRY_VERIFY_WITH_TIMEOUT( !taskGuard || taskGuard->status() == QgsTask::Running, 5000 );
+
+  task->cancel();
+  QVERIFY( qgsAiWaitForActiveTasks( 5000 ) );
+  QCOMPARE( QgsApplication::taskManager()->countActiveTasks(), 0 );
+}
+
+void TestQgsAiTaskRunner::waitForActiveTasksTimesOut()
+{
+  // A worker that ignores cancel for a while.
+  auto release = std::make_shared<std::atomic_bool>( false );
+  auto *task = new QgsAiFunctionTask( u"slow-quit"_s, [release]( QgsFeedback * ) {
+    while ( !*release )
+      QThread::msleep( 5 );
+    return false;
+  } );
+  const QPointer<QgsAiFunctionTask> taskGuard( task );
+  QgsApplication::taskManager()->addTask( task );
+  QTRY_VERIFY_WITH_TIMEOUT( !taskGuard || taskGuard->status() == QgsTask::Running, 5000 );
+
+  task->cancel();
+  QVERIFY( !qgsAiWaitForActiveTasks( 50 ) );
+
+  *release = true;
+  QVERIFY( qgsAiWaitForActiveTasks( 5000 ) );
 }
 
 void TestQgsAiTaskRunner::guiThreadWorkRunsInline()

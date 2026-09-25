@@ -167,6 +167,15 @@ APP_EXPORT bool qgsAiHasActiveBackgroundTool();
 APP_EXPORT void qgsAiCancelActiveBackgroundTool();
 
 /**
+ * Pumps events, ignoring user input, until the task manager has no active task left, or until
+ * \a timeoutMs elapses. Returns TRUE if no task is active anymore.
+ *
+ * Used when Strata quits after stopping the AI tools and canceling the background tasks: their
+ * workers may still read project layers, so the project must not be closed before they return.
+ */
+APP_EXPORT bool qgsAiWaitForActiveTasks( int timeoutMs );
+
+/**
  * Quits the nested event loops of the background waits in progress, like QCoreApplication::exit()
  * does when Strata quits, but without stopping later event loops. For tests only.
  */

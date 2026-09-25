@@ -15,6 +15,8 @@
 
 #include "qgsaitaskrunner.h"
 
+#include <algorithm>
+
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
 #include "qgsmessagelog.h"
@@ -27,6 +29,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <QTimer>
 
 using namespace Qt::StringLiterals;
 
@@ -170,6 +173,28 @@ void qgsAiCancelActiveBackgroundTool()
     if ( registration->cancelHook )
       registration->cancelHook();
   }
+}
+
+bool qgsAiWaitForActiveTasks( int timeoutMs )
+{
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  if ( !manager || manager->countActiveTasks() == 0 )
+    return true;
+
+  QEventLoop loop;
+  const auto quitWhenIdle = [&loop, manager]() {
+    if ( manager->countActiveTasks() == 0 )
+      loop.quit();
+  };
+  QObject::connect( manager, &QgsTaskManager::allTasksFinished, &loop, &QEventLoop::quit );
+  // Safety net in case the last task ends between the check above and the connection.
+  QTimer poll;
+  poll.setInterval( 50 );
+  QObject::connect( &poll, &QTimer::timeout, &loop, quitWhenIdle );
+  poll.start();
+  QTimer::singleShot( std::max( 0, timeoutMs ), &loop, &QEventLoop::quit );
+  loop.exec( QEventLoop::ExcludeUserInputEvents );
+  return manager->countActiveTasks() == 0;
 }
 
 void qgsAiQuitBackgroundWaitLoopsForTesting()

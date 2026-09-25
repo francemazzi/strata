@@ -20,7 +20,8 @@ signed assets and receipts match this tag.
 - Stop also interrupts web search, web fetch, MCP calls, downloads, DataHub
   extraction and tree detection within about a second. A Stop or a new chat
   during a tool no longer leaves the chat locked or cancels the next request.
-- Quitting Strata while an AI tool works in the background no longer crashes.
+- Quitting Strata while an AI tool works in the background asks first, then
+  stops the tool and waits for it before closing the project.
 - A Processing algorithm that fails before it starts reports its error to the
   assistant, which can retry, instead of ending the turn as if Stop was pressed.
 - `run_python` restores Processing after every run, and its time budget can no
