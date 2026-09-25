@@ -3003,6 +3003,13 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
     QJsonObject errObj;
     errObj.insert( u"error"_s, result.errorMessage );
     errObj.insert( u"verification"_s, verification );
+    // What a failing tool adds, e.g. that the outcome is uncertain and must not be retried.
+    const QJsonObject details = result.output.toObject();
+    for ( auto it = details.constBegin(); it != details.constEnd(); ++it )
+    {
+      if ( !errObj.contains( it.key() ) )
+        errObj.insert( it.key(), it.value() );
+    }
     serialized = QString::fromUtf8( QJsonDocument( errObj ).toJson( QJsonDocument::Compact ) );
   }
   if ( serialized.size() > MAX_TOOL_RESULT_CHARS )
@@ -3293,7 +3300,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         QElapsedTimer toolTimer;
         toolTimer.start();
         QgsAiPerfScope perf( u"tool"_s, call.name, 200 );
-        result = mToolRegistry->execute( call.name, call.args );
+        result = mToolRegistry->execute( call.name, call.args, call.id );
         QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
       }
 

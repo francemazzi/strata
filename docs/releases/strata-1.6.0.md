@@ -107,3 +107,8 @@ the Windows reference machine measurements are still to be done.
   no longer runs `VACUUM FULL`, which locked and rewrote the table.
 - Stop answers within half a second even when a tool is stuck in a call that cannot be
   interrupted (opening a huge file, a slow server): the work ends on its own afterwards.
+- MCP tools that change data carry an idempotency key: when a call is stopped or times out,
+  the model is told the outcome is uncertain and must check before retrying, and a retry
+  with the same arguments returns the first outcome instead of running twice (needs the
+  matching strata-be). Stopping a Data Hub extraction or a tree detection also cancels the
+  job on the server, which stops spending quota.

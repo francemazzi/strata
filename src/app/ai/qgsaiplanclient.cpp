@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "qgsapplication.h"
+#include "qgsmessagelog.h"
 #include "qgsnetworkaccessmanager.h"
 
 #include <QDir>
@@ -412,6 +413,23 @@ void QgsAiPlanClient::writeCachedModels( const QList<ModelInfo> &models )
   QFile file( cacheFilePath() );
   if ( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
     file.write( QJsonDocument( root ).toJson( QJsonDocument::Compact ) );
+}
+
+void QgsAiPlanClient::requestRemoteJobCancel( const QNetworkRequest &request )
+{
+  QgsNetworkAccessManager *networkManager = QgsNetworkAccessManager::instance();
+  if ( !networkManager )
+    return;
+  QNetworkReply *reply = networkManager->post( request, QByteArrayLiteral( "{}" ) );
+  if ( !reply )
+    return;
+  const QString url = request.url().path();
+  QObject::connect( reply, &QNetworkReply::finished, reply, [reply, url]() {
+    const int httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
+    if ( reply->error() != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300 )
+      QgsMessageLog::logMessage( u"Remote job cancel %1 failed (HTTP %2): %3"_s.arg( url ).arg( httpStatus ).arg( reply->errorString() ), u"AI"_s, Qgis::MessageLevel::Info, false );
+    reply->deleteLater();
+  } );
 }
 
 void QgsAiPlanClient::clearNetworkCaches()

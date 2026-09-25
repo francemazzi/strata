@@ -91,7 +91,8 @@ class APP_EXPORT QgsAiToolRegistry : public QObject
      * Looks up the tool by \a name and runs it with \a args. If the tool is missing
      * the result is `success=false` with an actionable error message.
      */
-    QgsAiToolResult execute( const QString &name, const QJsonObject &args ) const;
+    //! Runs a tool. \a callId, the model's tool call id, keys the gateway calls that change data.
+    QgsAiToolResult execute( const QString &name, const QJsonObject &args, const QString &callId = QString() ) const;
 
     //! Removes all registered tools.
     void clear();

@@ -19,6 +19,7 @@
 #include "qgis_app.h"
 #include "qgsaiwebsearchtool.h"
 
+#include <QHash>
 #include <QString>
 
 using namespace Qt::StringLiterals;
@@ -32,7 +33,20 @@ class APP_EXPORT QgsAiMcpCallTool : public QgsAiWebSearchToolBase
     QString description() const override;
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
-    QgsAiToolResult executeNamed( const QString &name, const QJsonObject &args ) const;
+
+    /**
+     * Runs an MCP tool through the gateway. A \a mutating call carries an idempotency key built
+     * from \a callId: when its outcome is unknown (Stop, timeout), the model is told so, and
+     * repeating it with the same arguments reuses the key, so the gateway does not run it twice.
+     */
+    QgsAiToolResult executeNamed( const QString &name, const QJsonObject &args, bool mutating = false, const QString &callId = QString() ) const;
+
+    void setRequestTimeoutMs( int timeoutMs ) { mRequestTimeoutMs = timeoutMs; }
+
+  private:
+    int mRequestTimeoutMs = 20000;
+    //! Idempotency keys of the mutating calls whose outcome is unknown, by tool name and arguments.
+    mutable QHash<QString, QString> mUncertainCalls;
 };
 
 #endif // QGSAIMCPCALLTOOL_H

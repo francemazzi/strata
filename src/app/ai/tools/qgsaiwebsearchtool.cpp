@@ -61,8 +61,10 @@ QString QgsAiWebSearchToolBase::availabilityReason() const
   return u"Sign in to Strata Plan to use managed online search tools."_s;
 }
 
-QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const QJsonObject &body, int timeoutMs ) const
+QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const QJsonObject &body, int timeoutMs, const QString &idempotencyKey, bool *outcomeUnknown ) const
 {
+  if ( outcomeUnknown )
+    *outcomeUnknown = false;
   if ( !isAvailable() )
     return QgsAiToolResult::error( availabilityReason() );
 
@@ -79,6 +81,8 @@ QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const Q
   request.setRawHeader( "Accept", "application/json" );
   request.setRawHeader( "Authorization", ( u"Bearer %1"_s.arg( mRouter->planSessionToken().trimmed() ) ).toUtf8() );
   request.setTransferTimeout( timeoutMs );
+  if ( !idempotencyKey.isEmpty() )
+    request.setRawHeader( "Idempotency-Key", idempotencyKey.toUtf8() );
 
   QNetworkReply *reply = networkManager->post(
     request,
@@ -112,6 +116,10 @@ QgsAiToolResult QgsAiWebSearchToolBase::postSearch( const QString &path, const Q
   const QByteArray responseBytes = reply->readAll();
   const QNetworkReply::NetworkError networkError = reply->error();
   reply->deleteLater();
+
+  // Sent but unanswered, or still running on the gateway (409): it may run, or have run, anyway.
+  if ( outcomeUnknown )
+    *outcomeUnknown = canceled || timedOut || httpStatus == 0 || httpStatus == 409 || httpStatus == 502 || httpStatus == 504;
 
   if ( canceled )
     return QgsAiToolResult::canceledResult( u"Strata Plan request was canceled."_s );
