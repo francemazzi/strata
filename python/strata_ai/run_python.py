@@ -16,6 +16,7 @@ from qgis.core import (
     QgsProcessingException,
     QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
+    QgsProcessingModelAlgorithm,
     QgsProcessingParameterAnnotationLayer,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterMapLayer,
@@ -84,6 +85,35 @@ def _algorithm_is_no_threading(alg):
     return flag is not None and bool(flags & flag)
 
 
+# Providers shipped with Strata whose algorithms the Toolbox already runs in the
+# background. Script and plugin algorithms, and algorithms defined in the snippet,
+# stay on the synchronous path like in the Python console: written on the fly, they
+# often touch the GUI or the project without declaring NoThreading.
+BACKGROUND_PROVIDERS = {
+    "native",
+    "3d",
+    "pdal",
+    "gdal",
+    "qgis",
+    "grass",
+    "model",
+    "project",
+}
+
+
+def _runs_in_background(alg):
+    provider = alg.provider()
+    if provider is None or provider.id() not in BACKGROUND_PROVIDERS:
+        return False
+    if isinstance(alg, QgsProcessingModelAlgorithm):
+        # A model runs its children on its own worker: each one must be trusted too.
+        for child in alg.childAlgorithms().values():
+            child_alg = child.algorithm()
+            if child_alg is None or not _runs_in_background(child_alg):
+                return False
+    return True
+
+
 _LAYER_PARAMETER_TYPES = {
     QgsProcessingParameterFeatureSource.typeName(),
     QgsProcessingParameterVectorLayer.typeName(),
@@ -124,7 +154,10 @@ def _input_project_layers(alg, parameters, context):
             layers[layer.id()] = layer
 
     for definition in alg.parameterDefinitions():
-        if definition.isDestination() or definition.type() not in _LAYER_PARAMETER_TYPES:
+        if (
+            definition.isDestination()
+            or definition.type() not in _LAYER_PARAMETER_TYPES
+        ):
             continue
         collect((parameters or {}).get(definition.name()))
     return list(layers.values())
@@ -240,11 +273,13 @@ def _patched_execute(
         or QThread.currentThread() != QgsApplication.instance().thread()
         or (feedback is not None and type(feedback) is not QgsProcessingFeedback)
         or _algorithm_is_no_threading(alg)
+        or not _runs_in_background(alg)
     ):
         # Outside a run_python session, nested in a Processing wait, off the main
         # thread (scripts and models calling processing.run from their worker), with
-        # a Python feedback subclass whose overrides must not run on a worker, or
-        # for algorithms that must stay on the main thread: the stock synchronous path.
+        # a Python feedback subclass whose overrides must not run on a worker, for
+        # algorithms that must stay on the main thread, or for script and plugin
+        # algorithms: the stock synchronous path.
         return _original_algorithm_executor_execute(
             alg, parameters, context, feedback, catch_exceptions
         )

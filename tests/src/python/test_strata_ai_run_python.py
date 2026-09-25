@@ -21,6 +21,9 @@ from qgis.core import (
     QgsProcessingException,
     QgsProcessingFeatureSourceDefinition,
     QgsProcessingFeedback,
+    QgsProcessingModelAlgorithm,
+    QgsProcessingModelChildAlgorithm,
+    QgsProcessingModelChildParameterSource,
     QgsProcessingParameterNumber,
     QgsProcessingProvider,
     QgsProject,
@@ -101,6 +104,41 @@ class _TestProvider(QgsProcessingProvider):
         self.addAlgorithm(_FailingPrepareAlgorithm())
 
 
+class _UntrustedProvider(QgsProcessingProvider):
+    """Stands in for a script or plugin provider."""
+
+    def id(self):
+        return "strataaiuntrusted"
+
+    def name(self):
+        return "Strata AI untrusted test"
+
+    def loadAlgorithms(self):
+        self.addAlgorithm(_SlowAlgorithm())
+
+
+def _model_with_child(name, child_algorithm_id):
+    model = QgsProcessingModelAlgorithm(name, "Strata AI tests")
+    child = QgsProcessingModelChildAlgorithm(child_algorithm_id)
+    child.addParameterSources(
+        "DURATION", [QgsProcessingModelChildParameterSource.fromStaticValue(0.01)]
+    )
+    model.addChildAlgorithm(child)
+    return model
+
+
+class _ModelProvider(QgsProcessingProvider):
+    def id(self):
+        return "strataaimodels"
+
+    def name(self):
+        return "Strata AI test models"
+
+    def loadAlgorithms(self):
+        self.addAlgorithm(_model_with_child("trustedchild", "strataaitest:slow"))
+        self.addAlgorithm(_model_with_child("untrustedchild", "strataaiuntrusted:slow"))
+
+
 def _memory_points(count, name="pts"):
     layer = QgsVectorLayer("Point?crs=EPSG:4326&field=id:integer", name, "memory")
     features = []
@@ -126,8 +164,19 @@ class TestStrataAiRunPython(QgisTestCase):
     def setUpClass(cls):
         super().setUpClass()
         Processing.initialize()
-        cls.provider = _TestProvider()
-        QgsApplication.processingRegistry().addProvider(cls.provider)
+        cls.providers = [_TestProvider(), _UntrustedProvider(), _ModelProvider()]
+        for provider in cls.providers:
+            QgsApplication.processingRegistry().addProvider(provider)
+        # The test providers stand in for providers shipped with Strata, so the
+        # background tests can use the slow algorithm and the test models.
+        run_python.BACKGROUND_PROVIDERS.update({"strataaitest", "strataaimodels"})
+
+    @classmethod
+    def tearDownClass(cls):
+        run_python.BACKGROUND_PROVIDERS.difference_update(
+            {"strataaitest", "strataaimodels"}
+        )
+        super().tearDownClass()
 
     def _track_original_execute(self):
         """Replaces the stock execute with a spy; the session picks it up as the original."""
@@ -281,6 +330,34 @@ class TestStrataAiRunPython(QgisTestCase):
             processing.run("strataaitest:slow", {"DURATION": 1.0})
         self.assertEqual(len(seen), 1)
         self.assertIn("OUTPUT", nested["result"])
+
+    def test_untrusted_provider_uses_original_execute(self):
+        seen = self._track_original_execute()
+        with session(0, 30):
+            processing.run("strataaiuntrusted:slow", {"DURATION": 0.05})
+        # Script and plugin algorithms run synchronously, like in the Python console.
+        self.assertEqual(seen, [threading.main_thread().name])
+
+    def test_algorithm_defined_in_the_snippet_uses_original_execute(self):
+        seen = self._track_original_execute()
+        algorithm = _SlowAlgorithm().create()
+        self.assertIsNone(algorithm.provider())
+        with session(0, 30):
+            processing.run(algorithm, {"DURATION": 0.05})
+        self.assertEqual(seen, [threading.main_thread().name])
+
+    def test_trusted_algorithm_runs_off_thread(self):
+        seen = self._track_original_execute()
+        with session(0, 30):
+            processing.run("strataaitest:slow", {"DURATION": 0.05})
+        self.assertEqual(seen, [])
+
+    def test_model_runs_off_thread_only_with_trusted_children(self):
+        registry = QgsApplication.processingRegistry()
+        trusted = registry.algorithmById("strataaimodels:trustedchild")
+        untrusted = registry.algorithmById("strataaimodels:untrustedchild")
+        self.assertTrue(run_python._runs_in_background(trusted))
+        self.assertFalse(run_python._runs_in_background(untrusted))
 
     def test_bridge_cancel_stops_a_slow_algorithm(self):
         bridge = QgsProcessingFeedback()
