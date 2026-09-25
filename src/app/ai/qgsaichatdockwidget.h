@@ -72,6 +72,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
   public slots:
     void rebuildHistoryMenu();
+    //! The map changed (view, active layer, selection): updates the map context pill shortly after.
+    void scheduleMapContextRefresh();
 
   protected:
     bool eventFilter( QObject *watched, QEvent *event ) override;
@@ -114,6 +116,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles );
     void sendNextQueuedMessage();
     void refreshQueueBar();
+    void refreshMapContextPill();
     //! Suggested first prompts for the open project while the chat is empty.
     void refreshEmptyState();
     //! Prompts that work on the open project (its health checks first, then its layers).
@@ -265,6 +268,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     };
     QList<QueuedMessage> mQueuedMessages;
     QPointer<QFrame> mEmptyState;
+    QToolButton *mMapContextPill = nullptr;
+    QTimer *mMapContextTimer = nullptr;
     QWidget *mQueueBar = nullptr;
     QLabel *mQueueLabel = nullptr;
 

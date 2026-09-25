@@ -149,3 +149,8 @@ the Windows reference machine measurements are still to be done.
 - One language in the chat: the attachment states were in Italian among English labels.
   The release dry-run of the AI settings is only shown with `strata/developer_mode` or the
   `STRATA_DEVELOPER` environment variable.
+- The assistant knows what you are looking at: each message tells the model the map view
+  (CRS, scale, extent), the layer selected in the Layers panel and the features selected
+  in it, so "compute the area of the selected features" works without naming the layer. A
+  pill above the message box shows it ("Parcels · 12 selected · 1:5,000"); a click leaves
+  it out of the next messages.

@@ -940,6 +940,25 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mFileContextChipRow->setVisible( false );
   layout->addWidget( mFileContextChipRow );
 
+  // What the model gets about the map with the next message; a click leaves it out.
+  mMapContextPill = new QToolButton( container );
+  mMapContextPill->setObjectName( u"aiMapContextPill"_s );
+  mMapContextPill->setCheckable( true );
+  mMapContextPill->setChecked( true );
+  mMapContextPill->setAutoRaise( true );
+  mMapContextPill->setToolButtonStyle( Qt::ToolButtonTextOnly );
+  mMapContextPill->setStyleSheet(
+    u"QToolButton#aiMapContextPill { color: palette(window-text); background: palette(alternate-base); border: 0; border-radius: 9px; padding: 2px 8px; } "
+    "QToolButton#aiMapContextPill:!checked { color: palette(mid); background: transparent; text-decoration: line-through; }"_s
+  );
+  mMapContextPill->setVisible( false );
+  connect( mMapContextPill, &QToolButton::toggled, this, [this]( bool included ) {
+    if ( mSessionManager )
+      mSessionManager->setMapContextIncluded( included );
+    refreshMapContextPill();
+  } );
+  layout->addWidget( mMapContextPill, 0, Qt::AlignLeft );
+
   // Messages typed while the assistant works wait here and leave when it finishes.
   mQueueBar = new QWidget( container );
   mQueueBar->setObjectName( u"aiQueueBar"_s );
@@ -3335,6 +3354,31 @@ void QgsAiChatDockWidget::refreshQueueBar()
   mQueueLabel->setText( mQueuedMessages.size() == 1 ? tr( "Queued: %1" ).arg( first ) : tr( "Queued: %1 (+%2 more)" ).arg( first ).arg( mQueuedMessages.size() - 1 ) );
 }
 
+void QgsAiChatDockWidget::scheduleMapContextRefresh()
+{
+  if ( !mMapContextTimer )
+  {
+    mMapContextTimer = new QTimer( this );
+    mMapContextTimer->setSingleShot( true );
+    mMapContextTimer->setInterval( 200 );
+    connect( mMapContextTimer, &QTimer::timeout, this, &QgsAiChatDockWidget::refreshMapContextPill );
+  }
+  mMapContextTimer->start();
+}
+
+void QgsAiChatDockWidget::refreshMapContextPill()
+{
+  if ( !mMapContextPill || !mSessionManager )
+    return;
+  const QString summary = mSessionManager->mapContextSummary();
+  mMapContextPill->setVisible( !summary.isEmpty() );
+  mMapContextPill->setText( summary );
+  mMapContextPill->setToolTip(
+    mSessionManager->isMapContextIncluded() ? tr( "Sent with your message: the map view, the active layer and its selection. Click to leave it out." )
+                                            : tr( "Not sent with your message. Click to send the map view, the active layer and its selection again." )
+  );
+}
+
 void QgsAiChatDockWidget::focusPrompt()
 {
   if ( !mInputTextEdit )
@@ -4028,6 +4072,7 @@ void QgsAiChatDockWidget::showEvent( QShowEvent *event )
   QgsDockWidget::showEvent( event );
   maybeShowWelcomeBanner();
   refreshEmptyState();
+  refreshMapContextPill();
 }
 
 void QgsAiChatDockWidget::maybeShowWelcomeBanner()

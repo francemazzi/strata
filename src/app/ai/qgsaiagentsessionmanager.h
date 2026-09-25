@@ -16,6 +16,8 @@
 #ifndef QGSAIAGENTSESSIONMANAGER_H
 #define QGSAIAGENTSESSIONMANAGER_H
 
+#include <functional>
+
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "qgis_app.h"
 #include "qgsaiagentpolicy.h"
@@ -23,6 +25,8 @@
 #include "qgsaimodelrouter.h"
 #include "qgsaimodels.h"
 #include "qgsaitool.h"
+#include "qgscoordinatereferencesystem.h"
+#include "qgsrectangle.h"
 
 #include <QHash>
 #include <QList>
@@ -38,6 +42,19 @@ class QgsAiReviewPatchEngine;
 class QgsAiToolRegistry;
 class QgsTask;
 class QTimer;
+
+/**
+ * What the user is looking at in the map: the model gets it with every message, so "the
+ * selected features" or "this area" need no layer name or coordinates.
+ */
+struct APP_EXPORT QgsAiMapContext
+{
+    //! Layer selected in the Layers panel, empty for none.
+    QString activeLayerId;
+    QgsRectangle extent;
+    QgsCoordinateReferenceSystem crs;
+    double scale = 0;
+};
 
 struct APP_EXPORT QgsAiChatContextFile
 {
@@ -103,6 +120,22 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
 
     //! Stores the active agent as the one to start with next time (the user picked it).
     void rememberActiveAgent() const;
+
+    //! Where the map context comes from (the main window's canvas).
+    void setMapContextProvider( const std::function<QgsAiMapContext()> &provider ) { mMapContextProvider = provider; }
+
+    /**
+     * Lines about the map sent with each message: view, active layer and its selection. Empty
+     * without a provider or when the user left the map context out.
+     */
+    QString mapContextText() const;
+
+    //! One short line for the chat ("Parcels · 12 selected · 1:5,000"), empty when there is nothing to say.
+    QString mapContextSummary() const;
+
+    //! The user may leave the map context out of the next messages.
+    void setMapContextIncluded( bool included ) { mMapContextIncluded = included; }
+    bool isMapContextIncluded() const { return mMapContextIncluded; }
 
     //! Settings key of the agent Strata starts with.
     static QString startAgentSettingsKey() { return u"strata/agent/mode"_s; }
@@ -432,6 +465,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QString mActiveRequestId;
     //! Id of the tool call running now, for its progress.
     QString mRunningToolCallId;
+    std::function<QgsAiMapContext()> mMapContextProvider;
+    bool mMapContextIncluded = true;
     QgsAiModelRouter::Provider mActiveProvider = QgsAiModelRouter::Provider::OpenAi;
     QString mCurrentPrompt;
     QList<QgsAiChatContextFile> mCurrentContextFiles;
@@ -473,6 +508,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QTimer *mAgentHeartbeatTimer = nullptr;
 
     friend class TestQgsAiDatabaseTools;
+    friend class TestQgsAiAgentSessionManager;
 };
 
 #endif // QGSAIAGENTSESSIONMANAGER_H

@@ -42,6 +42,7 @@
 #include "qgsproject.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
+#include "qgsvectorlayer.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -55,6 +56,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QLocale>
 #include <QMessageBox>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -707,6 +709,64 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
 QStringList QgsAiAgentSessionManager::availableAgents() const
 {
   return QStringList() << u"planner"_s << u"reviewer"_s << u"ask_before_edits"_s << u"editor"_s;
+}
+
+QString QgsAiAgentSessionManager::mapContextText() const
+{
+  if ( !mMapContextProvider || !mMapContextIncluded )
+    return QString();
+  const QgsAiMapContext context = mMapContextProvider();
+  QString text;
+  if ( !context.extent.isEmpty() )
+  {
+    text += u"Map view: %1, scale 1:%2, extent %3\n"_s.arg( context.crs.authid().isEmpty() ? u"(no CRS)"_s : context.crs.authid() )
+              .arg( QString::number( std::round( context.scale ) ) )
+              .arg( context.extent.toString( 2 ) );
+  }
+  QgsMapLayer *layer = context.activeLayerId.isEmpty() ? nullptr : QgsProject::instance()->mapLayer( context.activeLayerId );
+  if ( layer )
+  {
+    // Layer names are workspace-controlled: flattened like the layer list above.
+    const QString name = sanitizeUntrustedLabel( layer->name() );
+    text += u"Active layer: %1 (id=%2). When the user says \"the layer\" without a name, this is it.\n"_s.arg( name, sanitizeUntrustedLabel( layer->id() ) );
+    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      const QgsFeatureIds selected = vector->selectedFeatureIds();
+      if ( !selected.isEmpty() )
+      {
+        QList<QgsFeatureId> sample( selected.cbegin(), selected.cend() );
+        std::sort( sample.begin(), sample.end() );
+        QStringList ids;
+        for ( int i = 0; i < std::min<qsizetype>( 20, sample.size() ); ++i )
+          ids << QString::number( sample.at( i ) );
+        text += u"Selected features in %1: %2 (feature ids %3%4). \"The selected features\" means these.\n"_s.arg( name )
+                  .arg( selected.size() )
+                  .arg( ids.join( ", "_L1 ) )
+                  .arg( sample.size() > 20 ? u", …"_s : QString() );
+      }
+    }
+  }
+  return text;
+}
+
+QString QgsAiAgentSessionManager::mapContextSummary() const
+{
+  if ( !mMapContextProvider )
+    return QString();
+  const QgsAiMapContext context = mMapContextProvider();
+  QStringList parts;
+  if ( QgsMapLayer *layer = context.activeLayerId.isEmpty() ? nullptr : QgsProject::instance()->mapLayer( context.activeLayerId ) )
+  {
+    parts << layer->name();
+    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      if ( vector->selectedFeatureCount() > 0 )
+        parts << tr( "%n selected", nullptr, static_cast<int>( vector->selectedFeatureCount() ) );
+    }
+  }
+  if ( context.scale > 0 )
+    parts << u"1:%1"_s.arg( QLocale().toString( std::round( context.scale ), 'f', 0 ) );
+  return parts.join( u" · "_s );
 }
 
 void QgsAiAgentSessionManager::rememberActiveAgent() const
@@ -2418,6 +2478,8 @@ QString QgsAiAgentSessionManager::buildSystemPrompt( const QString &extraContext
     if ( layers.size() > 10 )
       prompt += u"  …%1 more (use list_project_layers for the full list).\n"_s.arg( layers.size() - 10 );
   }
+  // What the user is looking at: "the selected features" or "this area" need no layer name.
+  prompt += mapContextText();
 
   // Tool list is injected so the model has discoverable names alongside the JSON schema,
   // but only when the user actually allows custom actions. Otherwise we hide the catalog

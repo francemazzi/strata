@@ -23,9 +23,14 @@
 #include "qgsaitestloopbackserver.h"
 #include "qgsapplication.h"
 #include "qgsfeedback.h"
+#include "qgsgeometry.h"
+#include "qgspointxy.h"
+#include "qgsproject.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
+#include "qgsvectordataprovider.h"
+#include "qgsvectorlayer.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -519,6 +524,7 @@ class TestQgsAiAgentSessionManager : public QObject
     void agentModeAsksOnlyBeforeWhatCannotBeUndone();
     void toolSignalsAndUndoTurn();
     void retryAndEditUndoTheDroppedAnswer();
+    void mapContextTellsTheModelWhatTheUserSees();
     void toolCallLimitPausesAndContinues();
     void cumulativeToolBudgetStopsAutomaticContinuation();
     void repeatedEquivalentToolCallsStopTurn();
@@ -1139,6 +1145,58 @@ void TestQgsAiAgentSessionManager::retryAndEditUndoTheDroppedAnswer()
   QVERIFY( !manager.retryLastTurn( &error ) );
   QVERIFY2( error.contains( u"cannot be undone"_s ), qPrintable( error ) );
   QCOMPARE( contents(), before );
+}
+
+void TestQgsAiAgentSessionManager::mapContextTellsTheModelWhatTheUserSees()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:3003"_s, u"Parcels"_s, u"memory"_s );
+  QgsFeatureList features;
+  for ( int i = 0; i < 3; ++i )
+  {
+    QgsFeature point;
+    point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 1500000 + i, 5000000 ) ) );
+    features << point;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  QgsProject::instance()->addMapLayer( layer );
+  QgsFeatureIds all;
+  QgsFeatureIterator it = layer->getFeatures();
+  QgsFeature feature;
+  while ( it.nextFeature( feature ) )
+    all.insert( feature.id() );
+  QgsFeatureIds two( all );
+  two.erase( two.begin() );
+  layer->selectByIds( two );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  // Without a provider there is nothing to say.
+  QVERIFY( manager.mapContextText().isEmpty() );
+  const QString layerId = layer->id();
+  manager.setMapContextProvider( [layerId]() {
+    QgsAiMapContext context;
+    context.activeLayerId = layerId;
+    context.extent = QgsRectangle( 1499000, 4999000, 1502000, 5001000 );
+    context.crs = QgsCoordinateReferenceSystem( u"EPSG:3003"_s );
+    context.scale = 5000;
+    return context;
+  } );
+
+  // "The selected features" needs no layer name.
+  const QString prompt = manager.buildSystemPrompt();
+  QVERIFY( prompt.contains( u"Map view: EPSG:3003, scale 1:5000"_s ) );
+  QVERIFY( prompt.contains( u"Active layer: Parcels (id=%1)"_s.arg( layerId ) ) );
+  QVERIFY( prompt.contains( u"Selected features in Parcels: 2 (feature ids"_s ) );
+  QCOMPARE( manager.mapContextSummary(), u"Parcels · 2 selected · 1:%1"_s.arg( QLocale().toString( 5000.0, 'f', 0 ) ) );
+
+  // The user can leave it out.
+  manager.setMapContextIncluded( false );
+  QVERIFY( !manager.buildSystemPrompt().contains( u"Active layer"_s ) );
 }
 
 void TestQgsAiAgentSessionManager::agentBehaviorSettingsRoundTrip()

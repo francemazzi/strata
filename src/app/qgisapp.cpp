@@ -1556,6 +1556,17 @@ QgisApp::QgisApp(
   mAiSessionManager->setToolRegistry( mAiToolRegistry.get() );
   mAiSessionManager->setWorkspaceIndex( mAiWorkspaceIndex.get() );
   mAiSessionManager->setHistoryStore( mAiChatHistoryStore.get() );
+  // The model knows what the user is looking at: the map view, the active layer and its selection.
+  mAiSessionManager->setMapContextProvider( [this]() {
+    QgsAiMapContext context;
+    if ( !mMapCanvas )
+      return context;
+    context.activeLayerId = mMapCanvas->currentLayer() ? mMapCanvas->currentLayer()->id() : QString();
+    context.extent = mMapCanvas->extent();
+    context.crs = mMapCanvas->mapSettings().destinationCrs();
+    context.scale = mMapCanvas->scale();
+    return context;
+  } );
   connect( QgsProject::instance(), &QgsProject::cleared, this, [this]() {
     if ( mAiSessionManager )
       mAiSessionManager->resetProjectChatHistoryScope();
@@ -1580,6 +1591,9 @@ QgisApp::QgisApp(
   mAiChatDock->setDiscoveryController( discoveryController );
   mAiChatDock->setLayerIndexCoordinator( mAiLayerIndexCoordinator.get() );
   mAiChatDock->setIndexingActivity( mAiIndexingActivity.get() );
+  connect( mMapCanvas, &QgsMapCanvas::extentsChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
+  connect( mMapCanvas, &QgsMapCanvas::currentLayerChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
+  connect( mMapCanvas, &QgsMapCanvas::selectionChanged, mAiChatDock, &QgsAiChatDockWidget::scheduleMapContextRefresh );
   connect( mAiChatDock, &QgsAiChatDockWidget::embeddingProviderSettingsChanged, this, [this]() {
     if ( !mAiWorkspaceIndex )
       return;

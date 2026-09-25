@@ -241,6 +241,7 @@ class TestQgsAiChatDockWidget : public QObject
     void toolCardsShowLiveStateAndUndo();
     void messagesTypedDuringATurnAreQueued();
     void emptyChatSuggestsPromptsForTheProject();
+    void mapContextPillShowsWhatIsSent();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
@@ -1214,6 +1215,40 @@ void TestQgsAiChatDockWidget::emptyChatSuggestsPromptsForTheProject()
   QVERIFY( !manager.history().isEmpty() );
   QCOMPARE( manager.history().first().content, u"Buffer Parcels by 100 m and add the result to the map."_s );
   QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiEmptyState"_s ) );
+}
+
+void TestQgsAiChatDockWidget::mapContextPillShowsWhatIsSent()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"Trees"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  const QString layerId = layer->id();
+  manager.setMapContextProvider( [layerId]() {
+    QgsAiMapContext context;
+    context.activeLayerId = layerId;
+    return context;
+  } );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiMapContextPill"_s );
+  QVERIFY( pill );
+  dock.scheduleMapContextRefresh();
+  QTRY_COMPARE( pill->text(), u"Trees"_s );
+  QVERIFY( !pill->isHidden() );
+
+  // A click leaves the map context out of the next messages; another brings it back.
+  pill->click();
+  QVERIFY( !manager.isMapContextIncluded() );
+  pill->click();
+  QVERIFY( manager.isMapContextIncluded() );
 }
 
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()
