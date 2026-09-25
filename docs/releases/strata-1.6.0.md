@@ -112,3 +112,5 @@ the Windows reference machine measurements are still to be done.
   with the same arguments returns the first outcome instead of running twice (needs the
   matching strata-be). Stopping a Data Hub extraction or a tree detection also cancels the
   job on the server, which stops spending quota.
+- Chat replies made only of tool calls are kept in the chat history even when it is stored
+  unencrypted; they were lost, leaving the tool results without their call.

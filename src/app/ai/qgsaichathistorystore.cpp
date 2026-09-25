@@ -526,7 +526,8 @@ bool QgsAiChatHistoryStore::appendMessage( const QString &sessionId, const QgsAi
   q.addBindValue( sessionId );
   q.addBindValue( qgsAiChatRoleToString( msg.role ) );
   bool encryptionOk = true;
-  q.addBindValue( encryptedChatValueForPersistence( msg.content, &encryptionOk ) );
+  // A reply made only of tool calls has no text: stored as empty, since the column is NOT NULL.
+  q.addBindValue( encryptedChatValueForPersistence( msg.content.isNull() ? u""_s : msg.content, &encryptionOk ) );
   if ( !encryptionOk )
     return false;
   q.addBindValue( msg.timestamp.isValid() ? msg.timestamp.toMSecsSinceEpoch() : QDateTime::currentMSecsSinceEpoch() );
