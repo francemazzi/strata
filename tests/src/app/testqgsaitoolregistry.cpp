@@ -16,12 +16,15 @@
 #include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsaireadtools.h"
 #include "ai/tools/qgsairunpythontool.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
+#include "qgsexpression.h"
+#include "qgsexpressionfunction.h"
 #include "qgsfeature.h"
 #include "qgsgeometry.h"
 #include "qgsgraduatedsymbolrenderer.h"
@@ -35,6 +38,7 @@
 #include "qgsmapcanvas.h"
 #include "qgsnativealgorithms.h"
 #include "qgspallabeling.h"
+#include "qgspointxy.h"
 #include "qgsprintlayout.h"
 #include "qgsprocessingalgorithm.h"
 #include "qgsprocessingprovider.h"
@@ -42,8 +46,10 @@
 #include "qgsproject.h"
 #include "qgsrectangle.h"
 #include "qgsrenderer.h"
+#include "qgsrulebasedrenderer.h"
 #include "qgssettings.h"
 #include "qgssinglesymbolrenderer.h"
+#include "qgssymbol.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectordataprovider.h"
@@ -51,6 +57,8 @@
 #include "qgsvectorlayerlabeling.h"
 
 #include <QColor>
+#include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
@@ -62,6 +70,7 @@
 #include <QSize>
 #include <QString>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 
 using namespace Qt::StringLiterals;
@@ -166,12 +175,17 @@ class TestQgsAiToolRegistry : public QObject
     void registryAuditsRiskyToolMetadataOnly();
     void captureMapCanvasRequiresConsent();
     void captureMapCanvasCreatesCappedPng();
+    void captureMapCanvasStopsWaitingForASlowLayer();
+    void captureMapCanvasStopsOnStop();
+    void fileToolsSkipExcludedFoldersAndReportTruncation();
     void runPythonDiagnosticsAreConservative();
     void runPythonFeatureLoopHintDoesNotChangeDiagnosis();
     void setCanvasExtentSetsZoomsAndRollsBack();
     void setCanvasExtentIgnoresEmptyOptionalStrings();
     void addLayerFromFileRejectsUnusableVectors();
     void addLayerFromFileRejectsSidecarFiles();
+    void addLayerFromFileLoadsInBackgroundAndStops();
+    void processingOutputsCanBeUndone();
     void addLayerFromFileContextQualityCheckKeepsInterfaceResponsive();
     void addLayerFromFileContextQualityCheckFindsInvalidValue();
     void addLayerFromFileStopDuringQualityCheckRemovesLayer();
@@ -354,6 +368,124 @@ void TestQgsAiToolRegistry::registryAuditsRiskyToolMetadataOnly()
   QVERIFY( line.contains( u"success=true"_s ) );
   QVERIFY( line.contains( u"args_sha256"_s ) );
   QVERIFY( !line.contains( u"secret payload"_s ) );
+}
+
+namespace
+{
+  //! Takes 50 ms per feature drawn: a layer as slow as an unresponsive web service.
+  class RegistryTestSlowRenderFunction : public QgsExpressionFunction
+  {
+    public:
+      RegistryTestSlowRenderFunction()
+        : QgsExpressionFunction( u"ai_test_slow_render"_s, 0, u"Custom"_s )
+      {}
+
+      QVariant func( const QVariantList &, const QgsExpressionContext *, QgsExpression *, const QgsExpressionNodeFunction * ) override
+      {
+        QThread::msleep( 50 );
+        return true;
+      }
+  };
+
+  //! A canvas showing 200 points whose rule calls ai_test_slow_render(), about 10 s to draw.
+  std::unique_ptr<QgsVectorLayer> registryTestSlowLayer( QgsMapCanvas &canvas )
+  {
+    if ( !QgsExpression::isFunctionName( u"ai_test_slow_render"_s ) )
+      QgsExpression::registerFunction( new RegistryTestSlowRenderFunction() );
+    auto layer = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326"_s, u"slow"_s, u"memory"_s );
+    QgsFeatureList features;
+    for ( int i = 0; i < 200; ++i )
+    {
+      QgsFeature feature;
+      feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( i * 0.05, i * 0.025 ) ) );
+      features << feature;
+    }
+    layer->dataProvider()->addFeatures( features );
+    auto *root = new QgsRuleBasedRenderer::Rule( nullptr );
+    root->appendChild( new QgsRuleBasedRenderer::Rule( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ), 0, 0, u"ai_test_slow_render()"_s ) );
+    layer->setRenderer( new QgsRuleBasedRenderer( root ) );
+    canvas.resize( 400, 300 );
+    canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:4326"_s ) );
+    canvas.setLayers( { layer.get() } );
+    canvas.setExtent( QgsRectangle( 0, 0, 10, 5 ) );
+    return layer;
+  }
+} // namespace
+
+void TestQgsAiToolRegistry::captureMapCanvasStopsWaitingForASlowLayer()
+{
+  QgsSettings().setValue( u"strata/visual_context/image_send_consent"_s, true );
+  QgsMapCanvas canvas;
+  const std::unique_ptr<QgsVectorLayer> layer = registryTestSlowLayer( canvas );
+
+  QgsAiCaptureMapCanvasTool tool( &canvas );
+  tool.setRenderTimeoutMs( 500 );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiToolResult result = tool.execute( QJsonObject() );
+  QVERIFY2( clock.elapsed() < 2500, QString::number( clock.elapsed() ).toUtf8().constData() );
+  // What was drawn is returned, with a warning about the slow layer.
+  QVERIFY2( result.success, result.errorMessage.toUtf8().constData() );
+  QVERIFY( result.output.toObject().value( u"warning"_s ).toString().contains( u"did not finish drawing"_s ) );
+  // The abandoned drawing ends on its own.
+  QTest::qWait( 300 );
+}
+
+void TestQgsAiToolRegistry::captureMapCanvasStopsOnStop()
+{
+  QgsSettings().setValue( u"strata/visual_context/image_send_consent"_s, true );
+  QgsMapCanvas canvas;
+  const std::unique_ptr<QgsVectorLayer> layer = registryTestSlowLayer( canvas );
+
+  QgsAiCaptureMapCanvasTool tool( &canvas );
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiToolResult result = tool.execute( QJsonObject() );
+  QVERIFY2( clock.elapsed() < 1500, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QVERIFY( result.canceled );
+  QTest::qWait( 300 );
+}
+
+void TestQgsAiToolRegistry::fileToolsSkipExcludedFoldersAndReportTruncation()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QDir dir( root.path() );
+  for ( const QString &path : { u"a.txt"_s, u"b.txt"_s, u".git/c.txt"_s, u"sub/node_modules/d.txt"_s, u"sub/e.txt"_s } )
+  {
+    QVERIFY( dir.mkpath( QFileInfo( dir.filePath( path ) ).path() ) );
+    QFile file( dir.filePath( path ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "a needle in the file\n" );
+  }
+  QgsAiFileContextProvider provider( root.path() );
+
+  QgsAiSearchFilesTool search( &provider );
+  QgsAiToolResult result = search.execute( QJsonObject { { u"query"_s, u"needle"_s } } );
+  QVERIFY2( result.success, result.errorMessage.toUtf8().constData() );
+  QJsonObject output = result.output.toObject();
+  QStringList paths;
+  for ( const QJsonValue &match : output.value( u"matches"_s ).toArray() )
+    paths << match.toObject().value( u"path"_s ).toString();
+  paths.sort();
+  QCOMPARE( paths, QStringList( { u"a.txt"_s, u"b.txt"_s, u"sub/e.txt"_s } ) );
+  QVERIFY( !output.value( u"truncated"_s ).toBool() );
+
+  result = search.execute( QJsonObject { { u"query"_s, u"needle"_s }, { u"max_results"_s, 2 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 2 );
+  QVERIFY( output.value( u"truncated"_s ).toBool() );
+
+  QgsAiListFilesTool list( &provider );
+  result = list.execute( QJsonObject { { u"max"_s, 10 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 3 );
+  QVERIFY( !output.value( u"truncated"_s ).toBool() );
+  result = list.execute( QJsonObject { { u"max"_s, 2 } } );
+  output = result.output.toObject();
+  QCOMPARE( output.value( u"count"_s ).toInt(), 2 );
+  QVERIFY( output.value( u"truncated"_s ).toBool() );
 }
 
 void TestQgsAiToolRegistry::captureMapCanvasRequiresConsent()
@@ -578,6 +710,53 @@ void TestQgsAiToolRegistry::addLayerFromFileRejectsUnusableVectors()
   QCOMPARE( output.value( u"feature_count"_s ).toVariant().toLongLong(), 1 );
   QCOMPARE( output.value( u"spatial"_s ).toBool(), false );
   QVERIFY( output.value( u"extent"_s ).isNull() );
+  QCOMPARE( project.mapLayers().size(), 1 );
+}
+
+void TestQgsAiToolRegistry::addLayerFromFileLoadsInBackgroundAndStops()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  // 150000 points: OGR parses the whole GeoJSON when opening it, about a second.
+  QFile geojson( tempDir.filePath( u"big.geojson"_s ) );
+  QVERIFY( geojson.open( QIODevice::WriteOnly ) );
+  geojson.write( R"({"type":"FeatureCollection","features":[)" );
+  for ( int i = 0; i < 150000; ++i )
+    geojson.write( u"%1{\"type\":\"Feature\",\"properties\":{\"id\":%2},\"geometry\":{\"type\":\"Point\",\"coordinates\":[%3,%4]}}"_s.arg( i ? u","_s : QString() )
+                     .arg( i )
+                     .arg( 11 + i % 1000 * 0.001 )
+                     .arg( 45 + i / 1000 * 0.001 )
+                     .toUtf8() );
+  geojson.write( "]}" );
+  geojson.close();
+
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+  QgsAiAddLayerFromFileTool tool( &contextProvider, &project );
+  QJsonObject args;
+  args.insert( u"path"_s, u"big.geojson"_s );
+
+  // The window keeps turning while the file is read.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 10 );
+  const QgsAiToolResult loaded = tool.execute( args );
+  ticker.stop();
+  QVERIFY2( loaded.success, qPrintable( loaded.errorMessage ) );
+  QVERIFY2( ticks >= 5, QString::number( ticks ).toUtf8().constData() );
+  QCOMPARE( loaded.output.toObject().value( u"feature_count"_s ).toVariant().toLongLong(), 150000LL );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  QgsMapLayer *layer = project.mapLayers().first();
+  QCOMPARE( layer->thread(), QThread::currentThread() );
+
+  // Stop while loading: no layer is added.
+  QTimer::singleShot( 50, []() { qgsAiCancelActiveBackgroundTool(); } );
+  const QgsAiToolResult stopped = tool.execute( args );
+  QVERIFY( stopped.canceled );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  // The abandoned load ends on its own before the file goes away.
+  QTRY_COMPARE_WITH_TIMEOUT( QgsApplication::taskManager()->countActiveTasks(), 0, 10000 );
   QCOMPARE( project.mapLayers().size(), 1 );
 }
 
@@ -1001,6 +1180,39 @@ void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()
   const QgsAiToolResult result = tool.execute( args );
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"Unknown Processing algorithm"_s ) || result.errorMessage.contains( u"not available"_s ) );
+}
+
+void TestQgsAiToolRegistry::processingOutputsCanBeUndone()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+  QgsProject project;
+  auto *points = new QgsVectorLayer( u"Point?crs=EPSG:3857"_s, u"points"_s, u"memory"_s );
+  QgsFeature point( points->fields() );
+  point.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 0, 0 ) ) );
+  QVERIFY( points->dataProvider()->addFeature( point ) );
+  project.addMapLayer( points );
+
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+  QJsonObject args;
+  args.insert( u"algorithm_id"_s, u"native:buffer"_s );
+  args.insert( u"parameters"_s, QJsonObject { { u"INPUT"_s, points->id() }, { u"DISTANCE"_s, 100 } } );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 2 );
+  const QJsonObject output = result.output.toObject();
+  // "Buffer by 100 m" can be undone from the chat: the output layer leaves the project.
+  QVERIFY( output.value( u"diff"_s ).toObject().value( u"rollback_supported"_s ).toBool() );
+  const QString token = output.value( u"rollback_token"_s ).toString();
+  QVERIFY( !token.isEmpty() );
+  QVERIFY( project.mapLayer( output.value( u"layer_id"_s ).toString() ) );
+
+  const QgsAiToolResult undone = tool.execute( QJsonObject { { u"rollback_token"_s, token } } );
+  QVERIFY2( undone.success, qPrintable( undone.errorMessage ) );
+  QCOMPARE( project.mapLayers().size(), 1 );
+  QVERIFY( project.mapLayer( points->id() ) );
+  // A token undoes once.
+  QVERIFY( !tool.execute( QJsonObject { { u"rollback_token"_s, token } } ).success );
 }
 
 void TestQgsAiToolRegistry::processingToolAcceptsJsonEnumAndRunsOffThread()

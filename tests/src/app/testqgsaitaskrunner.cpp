@@ -4,6 +4,7 @@
   begin                : September 2026
 ***************************************************************************/
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -13,14 +14,17 @@
 #include "qgsexpression.h"
 #include "qgsexpressionfunction.h"
 #include "qgsfeedback.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
 #include "qgstaskmanager.h"
 #include "qgstest.h"
 #include "qgsvectorlayer.h"
 
+#include <QElapsedTimer>
 #include <QPointer>
 #include <QScopeGuard>
 #include <QString>
+#include <QStringList>
 #include <QThread>
 #include <QTimer>
 
@@ -84,9 +88,17 @@ class TestQgsAiTaskRunner : public QObject
     void tasksAreSilentAndCancelWithoutPrompt();
     void cancelHookRunsOnStop();
     void progressHandlerReceivesUpdates();
+    void guiStallMonitorNamesOverlappingScope();
     void guiThreadExpressionFunction_data();
     void guiThreadExpressionFunction();
     void registeredFunctionNeedsGuiThread();
+    void processRunsWithoutFreezingAndCollectsOutput();
+    void stopEndsAProcess();
+    void processTimeoutEndsIt();
+    void slicesLetTheWindowTurn();
+    void smallApplyNeedsNoEventLoop();
+    void stopBetweenSlices();
+    void stopLeavesAStuckWorkerBehind();
 };
 
 void TestQgsAiTaskRunner::initTestCase()
@@ -388,6 +400,159 @@ void TestQgsAiTaskRunner::registeredFunctionNeedsGuiThread()
   QVERIFY( QgsExpression::registerFunction( new RegisteredTestFunction(), true ) );
   const auto unregister = qScopeGuard( []() { QgsExpression::unregisterFunction( u"strata_ai_test_function"_s ); } );
   QCOMPARE( qgsAiGuiThreadExpressionFunction( u"strata_ai_test_function() + 1"_s ), u"strata_ai_test_function"_s );
+}
+
+void TestQgsAiTaskRunner::guiStallMonitorNamesOverlappingScope()
+{
+  QStringList perfLines;
+  const QMetaObject::Connection connection
+    = connect( QgsApplication::messageLog(), &QgsMessageLog::messageReceivedWithFormat, this, [&perfLines]( const QString &message, const QString &tag, Qgis::MessageLevel, Qgis::StringFormat ) {
+        if ( tag == "AI/Perf"_L1 )
+          perfLines << message;
+      } );
+  const auto hasLine = [&perfLines]( const QString &prefix, const QString &needle ) {
+    return std::any_of( perfLines.cbegin(), perfLines.cend(), [&prefix, &needle]( const QString &line ) { return line.startsWith( prefix ) && line.contains( needle ); } );
+  };
+
+  qgsAiSetGuiStallMonitorThreshold( 50 );
+  QTest::qWait( 60 );
+  {
+    // A quick scope under its minimum is not logged.
+    const QgsAiPerfScope quick( u"test"_s, u"quick"_s, 1000 );
+  }
+  {
+    const QgsAiPerfScope scope( u"test"_s, u"block"_s );
+    QThread::msleep( 250 );
+  }
+  QTRY_VERIFY_WITH_TIMEOUT( hasLine( u"gui_stall"_s, u"test:block"_s ), 2000 );
+  qgsAiSetGuiStallMonitorThreshold( 0 );
+  disconnect( connection );
+
+  QVERIFY( hasLine( u"test block elapsedMs="_s, QString() ) );
+  QVERIFY( !hasLine( u"test quick"_s, QString() ) );
+}
+
+void TestQgsAiTaskRunner::processRunsWithoutFreezingAndCollectsOutput()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  // The interface keeps turning while the process runs.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 20 );
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 0.4; echo out; echo err 1>&2; exit 3"_s }, 10000 );
+  ticker.stop();
+  QVERIFY( result.started );
+  QVERIFY( !result.canceled );
+  QVERIFY( !result.timedOut );
+  QCOMPARE( result.exitCode, 3 );
+  QCOMPARE( result.standardOutput.trimmed(), u"out"_s );
+  QCOMPARE( result.standardError.trimmed(), u"err"_s );
+  QVERIFY( ticks >= 10 );
+
+  const QgsAiProcessResult missing = qgsAiRunProcess( u"test process"_s, u"/nonexistent/program"_s, {}, 1000 );
+  QVERIFY( !missing.started );
+  QVERIFY( !missing.error.isEmpty() );
+}
+
+void TestQgsAiTaskRunner::stopEndsAProcess()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  QTimer::singleShot( 300, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 30"_s }, 60000 );
+  QVERIFY( result.canceled );
+  QVERIFY2( clock.elapsed() < 2000, QString::number( clock.elapsed() ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::processTimeoutEndsIt()
+{
+#ifdef Q_OS_WIN
+  QSKIP( "Uses a POSIX shell." );
+#endif
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiProcessResult result = qgsAiRunProcess( u"test process"_s, u"/bin/sh"_s, { u"-c"_s, u"sleep 30"_s }, 300 );
+  QVERIFY( result.timedOut );
+  QVERIFY( !result.canceled );
+  QVERIFY2( clock.elapsed() < 2500, QString::number( clock.elapsed() ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::slicesLetTheWindowTurn()
+{
+  // 300 items of 2 ms each: about 12 slices, and the window turns between them.
+  int ticks = 0;
+  QTimer ticker;
+  connect( &ticker, &QTimer::timeout, this, [&ticks]() { ++ticks; } );
+  ticker.start( 10 );
+  int applied = 0;
+  const QgsAiSliceResult result = qgsAiApplyInSlices( u"Writing"_s, 300, [&applied]( int ) {
+    QThread::msleep( 2 );
+    ++applied;
+    return true;
+  } );
+  ticker.stop();
+  QCOMPARE( result, QgsAiSliceResult::Completed );
+  QCOMPARE( applied, 300 );
+  QVERIFY2( ticks >= 5, QString::number( ticks ).toUtf8().constData() );
+}
+
+void TestQgsAiTaskRunner::smallApplyNeedsNoEventLoop()
+{
+  // What fits in one slice runs inline: nothing else can run in between.
+  int maxLoopLevel = 0;
+  const QgsAiSliceResult result = qgsAiApplyInSlices( u"Writing"_s, 10, [&maxLoopLevel]( int ) {
+    maxLoopLevel = std::max( maxLoopLevel, QThread::currentThread()->loopLevel() );
+    return true;
+  } );
+  QCOMPARE( result, QgsAiSliceResult::Completed );
+  QCOMPARE( maxLoopLevel, 0 );
+}
+
+void TestQgsAiTaskRunner::stopBetweenSlices()
+{
+  int applied = 0;
+  QTimer::singleShot( 100, []() { qgsAiCancelActiveBackgroundTool(); } );
+  int failedIndex = -1;
+  const QgsAiSliceResult result = qgsAiApplyInSlices(
+    u"Writing"_s,
+    1000,
+    [&applied]( int ) {
+      QThread::msleep( 2 );
+      ++applied;
+      return true;
+    },
+    &failedIndex
+  );
+  QCOMPARE( result, QgsAiSliceResult::Canceled );
+  QVERIFY2( applied < 1000, QString::number( applied ).toUtf8().constData() );
+  QCOMPARE( failedIndex, -1 );
+}
+
+void TestQgsAiTaskRunner::stopLeavesAStuckWorkerBehind()
+{
+  // A worker in a call it cannot interrupt (a huge file being opened) ignores the feedback.
+  auto finished = std::make_shared<std::atomic_bool>( false );
+  QTimer::singleShot( 100, []() { qgsAiCancelActiveBackgroundTool(); } );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiTaskWaitResult result = qgsAiRunFunction( u"stuck"_s, [finished]( QgsFeedback * ) {
+    QThread::msleep( 2500 );
+    *finished = true;
+    return true;
+  } );
+  // Stop answers within a second; the worker ends on its own later.
+  QVERIFY2( clock.elapsed() < 1000, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QVERIFY( result.canceled );
+  QVERIFY( result.abandoned );
+  QVERIFY( !*finished );
+  QTRY_VERIFY_WITH_TIMEOUT( *finished, 5000 );
+  QVERIFY( qgsAiWaitForActiveTasks( 5000 ) );
 }
 
 QGSTEST_MAIN( TestQgsAiTaskRunner )

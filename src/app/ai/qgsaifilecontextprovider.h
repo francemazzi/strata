@@ -18,9 +18,12 @@
 
 #include "qgis_app.h"
 
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QStringList>
+
+class QgsFeedback;
 
 struct APP_EXPORT QgsAiFileContext
 {
@@ -39,7 +42,55 @@ class APP_EXPORT QgsAiFileContextProvider : public QObject
     Q_OBJECT
 
   public:
+    //! One file found by scanWorkspace(). Size and modification time come from the directory listing.
+    struct WorkspaceFile
+    {
+        QString relativePath;
+        QString absolutePath;
+        qint64 size = 0;
+        qint64 lastModifiedMs = 0;
+    };
+
+    struct WorkspaceScanOptions
+    {
+        //! Files and folders to visit at most.
+        int maxEntries = 50000;
+        //! Files to return at most (<= 0: no limit besides maxEntries).
+        int maxResults = 0;
+        //! Stop the walk after this many milliseconds (<= 0: no time limit).
+        int timeBudgetMs = 0;
+        //! Keep only files whose relative path contains this text (case-insensitive).
+        QString query;
+        //! More folder names to leave out at any depth, with * as wildcard (case-insensitive).
+        QStringList excludedFolders;
+    };
+
+    struct WorkspaceScanResult
+    {
+        QList<WorkspaceFile> files;
+        int visitedEntries = 0;
+        //! The walk stopped early: entry, result or time limit reached, or canceled.
+        bool truncated = false;
+        bool timedOut = false;
+    };
+
     explicit QgsAiFileContextProvider( const QString &workspaceRoot, QObject *parent = nullptr );
+
+    /**
+     * Walks \a workspaceRoot for files. Safe on any thread: it only reads the file system.
+     *
+     * Folders that never hold user data (version control, caches, virtual environments, …)
+     * are skipped at any depth instead of being walked and filtered afterwards, hidden entries
+     * and symbolic links are skipped, and so are cloud placeholder files that reading would
+     * download (OneDrive "Files On-Demand" on Windows).
+     */
+    static WorkspaceScanResult scanWorkspace( const QString &workspaceRoot, const WorkspaceScanOptions &options, QgsFeedback *feedback = nullptr );
+
+    //! True if a folder with this name is never walked by scanWorkspace().
+    static bool isExcludedFolderName( const QString &folderName );
+
+    //! True if \a path is on a network share (SMB, NFS, AFP, WebDAV, UNC path).
+    static bool isNetworkPath( const QString &path );
 
     /**
      * Resolves the AI workspace root: project home path, then strata/workspace/root,

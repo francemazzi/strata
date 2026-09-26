@@ -526,7 +526,8 @@ bool QgsAiChatHistoryStore::appendMessage( const QString &sessionId, const QgsAi
   q.addBindValue( sessionId );
   q.addBindValue( qgsAiChatRoleToString( msg.role ) );
   bool encryptionOk = true;
-  q.addBindValue( encryptedChatValueForPersistence( msg.content, &encryptionOk ) );
+  // A reply made only of tool calls has no text: stored as empty, since the column is NOT NULL.
+  q.addBindValue( encryptedChatValueForPersistence( msg.content.isNull() ? u""_s : msg.content, &encryptionOk ) );
   if ( !encryptionOk )
     return false;
   q.addBindValue( msg.timestamp.isValid() ? msg.timestamp.toMSecsSinceEpoch() : QDateTime::currentMSecsSinceEpoch() );
@@ -568,6 +569,32 @@ bool QgsAiChatHistoryStore::updateMessageMetadata( const QString &sessionId, con
   if ( q.numRowsAffected() <= 0 )
     return false;
 
+  return touchSession( sessionId );
+}
+
+bool QgsAiChatHistoryStore::removeMessages( const QString &sessionId, const QStringList &messageIds )
+{
+  if ( sessionId.isEmpty() || messageIds.isEmpty() )
+    return false;
+  if ( !ensureReady() )
+    return false;
+
+  QSqlDatabase db = QSqlDatabase::database( connectionName() );
+  QSqlQuery q( db );
+  q.prepare( u"DELETE FROM messages WHERE session_id = ? AND message_id = ?"_s );
+  db.transaction();
+  for ( const QString &messageId : messageIds )
+  {
+    q.addBindValue( sessionId );
+    q.addBindValue( messageId );
+    if ( !q.exec() )
+    {
+      QgsMessageLog::logMessage( u"removeMessages failed: %1"_s.arg( q.lastError().text() ), u"AI/ChatHistory"_s, Qgis::MessageLevel::Warning, false );
+      db.rollback();
+      return false;
+    }
+  }
+  db.commit();
   return touchSession( sessionId );
 }
 

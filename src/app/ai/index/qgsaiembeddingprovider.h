@@ -16,6 +16,7 @@
 #ifndef QGSAIEMBEDDINGPROVIDER_H
 #define QGSAIEMBEDDINGPROVIDER_H
 
+#include <atomic>
 #include <memory>
 
 #include "qgis_app.h"
@@ -85,6 +86,22 @@ class APP_EXPORT QgsAiEmbeddingProvider
     {
       Q_UNUSED( role )
       return embed( texts, out, errorMessage, options.maxBatch );
+    }
+
+    /**
+     * Frees what the provider keeps loaded (a local model) if it has not embedded anything for
+     * \a idleMs. The next embed() loads it again. Never waits: skipped while embedding.
+     */
+    virtual void releaseIdleResources( qint64 idleMs ) { Q_UNUSED( idleMs ) }
+
+    //! Longest input the model reads, in tokens: the rest of a longer text is lost. 0 when there is no practical limit.
+    virtual int maxInputTokens() const { return 0; }
+
+    //! Tokens of \a text for this model, or -1 when unknown. Safe on any thread; never loads the model.
+    virtual int tokenCount( const QString &text ) const
+    {
+      Q_UNUSED( text )
+      return -1;
     }
 };
 
@@ -169,19 +186,62 @@ class APP_EXPORT QgsAiE5EmbeddingProvider final : public QgsAiEmbeddingProvider
     QString modelId() const override { return modelName(); }
     QString modelRevision() const override { return pinnedModelRevision(); }
     int embeddingDimension() const override { return 384; }
+
+    /**
+     * True when the model files are installed and a previous load did not fail.
+     *
+     * Never loads the model: that happens on the first embed(), on the thread that calls it
+     * (a background task), so checking availability from the interface stays instant.
+     */
     bool isAvailable( QString *errorMessage = nullptr ) const override;
     bool embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage = nullptr, int maxBatch = 64 ) override;
     bool embed( const QStringList &texts, QgsAiEmbeddingRole role, QList<QVector<float>> &out, QString *errorMessage = nullptr, const QgsAiEmbeddingOptions &options = QgsAiEmbeddingOptions() ) override;
 
+    //! True once the ONNX session is loaded.
+    bool runtimeLoaded() const { return mRuntimeReady; }
+
+    //! Unloads the ONNX session and its roughly 300 MB when unused for \a idleMs.
+    void releaseIdleResources( qint64 idleMs ) override;
+
+    int maxInputTokens() const override;
+    //! Counts with the model's SentencePiece tokenizer, loaded apart from the model (5 MB).
+    int tokenCount( const QString &text ) const override;
+
+    //! Tokens a batch may hold, padding included: eight texts of the maximum length.
+    static constexpr int BATCH_TOKEN_BUDGET = 4096;
+
+    /**
+     * Groups texts of \a tokenCounts tokens into batches of at most \a maxBatch texts, shortest
+     * first, so that a batch padded to its longest text stays within \a tokenBudget tokens
+     * (a single longer text makes its own batch). Returns the indexes of each batch.
+     */
+    static QList<QList<int>> planBatches( const QVector<int> &tokenCounts, int maxBatch, int tokenBudget = BATCH_TOKEN_BUDGET );
+
   private:
     struct Runtime;
+    struct CountingTokenizer;
 
     bool ensureRuntime( QString *errorMessage = nullptr ) const;
+    //! ensureRuntime() with mRuntimeMutex already held.
+    bool ensureRuntimeLocked( QString *errorMessage ) const;
+    //! Records a load failure so isAvailable() reports it without touching the runtime lock.
+    void setLoadFailure( const QString &error ) const;
 
     mutable QMutex mRuntimeMutex;
     mutable std::unique_ptr<Runtime> mRuntime;
     mutable QString mRuntimeError;
     mutable bool mRuntimeLoadAttempted = false;
+    //! Read by isAvailable() without mRuntimeMutex, which embed() holds for a whole batch.
+    mutable std::atomic_bool mRuntimeReady { false };
+    mutable std::atomic_bool mRuntimeFailed { false };
+    //! When the runtime last embedded something, in milliseconds since the epoch.
+    std::atomic<qint64> mLastUseMs { 0 };
+    //! Tokenizer for tokenCount(), apart from mRuntime so counting never waits for an embedding batch.
+    mutable QMutex mCountingTokenizerMutex;
+    mutable std::unique_ptr<CountingTokenizer> mCountingTokenizer;
+    mutable bool mCountingTokenizerFailed = false;
+    mutable QMutex mLoadFailureMutex;
+    mutable QString mLoadFailure;
 };
 
 class APP_EXPORT QgsAiEmbeddingProviderRegistry
@@ -194,6 +254,17 @@ class APP_EXPORT QgsAiEmbeddingProviderRegistry
     static QStringList providerIds();
     static QString displayNameForProviderId( const QString &providerId );
     static bool isRemoteProviderId( const QString &providerId );
+
+    /**
+     * True once the user agreed that workspace content (file text, layer attributes and
+     * coordinates) is sent to the remote embedding provider \a providerId. Local providers
+     * need no consent.
+     */
+    static bool remoteEmbeddingConsented( const QString &providerId );
+    //! Records the user's answer about sending workspace content to \a providerId.
+    static void setRemoteEmbeddingConsent( const QString &providerId, bool consented );
+    static QString remoteEmbeddingConsentSettingsKey( const QString &providerId );
+
     static std::unique_ptr<QgsAiEmbeddingProvider> createProviderFromSettings( QObject *parent = nullptr );
     static std::unique_ptr<QgsAiEmbeddingProvider> createProvider( const QString &providerId, QObject *parent = nullptr );
 };

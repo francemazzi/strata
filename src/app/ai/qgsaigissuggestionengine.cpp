@@ -25,10 +25,14 @@
 #include "qgsrasterlayer.h"
 #include "qgssettings.h"
 #include "qgsvectorlayer.h"
+#include "qgsvectorlayerfeatureiterator.h"
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QHash>
+#include <QMutex>
 #include <QObject>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -54,55 +58,118 @@ namespace
     return suggestion;
   }
 
-  bool vectorHasInvalidGeometrySample( QgsVectorLayer *layer, int *checkedCount = nullptr )
-  {
-    if ( checkedCount )
-      *checkedCount = 0;
-    if ( !layer || layer->geometryType() == Qgis::GeometryType::Null || layer->geometryType() == Qgis::GeometryType::Unknown )
-      return false;
+  //! Geometry samples of the last completed check, by layer id: {features checked, invalid geometry found}.
+  QHash<QString, QPair<int, bool>> sGisGeometrySamples;
+  QMutex sGisGeometrySamplesMutex;
 
-    QgsFeatureRequest request;
-    request.setLimit( 200 );
-    QgsFeatureIterator it = layer->getFeatures( request );
-    QgsFeature feature;
-    while ( it.nextFeature( feature ) )
+  void gisSampleGeometries( QgsAiGisProjectSnapshot::Layer &layer, QgsFeedback *feedback )
+  {
+    int checked = 0;
+    bool invalid = false;
     {
-      if ( checkedCount )
-        ++( *checkedCount );
-      if ( feature.hasGeometry() && !feature.geometry().isGeosValid() )
-        return true;
+      QgsFeatureRequest request;
+      request.setLimit( QgsAiGisSuggestionEngine::GEOMETRY_SAMPLE_SIZE );
+      request.setNoAttributes();
+      request.setFeedback( feedback );
+      QgsFeatureIterator it = layer.source->getFeatures( request );
+      QgsFeature feature;
+      while ( !invalid && it.nextFeature( feature ) )
+      {
+        ++checked;
+        invalid = feature.hasGeometry() && !feature.geometry().isGeosValid();
+      }
     }
-    return false;
+    // The iterator is gone: release the provider connection now rather than with the snapshot.
+    layer.source.reset();
+    if ( feedback && feedback->isCanceled() )
+      return;
+    layer.geometrySampled = true;
+    layer.sampledFeatures = checked;
+    layer.invalidGeometry = invalid;
   }
 } // namespace
 
-QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsProject *project )
+QgsAiGisProjectSnapshot QgsAiGisSuggestionEngine::snapshotProject( QgsProject *project, bool sampleGeometries )
+{
+  QgsAiGisProjectSnapshot snapshot;
+  if ( !project )
+    return snapshot;
+
+  snapshot.hasProject = true;
+  snapshot.hasLayout = project->layoutManager() && !project->layoutManager()->layouts().isEmpty();
+
+  const QMutexLocker locker( &sGisGeometrySamplesMutex );
+  const QMap<QString, QgsMapLayer *> layers = project->mapLayers();
+  for ( QgsMapLayer *mapLayer : layers )
+  {
+    if ( !mapLayer )
+      continue;
+    QgsAiGisProjectSnapshot::Layer layer;
+    layer.id = mapLayer->id();
+    layer.name = mapLayer->name();
+    layer.visible = mapLayer->isValid() && mapLayer->opacity() > 0;
+    layer.crsValid = mapLayer->crs().isValid();
+
+    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( mapLayer ) )
+    {
+      layer.isVector = true;
+      layer.featureCount = vector->featureCount();
+
+      QSet<QString> seenFieldNames;
+      const QgsFields fields = vector->fields();
+      for ( const QgsField &field : fields )
+      {
+        const QString normalized = field.name().trimmed().toLower();
+        if ( normalized.isEmpty() || seenFieldNames.contains( normalized ) )
+          layer.problematicFields = true;
+        seenFieldNames.insert( normalized );
+      }
+
+      const bool hasGeometry = vector->isValid() && vector->geometryType() != Qgis::GeometryType::Null && vector->geometryType() != Qgis::GeometryType::Unknown;
+      if ( hasGeometry && sampleGeometries )
+      {
+        layer.source = std::make_shared<QgsVectorLayerFeatureSource>( vector );
+      }
+      else if ( hasGeometry && sGisGeometrySamples.contains( layer.id ) )
+      {
+        const QPair<int, bool> sample = sGisGeometrySamples.value( layer.id );
+        layer.geometrySampled = true;
+        layer.sampledFeatures = sample.first;
+        layer.invalidGeometry = sample.second;
+      }
+    }
+    else if ( QgsRasterLayer *raster = qobject_cast<QgsRasterLayer *>( mapLayer ) )
+    {
+      layer.isRaster = true;
+      layer.rasterReadable = raster->bandCount() > 0 && raster->width() > 0 && raster->height() > 0;
+    }
+    snapshot.layers << layer;
+  }
+  return snapshot;
+}
+
+QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::evaluate( QgsAiGisProjectSnapshot &snapshot, QgsFeedback *feedback )
 {
   QList<QgsAiGisSuggestion> suggestions;
-  if ( !project )
+  if ( !snapshot.hasProject )
     return suggestions;
 
-  const QMap<QString, QgsMapLayer *> layers = project->mapLayers();
-  if ( layers.isEmpty() )
+  if ( snapshot.layers.isEmpty() )
   {
     suggestions << makeGisSuggestion( u"project-empty"_s, QObject::tr( "No layers loaded" ), QObject::tr( "The project has no map layers. Start by adding data or opening a demo project." ), QObject::tr( "Inspect this empty QGIS project and propose the next data-loading step. Do not modify anything without approval." ) );
     return suggestions;
   }
 
   bool hasVisibleLayer = false;
-  const bool hasLayout = project->layoutManager() && !project->layoutManager()->layouts().isEmpty();
-
-  for ( QgsMapLayer *layer : layers )
+  for ( QgsAiGisProjectSnapshot::Layer &layer : snapshot.layers )
   {
-    if ( !layer )
-      continue;
-    const QString layerName = layer->name();
-    if ( layer->isValid() && layer->opacity() > 0 )
+    const QString &layerName = layer.name;
+    if ( layer.visible )
       hasVisibleLayer = true;
-    if ( !layer->crs().isValid() )
+    if ( !layer.crsValid )
     {
       suggestions << makeGisSuggestion(
-        u"missing-crs:%1"_s.arg( layer->id() ),
+        u"missing-crs:%1"_s.arg( layer.id ),
         QObject::tr( "Layer CRS is undefined: %1" ).arg( layerName ),
         QObject::tr( "Analyses and exports may be wrong until the CRS is set explicitly." ),
         QObject::tr( "Review layer '%1' and propose a safe CRS-fix plan. Ask before editing project metadata." ).arg( layerName ),
@@ -110,22 +177,21 @@ QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsPr
       );
     }
 
-    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
+    if ( layer.isVector )
     {
-      const long long featureCount = vector->featureCount();
-      if ( featureCount == 0 )
+      if ( layer.featureCount == 0 )
       {
         suggestions << makeGisSuggestion(
-          u"empty-vector:%1"_s.arg( layer->id() ),
+          u"empty-vector:%1"_s.arg( layer.id ),
           QObject::tr( "Vector layer has no features: %1" ).arg( layerName ),
           QObject::tr( "Empty layers often indicate a bad filter, failed import or wrong data source." ),
           QObject::tr( "Inspect vector layer '%1' and suggest why it has no features. Do not delete data automatically." ).arg( layerName )
         );
       }
-      else if ( featureCount > 1000 )
+      else if ( layer.featureCount > 1000 )
       {
         suggestions << makeGisSuggestion(
-          u"spatial-index:%1"_s.arg( layer->id() ),
+          u"spatial-index:%1"_s.arg( layer.id ),
           QObject::tr( "Consider a spatial index: %1" ).arg( layerName ),
           QObject::tr( "Large vector layers are faster to select, filter and process when indexed." ),
           QObject::tr( "Plan a safe spatial-index creation for layer '%1' using native QGIS tools, with approval before mutation." ).arg( layerName ),
@@ -133,35 +199,23 @@ QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsPr
         );
       }
 
-      int checked = 0;
-      if ( vectorHasInvalidGeometrySample( vector, &checked ) )
+      if ( layer.source && !( feedback && feedback->isCanceled() ) )
+        gisSampleGeometries( layer, feedback );
+      if ( layer.geometrySampled && layer.invalidGeometry )
       {
         suggestions << makeGisSuggestion(
-          u"invalid-geometry:%1"_s.arg( layer->id() ),
+          u"invalid-geometry:%1"_s.arg( layer.id ),
           QObject::tr( "Invalid geometry detected: %1" ).arg( layerName ),
-          QObject::tr( "A sample of %1 features contains invalid geometry. Run a full validity check before overlay/area operations." ).arg( checked ),
+          QObject::tr( "A sample of %1 features contains invalid geometry. Run a full validity check before overlay/area operations." ).arg( layer.sampledFeatures ),
           QObject::tr( "Check geometry validity for layer '%1' and propose a repair workflow. Ask before applying fixes." ).arg( layerName ),
           u"high"_s
         );
       }
 
-      const QgsFields fields = vector->fields();
-      QSet<QString> seenFieldNames;
-      QStringList duplicateFields;
-      QStringList unnamedFields;
-      for ( const QgsField &field : fields )
-      {
-        const QString normalized = field.name().trimmed().toLower();
-        if ( normalized.isEmpty() )
-          unnamedFields << field.name();
-        else if ( seenFieldNames.contains( normalized ) )
-          duplicateFields << field.name();
-        seenFieldNames.insert( normalized );
-      }
-      if ( !duplicateFields.isEmpty() || !unnamedFields.isEmpty() )
+      if ( layer.problematicFields )
       {
         suggestions << makeGisSuggestion(
-          u"fields:%1"_s.arg( layer->id() ),
+          u"fields:%1"_s.arg( layer.id ),
           QObject::tr( "Problematic fields: %1" ).arg( layerName ),
           QObject::tr( "Duplicate or unnamed fields can break joins, expressions and exports." ),
           QObject::tr( "Inspect the schema of layer '%1' and propose field cleanup. Ask before editing fields." ).arg( layerName ),
@@ -169,17 +223,14 @@ QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsPr
         );
       }
     }
-    else if ( QgsRasterLayer *raster = qobject_cast<QgsRasterLayer *>( layer ) )
+    else if ( layer.isRaster && !layer.rasterReadable )
     {
-      if ( raster->bandCount() <= 0 || raster->width() <= 0 || raster->height() <= 0 )
-      {
-        suggestions << makeGisSuggestion(
-          u"raster-empty:%1"_s.arg( layer->id() ),
-          QObject::tr( "Raster has no readable pixels: %1" ).arg( layerName ),
-          QObject::tr( "The raster provider reports no bands or zero dimensions." ),
-          QObject::tr( "Inspect raster layer '%1' and propose a safe reload or data-source check." ).arg( layerName )
-        );
-      }
+      suggestions << makeGisSuggestion(
+        u"raster-empty:%1"_s.arg( layer.id ),
+        QObject::tr( "Raster has no readable pixels: %1" ).arg( layerName ),
+        QObject::tr( "The raster provider reports no bands or zero dimensions." ),
+        QObject::tr( "Inspect raster layer '%1' and propose a safe reload or data-source check." ).arg( layerName )
+      );
     }
   }
 
@@ -194,7 +245,7 @@ QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsPr
     );
   }
 
-  if ( !hasLayout )
+  if ( !snapshot.hasLayout )
   {
     suggestions << makeGisSuggestion(
       u"layout-missing"_s,
@@ -206,6 +257,29 @@ QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsPr
   }
 
   return suggestions;
+}
+
+void QgsAiGisSuggestionEngine::rememberGeometrySamples( const QgsAiGisProjectSnapshot &snapshot )
+{
+  const QMutexLocker locker( &sGisGeometrySamplesMutex );
+  sGisGeometrySamples.clear();
+  for ( const QgsAiGisProjectSnapshot::Layer &layer : snapshot.layers )
+  {
+    if ( layer.geometrySampled )
+      sGisGeometrySamples.insert( layer.id, qMakePair( layer.sampledFeatures, layer.invalidGeometry ) );
+  }
+}
+
+QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject *project )
+{
+  QgsAiGisProjectSnapshot snapshot = snapshotProject( project, false );
+  return evaluate( snapshot );
+}
+
+QList<QgsAiGisSuggestion> QgsAiGisSuggestionEngine::suggestionsForProject( QgsProject *project )
+{
+  QgsAiGisProjectSnapshot snapshot = snapshotProject( project, true );
+  return evaluate( snapshot );
 }
 
 QString QgsAiGisSuggestionEngine::formatHealthBlock( const QList<QgsAiGisSuggestion> &suggestions, bool full, int maxSuggestions )
@@ -237,7 +311,7 @@ QString QgsAiGisSuggestionEngine::promptHealthBlockForProject( QgsProject *proje
   if ( !suggestionsEnabledForProject( project ) )
     return QString();
 
-  return formatHealthBlock( suggestionsForProject( project ), false );
+  return formatHealthBlock( suggestionsWithoutReadingFeatures( project ), false );
 }
 
 QString QgsAiGisSuggestionEngine::globalEnabledSettingsKey()
@@ -263,4 +337,21 @@ bool QgsAiGisSuggestionEngine::suggestionsEnabledForProject( QgsProject *project
 
   const QString projectFile = project ? project->fileName() : QString();
   return settings.value( projectEnabledSettingsKey( projectFile ), true ).toBool();
+}
+
+QgsAiGisSuggestionTask::QgsAiGisSuggestionTask( QgsAiGisProjectSnapshot snapshot )
+  : QgsTask( QObject::tr( "Check project health" ), QgsTask::CanCancel | QgsTask::CancelWithoutPrompt | QgsTask::Silent | QgsTask::Hidden )
+  , mSnapshot( std::move( snapshot ) )
+{}
+
+void QgsAiGisSuggestionTask::cancel()
+{
+  mFeedback.cancel();
+  QgsTask::cancel();
+}
+
+bool QgsAiGisSuggestionTask::run()
+{
+  mSuggestions = QgsAiGisSuggestionEngine::evaluate( mSnapshot, &mFeedback );
+  return !isCanceled();
 }

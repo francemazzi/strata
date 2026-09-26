@@ -249,7 +249,9 @@ void TestQgsAiDataHubExtractTool::stopsAfterBoundedPolls()
 
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"2 polling attempts"_s ) );
-  QCOMPARE( server.requestCount, 3 );
+  // Strata stops waiting: the job is canceled on the server, so it stops spending quota.
+  QTRY_COMPARE( server.requestCount, 4 );
+  QVERIFY( server.lastRawRequest().startsWith( "POST /v1/datahub/jobs/job-slow/cancel HTTP/1.1\r\n" ) );
 }
 
 void TestQgsAiDataHubExtractTool::stopDuringPendingRequestReturnsCanceled()
@@ -293,7 +295,9 @@ void TestQgsAiDataHubExtractTool::stopDuringPollWaitReturnsCanceled()
   QVERIFY( !result.success );
   QVERIFY( result.canceled );
   QVERIFY2( elapsed.elapsed() < 10000, "Stop did not interrupt the polling wait" );
-  QVERIFY( server.requestCount <= 2 );
+  // Stop cancels the job on the server too.
+  QTRY_VERIFY( server.lastRawRequest().startsWith( "POST /v1/datahub/jobs/job-wait/cancel HTTP/1.1\r\n" ) );
+  QVERIFY( server.requestCount <= 3 );
 }
 
 QGSTEST_MAIN( TestQgsAiDataHubExtractTool )

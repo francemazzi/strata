@@ -18,6 +18,7 @@
 #include "qgsaiauditlog.h"
 #include "qgsaipipinstallapprovaldialog.h"
 #include "qgsaipythonruntime.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
 #include "qgsaiworkspacetrust.h"
 #include "qgsmessagelog.h"
@@ -25,10 +26,13 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QUuid>
@@ -105,6 +109,43 @@ QJsonObject QgsAiInstallPythonPackageTool::schema() const
   return schemaObject( properties, QJsonArray { u"packages"_s } );
 }
 
+namespace
+{
+  //! The pip-enabled interpreter found by the first install of the session.
+  QString &installToolKnownPython()
+  {
+    static QString path;
+    return path;
+  }
+
+  //! Adds \a specs to the "successful_specs" of the install cache, as the wrapper does.
+  void installToolRecordInstalled( const QString &cachePath, const QStringList &specs )
+  {
+    QSet<QString> successful;
+    QFile existing( cachePath );
+    if ( existing.open( QIODevice::ReadOnly ) )
+    {
+      for ( const QJsonValue &spec : QJsonDocument::fromJson( existing.readAll() ).object().value( u"successful_specs"_s ).toArray() )
+        successful.insert( spec.toString() );
+      existing.close();
+    }
+    for ( const QString &spec : specs )
+      successful.insert( spec );
+    QStringList sorted( successful.cbegin(), successful.cend() );
+    sorted.sort();
+    QJsonObject cache;
+    cache.insert( u"version"_s, 1 );
+    cache.insert( u"successful_specs"_s, QJsonArray::fromStringList( sorted ) );
+    QDir().mkpath( QFileInfo( cachePath ).absolutePath() );
+    QSaveFile file( cachePath );
+    if ( file.open( QIODevice::WriteOnly ) )
+    {
+      file.write( QJsonDocument( cache ).toJson( QJsonDocument::Compact ) );
+      file.commit();
+    }
+  }
+} // namespace
+
 QgsAiToolResult QgsAiInstallPythonPackageTool::execute( const QJsonObject &args )
 {
   const QJsonValue packagesValue = args.value( u"packages"_s );
@@ -154,10 +195,16 @@ QgsAiToolResult QgsAiInstallPythonPackageTool::execute( const QJsonObject &args 
   QJsonArray jsonPackages;
   for ( const QString &package : packages )
     jsonPackages.append( package );
+  // The wrapper only prepares the pip command (quick); pip itself runs below, in the background.
+  // The interpreter found once is reused for the session instead of being probed again.
+  QJsonObject wrapperArguments;
+  wrapperArguments.insert( u"packages"_s, jsonPackages );
+  wrapperArguments.insert( u"known_python"_s, installToolKnownPython() );
+  wrapperArguments.insert( u"prepare_only"_s, true );
   QFile argumentsFile( argumentsPath );
   if ( !argumentsFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
     return QgsAiToolResult::error( u"Cannot write temp pip-args file: %1"_s.arg( argumentsPath ) );
-  argumentsFile.write( QJsonDocument( jsonPackages ).toJson( QJsonDocument::Compact ) );
+  argumentsFile.write( QJsonDocument( wrapperArguments ).toJson( QJsonDocument::Compact ) );
   argumentsFile.close();
 
   QgsMessageLog::logMessage( u"install_python_package: executing approved install (packages=%1)"_s.arg( packages.size() ), u"AI/Pip"_s, Qgis::MessageLevel::Info, false );
@@ -199,6 +246,39 @@ QgsAiToolResult QgsAiInstallPythonPackageTool::execute( const QJsonObject &args 
     return QgsAiToolResult::error( u"pip wrapper failed to execute. %1"_s.arg( detail ) );
   }
 
+  // pip runs as a separate process watched by an event loop: Strata stays responsive during the
+  // download and build, and Stop ends it.
+  const QJsonArray command = runtimeOutput.value( u"command"_s ).toArray();
+  if ( !command.isEmpty() && runtimeOutput.value( u"error"_s ).toString().isEmpty() )
+  {
+    installToolKnownPython() = runtimeOutput.value( u"python_used"_s ).toString();
+    QStringList arguments;
+    for ( int i = 1; i < command.size(); ++i )
+      arguments << command.at( i ).toString();
+    const QgsAiProcessResult process
+      = qgsAiRunProcess( u"Installing Python packages"_s, command.at( 0 ).toString(), arguments, TIMEOUT_SECONDS * 1000, { u"PIP_BREAK_SYSTEM_PACKAGES"_s, u"PYTHONUSERBASE"_s } );
+    if ( process.canceled )
+      return QgsAiToolResult::canceledResult( u"Package installation was stopped; nothing may have been installed."_s );
+    runtimeOutput.insert( u"stdout"_s, process.standardOutput );
+    runtimeOutput.insert( u"stderr"_s, process.standardError );
+    runtimeOutput.insert( u"returncode"_s, process.exitCode );
+    if ( !process.started )
+      runtimeOutput.insert( u"error"_s, u"pip could not start: %1"_s.arg( process.error ) );
+    else if ( process.timedOut )
+      runtimeOutput.insert( u"error"_s, u"pip install timed out after %1 seconds"_s.arg( TIMEOUT_SECONDS ) );
+    else if ( process.exitCode == 0 )
+    {
+      const QJsonArray pending = runtimeOutput.value( u"pending"_s ).toArray();
+      runtimeOutput.insert( u"installed"_s, pending );
+      QStringList installed;
+      for ( const QJsonValue &spec : pending )
+        installed << spec.toString();
+      installToolRecordInstalled( QgsAiPythonRuntime::installCachePath(), installed );
+      // New modules become importable in the session.
+      QgsPythonRunner::run( u"import importlib; importlib.invalidate_caches()"_s );
+    }
+  }
+
   const int returnCode = runtimeOutput.value( u"returncode"_s ).toInt( -1 );
   const QString innerError = runtimeOutput.value( u"error"_s ).toString();
   const QString standardError = runtimeOutput.value( u"stderr"_s ).toString();
@@ -211,12 +291,8 @@ QgsAiToolResult QgsAiInstallPythonPackageTool::execute( const QJsonObject &args 
     retryable = false;
   }
 
-  QgsMessageLog::logMessage(
-    u"install_python_package: completed (returncode=%1, error=%2)"_s.arg( returnCode ).arg( innerError.isEmpty() ? u"none"_s : u"yes"_s ),
-    u"AI/Pip"_s,
-    success ? Qgis::MessageLevel::Info : Qgis::MessageLevel::Warning,
-    false
-  );
+  QgsMessageLog::
+    logMessage( u"install_python_package: completed (returncode=%1, error=%2)"_s.arg( returnCode ).arg( innerError.isEmpty() ? u"none"_s : u"yes"_s ), u"AI/Pip"_s, success ? Qgis::MessageLevel::Info : Qgis::MessageLevel::Warning, false );
 
   QJsonObject output;
   output.insert( u"status"_s, success ? u"ok"_s : u"error"_s );

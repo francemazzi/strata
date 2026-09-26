@@ -294,10 +294,15 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"DataHub extraction response did not include jobId."_s );
 
   const QString encodedJobId = QString::fromUtf8( QUrl::toPercentEncoding( jobId ) );
+  // Once Strata stops waiting, the job is canceled on the server too: it would keep spending quota.
+  const auto cancelRemoteJob = [&requestForPath, &encodedJobId]() { QgsAiPlanClient::requestRemoteJobCancel( requestForPath( u"/v1/datahub/jobs/%1/cancel"_s.arg( encodedJobId ) ) ); };
   for ( int attempt = 0; attempt < mMaxPollAttempts; ++attempt )
   {
     if ( QCoreApplication::closingDown() )
+    {
+      cancelRemoteJob();
       return QgsAiToolResult::error( u"DataHub extraction polling was cancelled because the application is closing."_s );
+    }
     if ( attempt > 0 && mPollIntervalMs > 0 )
     {
       QEventLoop waitLoop;
@@ -305,13 +310,19 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
       QTimer::singleShot( mPollIntervalMs, &waitLoop, &QEventLoop::quit );
       waitLoop.exec();
       if ( waitScope.canceledByUser() )
-        return QgsAiToolResult::canceledResult( u"Strata DataHub extraction was canceled."_s );
+      {
+        cancelRemoteJob();
+        return QgsAiToolResult::canceledResult( u"Strata DataHub extraction was canceled; the job was canceled on the server too."_s );
+      }
     }
 
     const QNetworkRequest pollRequest = requestForPath( u"/v1/datahub/jobs/"_s + encodedJobId );
     const datahub_tool::JsonResponse poll = datahub_tool::sendJsonRequest( networkManager, pollRequest, nullptr );
     if ( poll.canceled )
+    {
+      cancelRemoteJob();
       return QgsAiToolResult::canceledResult( poll.error );
+    }
     if ( !poll.success )
       return QgsAiToolResult::error( poll.error );
 
@@ -324,5 +335,6 @@ QgsAiToolResult QgsAiDataHubExtractTool::execute( const QJsonObject &args )
       return QgsAiToolResult::error( u"DataHub extraction job '%1' returned unknown status '%2'."_s.arg( jobId, status ) );
   }
 
-  return QgsAiToolResult::error( u"DataHub extraction job '%1' did not finish after %2 polling attempts."_s.arg( jobId ).arg( mMaxPollAttempts ) );
+  cancelRemoteJob();
+  return QgsAiToolResult::error( u"DataHub extraction job '%1' did not finish after %2 polling attempts and was canceled."_s.arg( jobId ).arg( mMaxPollAttempts ) );
 }

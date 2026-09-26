@@ -282,7 +282,7 @@ QJsonObject QgsAiToolRegistry::mcpSchemaEntry( const QgsAiManagedMcpTool &tool, 
   return entry;
 }
 
-QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObject &args ) const
+QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObject &args, const QString &callId ) const
 {
   if ( name.startsWith( "mcp__"_L1 ) )
   {
@@ -296,7 +296,7 @@ QgsAiToolResult QgsAiToolRegistry::execute( const QString &name, const QJsonObje
     const QgsAiManagedMcpTool *definition = findManagedMcpTool( name );
     if ( !definition || !definition->enabled )
       return QgsAiToolResult::error( u"MCP tool is not enabled: %1"_s.arg( name ) );
-    const QgsAiToolResult result = mMcpProxy->executeNamed( name, args );
+    const QgsAiToolResult result = mMcpProxy->executeNamed( name, args, definition->mutating, callId );
     auditToolExecution( mMcpProxy.get(), args, result );
     return result;
   }

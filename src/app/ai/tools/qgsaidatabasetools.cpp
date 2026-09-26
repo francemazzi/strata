@@ -19,12 +19,15 @@
 #include <memory>
 
 #include "qgsabstractdatabaseproviderconnection.h"
+#include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
+#include "qgscoordinatereferencesystem.h"
 #include "qgsdatasourceuri.h"
 #include "qgsexception.h"
 #include "qgsfeature.h"
 #include "qgsfeatureiterator.h"
 #include "qgsfeaturesink.h"
+#include "qgsfeedback.h"
 #include "qgsfields.h"
 #include "qgsgeometry.h"
 #include "qgsproject.h"
@@ -33,6 +36,7 @@
 #include "qgssettings.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerexporter.h"
+#include "qgsvectorlayerfeatureiterator.h"
 #include "qgswkbtypes.h"
 
 #include <QHash>
@@ -43,6 +47,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
+#include <QThread>
 #include <QUuid>
 #include <QVariant>
 
@@ -60,6 +65,34 @@ namespace
 
   const QSet<QString> WRITE_KEYWORDS = { u"INSERT"_s, u"DELETE"_s, u"MERGE"_s,   u"CREATE"_s,  u"DROP"_s,    u"ALTER"_s, u"GRANT"_s, u"REVOKE"_s, u"TRUNCATE"_s, u"VACUUM"_s,   u"CALL"_s,   u"COPY"_s,
                                          u"LISTEN"_s, u"NOTIFY"_s, u"REFRESH"_s, u"REINDEX"_s, u"CLUSTER"_s, u"LOAD"_s,  u"DO"_s,    u"LOCK"_s,   u"COMMENT"_s,  u"SECURITY"_s, u"EXECUTE"_s };
+
+  //! Functions that act on the server even inside a SELECT: they need execute_sql and approval.
+  const QSet<QString> SIDE_EFFECT_FUNCTIONS = {
+    u"PG_TERMINATE_BACKEND"_s,
+    u"PG_CANCEL_BACKEND"_s,
+    u"PG_RELOAD_CONF"_s,
+    u"PG_ROTATE_LOGFILE"_s,
+    u"PG_PROMOTE"_s,
+    u"PG_SWITCH_WAL"_s,
+    u"PG_CREATE_RESTORE_POINT"_s,
+    u"PG_ADVISORY_LOCK"_s,
+    u"PG_ADVISORY_XACT_LOCK"_s,
+    u"PG_TRY_ADVISORY_LOCK"_s,
+    u"SETVAL"_s,
+    u"NEXTVAL"_s,
+    u"SET_CONFIG"_s,
+    u"LO_IMPORT"_s,
+    u"LO_EXPORT"_s,
+    u"LO_UNLINK"_s,
+    u"LO_CREATE"_s,
+    u"DBLINK_EXEC"_s,
+    u"DBLINK"_s,
+    u"PG_READ_FILE"_s,
+    u"PG_READ_BINARY_FILE"_s,
+    u"PG_LS_DIR"_s,
+    u"PG_FILE_WRITE"_s,
+    u"PG_STAT_RESET"_s,
+  };
 
   struct LayerRollbackEntry
   {
@@ -410,11 +443,77 @@ namespace
     return QJsonDocument( output ).toJson( QJsonDocument::Compact ).size() > MAX_DB_TOOL_RESULT_BYTES;
   }
 
+  //! Longest a query may run on the server, in seconds (strata/ai/sql_timeout_s).
+  int databaseToolsTimeoutSeconds( bool write )
+  {
+    const int configured = QgsSettings().value( u"strata/ai/sql_timeout_s"_s, 30 ).toInt();
+    // Approved writes may legitimately take longer than a look at the data.
+    return std::max( 1, write ? std::max( configured, 300 ) : configured );
+  }
+
+  /**
+   * The statement actually sent to PostgreSQL. In one PQexec call, the statements share an implicit
+   * transaction that ends with the call, so nothing leaks to the pooled connection: a read-only
+   * statement runs READ ONLY, every statement has a server-side timeout, and a SELECT is wrapped
+   * so that the server returns at most \a maxRows rows.
+   */
+  QString databaseToolsServerSql( const QString &sql, bool readOnly, bool wrapWithLimit, int maxRows, int timeoutSeconds )
+  {
+    QString body = sql.trimmed();
+    while ( body.endsWith( ';' ) )
+      body = body.chopped( 1 ).trimmed();
+    QString statement = readOnly ? u"SET TRANSACTION READ ONLY; "_s : QString();
+    statement += u"SET LOCAL statement_timeout = %1; "_s.arg( timeoutSeconds * 1000 );
+    // New lines keep a trailing line comment of the query from swallowing the wrapper.
+    if ( wrapWithLimit )
+      statement += u"SELECT * FROM (\n%1\n) AS strata_query LIMIT %2"_s.arg( body ).arg( maxRows );
+    else
+      statement += body;
+    return statement;
+  }
+
+  //! First keyword of a statement, uppercase, after opening parentheses.
+  QString databaseToolsFirstKeyword( const QString &sql )
+  {
+    const QStringList tokens = sqlTokens( stripSqlLiteralsAndComments( sql ) );
+    return tokens.isEmpty() ? QString() : tokens.constFirst();
+  }
+
+  /**
+   * TRUE for the statements PostgreSQL refuses inside a transaction block (VACUUM, CREATE INDEX
+   * CONCURRENTLY, CREATE DATABASE…): they must be sent alone, without the server-side timeout.
+   */
+  bool databaseToolsRunsOutsideTransaction( const QString &sql )
+  {
+    const QStringList tokens = sqlTokens( stripSqlLiteralsAndComments( sql ) );
+    if ( tokens.isEmpty() )
+      return false;
+    const QString &first = tokens.constFirst();
+    const QString second = tokens.size() > 1 ? tokens.at( 1 ) : QString();
+    if ( first == "VACUUM"_L1 || tokens.contains( u"CONCURRENTLY"_s ) )
+      return true;
+    if ( ( first == "CREATE"_L1 || first == "DROP"_L1 || first == "ALTER"_L1 ) && ( second == "DATABASE"_L1 || second == "TABLESPACE"_L1 || second == "SYSTEM"_L1 || second == "SUBSCRIPTION"_L1 ) )
+      return true;
+    if ( first == "REINDEX"_L1 && ( second == "SYSTEM"_L1 || second == "DATABASE"_L1 ) )
+      return true;
+    return first == "CLUSTER"_L1 && tokens.size() == 1;
+  }
+
+  //! TRUE when a trailing comment hides the final semicolon: wrapping such a query would break it.
+  bool databaseToolsEndsWithHiddenSemicolon( const QString &sql )
+  {
+    QString body = sql.trimmed();
+    while ( body.endsWith( ';' ) )
+      body = body.chopped( 1 ).trimmed();
+    return stripSqlLiteralsAndComments( body ).trimmed().endsWith( ';' );
+  }
+
   QJsonObject sqlResultJson( QgsAbstractDatabaseProviderConnection::QueryResult &result, const QStringList &columns, int offset, int limit, bool includeGeometry )
   {
     QJsonArray rows;
     int matched = 0;
     bool truncated = false;
+    qsizetype resultBytes = 16;
     while ( result.hasNextRow() )
     {
       const QList<QVariant> values = result.nextRow();
@@ -436,11 +535,9 @@ namespace
         row.insert( column, jsonFromSqlValue( value, column, includeGeometry ) );
       }
 
-      QJsonArray candidate = rows;
-      candidate.append( row );
-      QJsonObject probe;
-      probe.insert( u"rows"_s, candidate );
-      if ( QJsonDocument( probe ).toJson( QJsonDocument::Compact ).size() > MAX_DB_TOOL_RESULT_BYTES )
+      // A running total: serializing every row again for each new one grew quadratically.
+      resultBytes += QJsonDocument( row ).toJson( QJsonDocument::Compact ).size() + 1;
+      if ( resultBytes > MAX_DB_TOOL_RESULT_BYTES )
       {
         truncated = true;
         break;
@@ -471,6 +568,12 @@ namespace
   int sqlOffsetFromArgs( const QJsonObject &args )
   {
     return std::max( 0, args.value( u"offset"_s ).toInt( 0 ) );
+  }
+
+  QString databaseToolsQuotedName( const QString &schema, const QString &table )
+  {
+    auto quoted = []( QString identifier ) { return u"\"%1\""_s.arg( identifier.replace( '"', "\"\""_L1 ) ); };
+    return u"%1.%2"_s.arg( quoted( schema ), quoted( table ) );
   }
 
   QString sanitizeTableName( const QString &name )
@@ -519,12 +622,14 @@ QgsAiSqlClassification classifyAiSql( const QString &sql )
 
   const QString first = working.constFirst();
   const bool explainAnalyze = first == "EXPLAIN"_L1 && working.size() > 1 && working.at( 1 ) == "ANALYZE"_L1;
-  const bool hasWrite = containsWriteKeyword( working ) || working.contains( u"UPDATE"_s );
+  // A SELECT can end sessions, move sequences or read server files: not a read.
+  const bool sideEffects = std::any_of( working.cbegin(), working.cend(), []( const QString &token ) { return SIDE_EFFECT_FUNCTIONS.contains( token ); } );
+  const bool hasWrite = containsWriteKeyword( working ) || working.contains( u"UPDATE"_s ) || sideEffects;
   const bool writeLock = hasSelectInto( working ) || hasForUpdateOrShare( working );
 
   if ( first == "SELECT"_L1 )
   {
-    if ( writeLock || containsWriteKeyword( working ) )
+    if ( writeLock || containsWriteKeyword( working ) || sideEffects )
     {
       classification.kind = QgsAiSqlStatementKind::Mutation;
       return classification;
@@ -549,7 +654,7 @@ QgsAiSqlClassification classifyAiSql( const QString &sql )
   }
   if ( first == "SHOW"_L1 || first == "VALUES"_L1 || first == "TABLE"_L1 )
   {
-    classification.kind = QgsAiSqlStatementKind::ReadOnly;
+    classification.kind = sideEffects ? QgsAiSqlStatementKind::Mutation : QgsAiSqlStatementKind::ReadOnly;
     return classification;
   }
 
@@ -620,105 +725,130 @@ QJsonObject QgsAiDescribeDatabaseSchemaTool::schema() const
   return schemaObject( properties, QJsonArray { u"connection_name"_s } );
 }
 
-QgsAiToolResult QgsAiDescribeDatabaseSchemaTool::execute( const QJsonObject &args )
+namespace
 {
-  const QString connectionName = args.value( u"connection_name"_s ).toString().trimmed();
-  QString error;
-  std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection = openPostgresConnection( connectionName, error );
-  if ( !connection )
-    return QgsAiToolResult::error( error );
-
-  const QString schemaFilter = args.value( u"schema"_s ).toString().trimmed();
-  const QString tableFilter = args.value( u"table"_s ).toString().trimmed();
-
-  try
+  QgsAiToolResult describeDatabaseSchema( const QString &connectionName, const QString &schemaFilter, const QString &tableFilter, QgsFeedback *feedback )
   {
-    if ( !tableFilter.isEmpty() )
+    QString error;
+    std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection = openPostgresConnection( connectionName, error );
+    if ( !connection )
+      return QgsAiToolResult::error( error );
+    // Estimated metadata: resolving the geometry type of generic columns otherwise scans whole tables.
+    QVariantMap configuration = connection->configuration();
+    configuration.insert( u"estimatedMetadata"_s, true );
+    connection->setConfiguration( configuration );
+
+    try
     {
-      const QString schema = schemaFilter.isEmpty() ? u"public"_s : schemaFilter;
-      const QgsAbstractDatabaseProviderConnection::TableProperty property = connection->table( schema, tableFilter );
-      QJsonObject output = tablePropertyJson( property );
+      if ( !tableFilter.isEmpty() )
+      {
+        const QString schema = schemaFilter.isEmpty() ? u"public"_s : schemaFilter;
+        const QgsAbstractDatabaseProviderConnection::TableProperty property = connection->table( schema, tableFilter, feedback );
+        QJsonObject output = tablePropertyJson( property );
+        output.insert( u"connection_name"_s, connectionName );
+
+        const QgsFields fields = connection->fields( schema, tableFilter, feedback );
+        QJsonArray fieldArray;
+        for ( int i = 0; i < fields.count(); ++i )
+        {
+          QJsonObject field;
+          field.insert( u"name"_s, fields.at( i ).name() );
+          field.insert( u"type"_s, fields.at( i ).displayType() );
+          fieldArray.append( field );
+        }
+        output.insert( u"fields"_s, fieldArray );
+
+        bool spatialIndex = false;
+        if ( !property.geometryColumn().isEmpty() )
+        {
+          try
+          {
+            spatialIndex = connection->spatialIndexExists( schema, tableFilter, property.geometryColumn() );
+          }
+          catch ( const QgsProviderConnectionException & )
+          {
+            spatialIndex = false;
+          }
+        }
+        output.insert( u"spatial_index"_s, spatialIndex );
+        if ( outputExceedsCap( output ) )
+        {
+          output.insert( u"truncated"_s, true );
+          output.remove( u"fields"_s );
+          output.insert( u"note"_s, u"Field list omitted because the result exceeded the size cap."_s );
+        }
+        return QgsAiToolResult::ok( output );
+      }
+
+      QStringList schemas = schemaFilter.isEmpty() ? connection->schemas() : QStringList { schemaFilter };
+      QStringList userSchemas;
+      for ( const QString &schema : schemas )
+      {
+        if ( !isSystemSchema( schema ) )
+          userSchemas.append( schema );
+      }
+
+      QJsonArray tables;
+      bool truncated = false;
+      QJsonObject output;
       output.insert( u"connection_name"_s, connectionName );
+      output.insert( u"schemas"_s, QJsonArray::fromStringList( userSchemas ) );
+      // Running total: re-serializing the whole catalog for every table grew quadratically.
+      qsizetype outputBytes = QJsonDocument( output ).toJson( QJsonDocument::Compact ).size() + 64;
 
-      const QgsFields fields = connection->fields( schema, tableFilter );
-      QJsonArray fieldArray;
-      for ( int i = 0; i < fields.count(); ++i )
+      for ( const QString &schema : userSchemas )
       {
-        QJsonObject field;
-        field.insert( u"name"_s, fields.at( i ).name() );
-        field.insert( u"type"_s, fields.at( i ).displayType() );
-        fieldArray.append( field );
+        if ( feedback->isCanceled() )
+          return QgsAiToolResult::canceledResult( u"Reading the database schema was stopped."_s );
+        const QList<QgsAbstractDatabaseProviderConnection::TableProperty> properties = connection->tables( schema, QgsAbstractDatabaseProviderConnection::TableFlags(), feedback );
+        for ( const QgsAbstractDatabaseProviderConnection::TableProperty &property : properties )
+        {
+          const QJsonObject table = tablePropertyJson( property );
+          outputBytes += QJsonDocument( table ).toJson( QJsonDocument::Compact ).size() + 1;
+          if ( outputBytes > MAX_DB_TOOL_RESULT_BYTES )
+          {
+            truncated = true;
+            break;
+          }
+          tables.append( table );
+        }
+        if ( truncated )
+          break;
       }
-      output.insert( u"fields"_s, fieldArray );
 
-      bool spatialIndex = false;
-      if ( !property.geometryColumn().isEmpty() )
-      {
-        try
-        {
-          spatialIndex = connection->spatialIndexExists( schema, tableFilter, property.geometryColumn() );
-        }
-        catch ( const QgsProviderConnectionException & )
-        {
-          spatialIndex = false;
-        }
-      }
-      output.insert( u"spatial_index"_s, spatialIndex );
-      if ( outputExceedsCap( output ) )
+      output.insert( u"tables"_s, tables );
+      output.insert( u"table_count"_s, tables.size() );
+      if ( truncated )
       {
         output.insert( u"truncated"_s, true );
-        output.remove( u"fields"_s );
-        output.insert( u"note"_s, u"Field list omitted because the result exceeded the size cap."_s );
+        output.insert( u"note"_s, u"Catalog truncated. Pass schema or table to narrow the request."_s );
       }
       return QgsAiToolResult::ok( output );
     }
-
-    QStringList schemas = schemaFilter.isEmpty() ? connection->schemas() : QStringList { schemaFilter };
-    QStringList userSchemas;
-    for ( const QString &schema : schemas )
+    catch ( const QgsProviderConnectionException &ex )
     {
-      if ( !isSystemSchema( schema ) )
-        userSchemas.append( schema );
+      return QgsAiToolResult::error( u"Could not describe database '%1': %2"_s.arg( connectionName, ex.what() ) );
     }
-
-    QJsonArray tables;
-    bool truncated = false;
-    QJsonObject output;
-    output.insert( u"connection_name"_s, connectionName );
-    output.insert( u"schemas"_s, QJsonArray::fromStringList( userSchemas ) );
-
-    for ( const QString &schema : userSchemas )
-    {
-      const QList<QgsAbstractDatabaseProviderConnection::TableProperty> properties = connection->tables( schema );
-      for ( const QgsAbstractDatabaseProviderConnection::TableProperty &property : properties )
-      {
-        tables.append( tablePropertyJson( property ) );
-        output.insert( u"tables"_s, tables );
-        if ( outputExceedsCap( output ) )
-        {
-          tables.removeLast();
-          truncated = true;
-          break;
-        }
-      }
-      if ( truncated )
-        break;
-    }
-
-    output.insert( u"tables"_s, tables );
-    output.insert( u"table_count"_s, tables.size() );
-    if ( truncated )
-    {
-      output.insert( u"truncated"_s, true );
-      output.insert( u"note"_s, u"Catalog truncated. Pass schema or table to narrow the request."_s );
-    }
-    return QgsAiToolResult::ok( output );
   }
-  catch ( const QgsProviderConnectionException &ex )
-  {
-    return QgsAiToolResult::error( u"Could not describe database '%1': %2"_s.arg( connectionName, ex.what() ) );
-  }
+} // namespace
+
+QgsAiToolResult QgsAiDescribeDatabaseSchemaTool::execute( const QJsonObject &args )
+{
+  const QString connectionName = args.value( u"connection_name"_s ).toString().trimmed();
+  const QString schemaFilter = args.value( u"schema"_s ).toString().trimmed();
+  const QString tableFilter = args.value( u"table"_s ).toString().trimmed();
+
+  // A remote catalog with thousands of tables takes seconds: read it in the background.
+  auto result = std::make_shared<QgsAiToolResult>( QgsAiToolResult::error( u"Could not describe the database."_s ) );
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Reading the database schema"_s, [result, connectionName, schemaFilter, tableFilter]( QgsFeedback *feedback ) {
+    *result = describeDatabaseSchema( connectionName, schemaFilter, tableFilter, feedback );
+    return !feedback->isCanceled();
+  } );
+  if ( wait.canceled || wait.abandoned )
+    return QgsAiToolResult::canceledResult( u"Reading the database schema was stopped."_s );
+  return *result;
 }
+
 
 QgsAiDatabaseSqlTool::QgsAiDatabaseSqlTool( QgsProject *project, bool readOnly )
   : mProject( project )
@@ -792,79 +922,161 @@ QgsAiToolResult QgsAiDatabaseSqlTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"load_as_layer is only supported for SELECT/WITH queries."_s );
 
   const QString connectionName = args.value( u"connection_name"_s ).toString().trimmed();
-  QString error;
-  std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection = openPostgresConnection( connectionName, error );
-  if ( !connection )
-    return QgsAiToolResult::error( error );
-
   const int limit = sqlLimitFromArgs( args );
   const int offset = sqlOffsetFromArgs( args );
   const bool includeGeometry = args.value( u"include_geometry"_s ).toBool( false );
+  const bool readOnly = classification.kind == QgsAiSqlStatementKind::ReadOnly;
+  const QString firstKeyword = databaseToolsFirstKeyword( sql );
+  // SELECT, WITH, VALUES and TABLE return rows: the server stops at what the tool can return.
+  const bool wrapWithLimit = readOnly
+                             && ( firstKeyword == "SELECT"_L1 || firstKeyword == "WITH"_L1 || firstKeyword == "VALUES"_L1 || firstKeyword == "TABLE"_L1 )
+                             && !databaseToolsEndsWithHiddenSemicolon( sql );
+  const int timeoutSeconds = databaseToolsTimeoutSeconds( !readOnly );
+  // Stop still cancels the statements that cannot run in a transaction block, but they have no server timeout.
+  const bool alone = !readOnly && databaseToolsRunsOutsideTransaction( sql );
+  const QString serverSql = alone ? sql.trimmed() : databaseToolsServerSql( sql, readOnly, wrapWithLimit, offset + limit + 1, timeoutSeconds );
 
-  try
+  // The query runs in the background: Stop cancels it on the server (PQcancel) and the window
+  // never waits for the database.
+  struct SqlJob
   {
-    QgsAbstractDatabaseProviderConnection::QueryResult result = connection->execSql( sql );
-    const QStringList columns = result.columns();
-    QJsonObject output = sqlResultJson( result, columns, offset, limit, includeGeometry );
-    output.insert( u"connection_name"_s, connectionName );
-    output.insert( u"statement_kind"_s, classification.kind == QgsAiSqlStatementKind::ReadOnly ? u"read"_s : u"write"_s );
-    output.insert( u"sql"_s, sql.trimmed() );
-
-    QJsonObject diff;
-    diff.insert( u"summary"_s, classification.kind == QgsAiSqlStatementKind::ReadOnly ? u"Ran a read-only SQL statement on a PostgreSQL connection."_s : u"Executed SQL on a PostgreSQL connection. Database changes cannot be rolled back by Strata."_s );
-    diff.insert( u"connection_name"_s, connectionName );
-    diff.insert( u"rollback_supported"_s, false );
-
-    if ( loadAsLayer )
+      QJsonObject output;
+      QStringList columns;
+      QString error;
+  };
+  auto job = std::make_shared<SqlJob>();
+  const QString userSql = sql.trimmed();
+  const QgsAiTaskWaitResult wait = qgsAiRunFunction( u"Running SQL"_s, [job, connectionName, serverSql, userSql, offset, limit, includeGeometry, timeoutSeconds]( QgsFeedback *feedback ) {
+    QString error;
+    std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection = openPostgresConnection( connectionName, error );
+    if ( !connection )
     {
-      if ( !project )
-        return QgsAiToolResult::error( u"No active QgsProject available."_s );
+      job->error = error;
+      return true;
+    }
+    try
+    {
+      QgsAbstractDatabaseProviderConnection::QueryResult result = connection->execSql( serverSql, feedback );
+      if ( feedback->isCanceled() )
+        return false;
+      job->columns = result.columns();
+      job->output = sqlResultJson( result, job->columns, offset, limit, includeGeometry );
+    }
+    catch ( const QgsProviderConnectionException &ex )
+    {
+      if ( feedback->isCanceled() )
+        return false;
+      // The provider quotes the statement it sent: show the model its own SQL, not the wrapper.
+      QString message = ex.what();
+      message.replace( serverSql, userSql );
+      if ( message.contains( "statement timeout"_L1, Qt::CaseInsensitive ) )
+        job->error = u"The query ran longer than %1 s and the server stopped it (strata/ai/sql_timeout_s). Narrow it with WHERE or LIMIT."_s.arg( timeoutSeconds );
+      else if ( message.contains( "read-only transaction"_L1, Qt::CaseInsensitive ) )
+        job->error = u"query_sql runs read-only and the server refused a change: %1 Use execute_sql, which asks for approval."_s.arg( message );
+      else
+        job->error = u"Error executing SQL on '%1': %2"_s.arg( connectionName, message );
+    }
+    return true;
+  } );
+  if ( wait.canceled || wait.abandoned )
+    return QgsAiToolResult::canceledResult( u"The SQL query was stopped and canceled on the server."_s );
+  if ( !wait.succeeded )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"The SQL query failed."_s : wait.error );
+  if ( !job->error.isEmpty() )
+    return QgsAiToolResult::error( job->error );
 
-      QgsAbstractDatabaseProviderConnection::SqlVectorLayerOptions options;
-      options.sql = sql.trimmed();
-      options.layerName = args.value( u"layer_name"_s ).toString().trimmed();
-      if ( options.layerName.isEmpty() )
-        options.layerName = u"QueryLayer"_s;
-      options.geometryColumn = args.value( u"geometry_column"_s ).toString().trimmed();
-      if ( options.geometryColumn.isEmpty() )
+  QJsonObject output = job->output;
+  const QStringList &columns = job->columns;
+  output.insert( u"connection_name"_s, connectionName );
+  output.insert( u"statement_kind"_s, readOnly ? u"read"_s : u"write"_s );
+  output.insert( u"sql"_s, sql.trimmed() );
+
+  QJsonObject diff;
+  diff.insert( u"summary"_s, readOnly ? u"Ran a read-only SQL statement on a PostgreSQL connection."_s : u"Executed SQL on a PostgreSQL connection. Database changes cannot be rolled back by Strata."_s );
+  diff.insert( u"connection_name"_s, connectionName );
+  diff.insert( u"rollback_supported"_s, false );
+
+  if ( loadAsLayer )
+  {
+    if ( !project )
+      return QgsAiToolResult::error( u"No active QgsProject available."_s );
+
+    QgsAbstractDatabaseProviderConnection::SqlVectorLayerOptions options;
+    options.sql = sql.trimmed();
+    options.layerName = args.value( u"layer_name"_s ).toString().trimmed();
+    if ( options.layerName.isEmpty() )
+      options.layerName = u"QueryLayer"_s;
+    options.geometryColumn = args.value( u"geometry_column"_s ).toString().trimmed();
+    if ( options.geometryColumn.isEmpty() )
+    {
+      for ( const QString &column : columns )
       {
-        for ( const QString &column : columns )
+        if ( isGeometryColumnName( column ) )
         {
-          if ( isGeometryColumnName( column ) )
-          {
-            options.geometryColumn = column;
-            break;
-          }
+          options.geometryColumn = column;
+          break;
         }
       }
-
-      std::unique_ptr<QgsVectorLayer> layer( connection->createSqlVectorLayer( options ) );
-      if ( !layer || !layer->isValid() )
-      {
-        const QString summary = layer ? layer->error().summary() : u"layer was not created"_s;
-        return QgsAiToolResult::error( u"SQL ran but the query layer could not be loaded: %1"_s.arg( summary ) );
-      }
-
-      QgsVectorLayer *added = layer.release();
-      project->addMapLayer( added );
-      const QString token = storeLayerRollback( added->id() );
-      output.insert( u"layer_id"_s, added->id() );
-      output.insert( u"layer_name"_s, added->name() );
-      output.insert( u"rollback_token"_s, token );
-      output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
-      diff.insert( u"rollback_supported"_s, true );
-      diff.insert( u"layer_id"_s, added->id() );
-      diff.insert( u"summary"_s, u"Executed SQL and loaded the result as a project layer. Only the layer can be rolled back, not database writes."_s );
     }
 
-    output.insert( u"status"_s, u"ok"_s );
-    output.insert( u"diff"_s, diff );
-    return QgsAiToolResult::ok( output );
+    // Making the query layer asks the server for its fields and geometry: in the background too.
+    struct LayerJob
+    {
+        std::unique_ptr<QgsVectorLayer> layer;
+        QString error;
+    };
+    auto layerJob = std::make_shared<LayerJob>();
+    QThread *interfaceThread = QThread::currentThread();
+    const QgsAiTaskWaitResult layerWait = qgsAiRunFunction( u"Loading the query layer"_s, [layerJob, connectionName, options, interfaceThread]( QgsFeedback * ) {
+      QString error;
+      std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection = openPostgresConnection( connectionName, error );
+      if ( !connection )
+      {
+        layerJob->error = error;
+        return true;
+      }
+      try
+      {
+        std::unique_ptr<QgsVectorLayer> layer( connection->createSqlVectorLayer( options ) );
+        if ( !layer || !layer->isValid() )
+        {
+          layerJob->error = u"SQL ran but the query layer could not be loaded: %1"_s.arg( layer ? layer->error().summary() : u"layer was not created"_s );
+          return true;
+        }
+        layer->moveToThread( interfaceThread );
+        layerJob->layer = std::move( layer );
+      }
+      catch ( const QgsProviderConnectionException &ex )
+      {
+        layerJob->error = u"SQL ran but the query layer could not be loaded: %1"_s.arg( ex.what() );
+      }
+      return true;
+    } );
+    if ( layerWait.canceled || layerWait.abandoned )
+    {
+      // Made in the worker and handed over: deleted from the interface thread's event loop.
+      if ( layerJob->layer )
+        layerJob->layer.release()->deleteLater();
+      return QgsAiToolResult::canceledResult( u"Loading the query layer was stopped; the SQL already ran."_s );
+    }
+    if ( !layerJob->error.isEmpty() || !layerJob->layer )
+      return QgsAiToolResult::error( layerJob->error.isEmpty() ? u"SQL ran but the query layer could not be loaded."_s : layerJob->error );
+
+    QgsVectorLayer *added = layerJob->layer.release();
+    project->addMapLayer( added );
+    const QString token = storeLayerRollback( added->id() );
+    output.insert( u"layer_id"_s, added->id() );
+    output.insert( u"layer_name"_s, added->name() );
+    output.insert( u"rollback_token"_s, token );
+    output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
+    diff.insert( u"rollback_supported"_s, true );
+    diff.insert( u"layer_id"_s, added->id() );
+    diff.insert( u"summary"_s, u"Executed SQL and loaded the result as a project layer. Only the layer can be rolled back, not database writes."_s );
   }
-  catch ( const QgsProviderConnectionException &ex )
-  {
-    return QgsAiToolResult::error( u"Error executing SQL on '%1': %2"_s.arg( connectionName, ex.what() ) );
-  }
+
+  output.insert( u"status"_s, u"ok"_s );
+  output.insert( u"diff"_s, diff );
+  return QgsAiToolResult::ok( output );
 }
 
 QgsAiExportLayerToPostgisTool::QgsAiExportLayerToPostgisTool( QgsProject *project )
@@ -934,64 +1146,148 @@ QgsAiToolResult QgsAiExportLayerToPostgisTool::execute( const QJsonObject &args 
   if ( layer->wkbType() == Qgis::WkbType::NoGeometry )
     geomColumn.clear();
 
+  // The rows go to a new table first: the one being replaced changes only once the export
+  // succeeded, in a single transaction, so a failed or stopped export leaves it intact.
+  const QString writeTable = overwrite ? u"strata_tmp_%1"_s.arg( QUuid::createUuid().toString( QUuid::Id128 ).left( 12 ) ) : table;
   QgsDataSourceUri uri( connection->uri() );
   uri.setSchema( schema );
-  uri.setTable( table );
+  uri.setTable( writeTable );
   uri.setKeyColumn( args.value( u"primary_key"_s ).toString().trimmed() );
   uri.setGeometryColumn( geomColumn );
 
   QMap<QString, QVariant> options;
-  if ( overwrite )
-    options.insert( u"overwrite"_s, true );
   if ( lowercaseNames )
     options.insert( u"lowercaseFieldNames"_s, true );
 
-  auto exporter = std::make_unique<QgsVectorLayerExporter>( uri.uri(), u"postgres"_s, layer->fields(), layer->wkbType(), layer->crs(), overwrite, options );
-  if ( exporter->errorCode() != Qgis::VectorExportResult::Success )
-    return QgsAiToolResult::error( u"Error exporting to PostGIS: %1"_s.arg( exporter->errorMessage() ) );
-
-  QgsFeatureIterator iterator = layer->getFeatures();
-  QgsFeature feature;
-  qint64 written = 0;
-  QString exportError;
-  while ( iterator.nextFeature( feature ) )
+  // Features are read from a snapshot in the background: the layer may keep changing meanwhile.
+  struct ExportJob
   {
-    if ( !exporter->addFeature( feature, QgsFeatureSink::FastInsert ) )
-    {
-      exportError = exporter->errorMessage();
-      break;
-    }
-    ++written;
-  }
-  exporter->flushBuffer();
-  if ( exporter->errorCode() != Qgis::VectorExportResult::Success )
-    return QgsAiToolResult::error( u"Error exporting to PostGIS: %1"_s.arg( exporter->errorMessage() ) );
-  if ( !exportError.isEmpty() )
-    return QgsAiToolResult::error( u"Error exporting to PostGIS: %1"_s.arg( exportError ) );
-  exporter.reset();
+      std::unique_ptr<QgsAbstractDatabaseProviderConnection> connection;
+      std::unique_ptr<QgsVectorLayerFeatureSource> source;
+      qint64 written = 0;
+      bool spatialIndexCreated = false;
+      QString error;
+  };
+  auto job = std::make_shared<ExportJob>();
+  job->connection = std::move( connection );
+  job->source = std::make_unique<QgsVectorLayerFeatureSource>( layer );
+  const QgsFields fields = layer->fields();
+  const Qgis::WkbType wkbType = layer->wkbType();
+  const QgsCoordinateReferenceSystem crs = layer->crs();
+  const long long featureCount = layer->featureCount();
+  const QString destinationUri = uri.uri();
 
-  bool spatialIndexCreated = false;
-  if ( !geomColumn.isEmpty() && createIndex )
-  {
-    try
-    {
-      QgsAbstractDatabaseProviderConnection::SpatialIndexOptions indexOptions;
-      indexOptions.geometryColumnName = geomColumn;
-      connection->createSpatialIndex( schema, table, indexOptions );
-      spatialIndexCreated = true;
-    }
-    catch ( const QgsProviderConnectionException &ex )
-    {
-      return QgsAiToolResult::error( u"Layer exported but creating the spatial index failed: %1"_s.arg( ex.what() ) );
-    }
-  }
+  const QgsAiTaskWaitResult wait
+    = qgsAiRunFunction( u"Exporting to PostGIS"_s, [job, destinationUri, fields, wkbType, crs, options, featureCount, schema, table, writeTable, overwrite, geomColumn, createIndex]( QgsFeedback *feedback ) {
+        QgsAbstractDatabaseProviderConnection *connection = job->connection.get();
+        auto exporter = std::make_unique<QgsVectorLayerExporter>( destinationUri, u"postgres"_s, fields, wkbType, crs, false, options );
+        if ( exporter->errorCode() != Qgis::VectorExportResult::Success )
+        {
+          job->error = u"Error exporting to PostGIS: %1"_s.arg( exporter->errorMessage() );
+          return true;
+        }
 
-  try
-  {
-    connection->vacuum( schema, table );
-  }
-  catch ( const QgsProviderConnectionException & )
-  {}
+        // From here on writeTable is ours: whatever goes wrong, it is removed.
+        auto dropWriteTable = [connection, schema, writeTable]() {
+          try
+          {
+            connection->executeSql( u"DROP TABLE IF EXISTS %1"_s.arg( databaseToolsQuotedName( schema, writeTable ) ) );
+          }
+          catch ( const QgsProviderConnectionException & )
+          {}
+        };
+
+        QgsFeatureIterator iterator = job->source->getFeatures();
+        QgsFeature feature;
+        QString exportError;
+        while ( iterator.nextFeature( feature ) )
+        {
+          if ( feedback->isCanceled() )
+            break;
+          if ( !exporter->addFeature( feature, QgsFeatureSink::FastInsert ) )
+          {
+            exportError = exporter->errorMessage();
+            break;
+          }
+          ++job->written;
+          if ( featureCount > 0 && job->written % 200 == 0 )
+            feedback->setProgress( 90.0 * static_cast<double>( job->written ) / static_cast<double>( featureCount ) );
+        }
+        if ( !feedback->isCanceled() && exportError.isEmpty() && !exporter->flushBuffer() )
+          exportError = exporter->errorMessage();
+        if ( exportError.isEmpty() && exporter->errorCode() != Qgis::VectorExportResult::Success )
+          exportError = exporter->errorMessage();
+        exporter.reset();
+        if ( feedback->isCanceled() || !exportError.isEmpty() )
+        {
+          dropWriteTable();
+          if ( !exportError.isEmpty() )
+            job->error = overwrite ? u"Error exporting to PostGIS: %1 The existing table '%2' was not changed."_s.arg( exportError, table ) : u"Error exporting to PostGIS: %1"_s.arg( exportError );
+          return !feedback->isCanceled();
+        }
+
+        if ( overwrite )
+        {
+          // One call, one implicit transaction: either the new table replaces the old one or nothing changes.
+          try
+          {
+            connection->executeSql(
+              u"DROP TABLE IF EXISTS %1; ALTER TABLE %2 RENAME TO \"%3\""_s.arg( databaseToolsQuotedName( schema, table ), databaseToolsQuotedName( schema, writeTable ), QString( table ).replace( '"', "\"\""_L1 ) )
+            );
+          }
+          catch ( const QgsProviderConnectionException &ex )
+          {
+            dropWriteTable();
+            job->error = u"The layer was exported, but the existing table '%1' could not be replaced (other objects may depend on it); it was not changed: %2"_s.arg( table, ex.what() );
+            return true;
+          }
+          // Cosmetic: the primary key keeps the temporary name otherwise.
+          try
+          {
+            connection->executeSql(
+              u"ALTER INDEX IF EXISTS %1 RENAME TO \"%2_pkey\""_s.arg( databaseToolsQuotedName( schema, writeTable + u"_pkey"_s ), QString( table ).left( 58 ).replace( '"', "\"\""_L1 ) )
+            );
+          }
+          catch ( const QgsProviderConnectionException & )
+          {}
+        }
+
+        if ( !geomColumn.isEmpty() && createIndex )
+        {
+          try
+          {
+            QgsAbstractDatabaseProviderConnection::SpatialIndexOptions indexOptions;
+            indexOptions.geometryColumnName = geomColumn;
+            connection->createSpatialIndex( schema, table, indexOptions );
+            job->spatialIndexCreated = true;
+          }
+          catch ( const QgsProviderConnectionException &ex )
+          {
+            job->error = u"Layer exported but creating the spatial index failed: %1"_s.arg( ex.what() );
+            return true;
+          }
+        }
+        feedback->setProgress( 95 );
+
+        // Statistics for the planner. A new table has nothing to vacuum; VACUUM FULL would lock and rewrite it.
+        try
+        {
+          connection->executeSql( u"ANALYZE %1"_s.arg( databaseToolsQuotedName( schema, table ) ) );
+        }
+        catch ( const QgsProviderConnectionException & )
+        {}
+        return true;
+      } );
+  if ( wait.canceled || wait.abandoned )
+    return QgsAiToolResult::canceledResult(
+      overwrite ? u"The export was stopped; the table '%1' was not changed."_s.arg( table ) : u"The export was stopped and the partial table '%1' was removed."_s.arg( table )
+    );
+  if ( !wait.succeeded && job->error.isEmpty() )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"The export failed."_s : wait.error );
+  if ( !job->error.isEmpty() )
+    return QgsAiToolResult::error( job->error );
+  const qint64 written = job->written;
+  const bool spatialIndexCreated = job->spatialIndexCreated;
 
   QJsonObject diff;
   diff.insert( u"summary"_s, overwrite ? u"Exported a vector layer to PostGIS, overwriting the destination table. Database writes cannot be rolled back."_s : u"Exported a vector layer to a new PostGIS table. Database writes cannot be rolled back."_s );

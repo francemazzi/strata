@@ -5,29 +5,49 @@
 ***************************************************************************/
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
+#include <numeric>
+#include <thread>
 #include <utility>
 
 #include "ai/index/qgsaiembeddingclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingscheduler.h"
+#include "ai/index/qgsaiindexingthrottle.h"
 #include "ai/index/qgsailayerchunker.h"
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/tools/qgsaiindextools.h"
+#include "qgsapplication.h"
+#include "qgsfeature.h"
+#include "qgsfeatureiterator.h"
+#include "qgsfeedback.h"
+#include "qgsgeometry.h"
+#include "qgspointxy.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
+#include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
 
 #include <QByteArray>
+#include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QList>
+#include <QScopeGuard>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QVariant>
 #include <QVector>
 
@@ -138,6 +158,29 @@ namespace
       }
   };
 
+  //! Takes \a delayMs per embed() call, i.e. per batch, like a real model on a slow computer.
+  class SlowEmbeddingProvider : public FakeEmbeddingProvider
+  {
+    public:
+      explicit SlowEmbeddingProvider( int delayMs )
+        : mDelayMs( delayMs )
+      {}
+
+      bool embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage = nullptr, int maxBatch = 64 ) override
+      {
+        ++calls;
+        embeddedTexts += static_cast<int>( texts.size() );
+        QThread::msleep( mDelayMs );
+        return FakeEmbeddingProvider::embed( texts, out, errorMessage, maxBatch );
+      }
+
+      std::atomic_int calls { 0 };
+      std::atomic_int embeddedTexts { 0 };
+
+    private:
+      int mDelayMs = 0;
+  };
+
   /**
    * Provider with fully configurable identity metadata, used to exercise the
    * provider/model mismatch -> wipe-and-rebuild path of the on-disk index.
@@ -199,6 +242,10 @@ class TestQgsAiWorkspaceIndex : public QObject
     void e5PreprocessingHelpers();
     void e5ProviderAvailabilityHonorsEnvironmentModelDir();
     void e5ProviderIntegrationWhenModelDirIsConfigured();
+    void e5EmbeddingsDoNotDependOnTheSpeed();
+    void e5BatchesStayWithinTheTokenBudget();
+    void e5ModelIsReleasedWhenIdle();
+    void indexReleasesAnIdleModel();
     void embeddingClientDefaultsToOpenAi();
     void embeddingClientUsesOpenRouterSettings();
     void schemaMigrationDropsOldDb();
@@ -208,8 +255,27 @@ class TestQgsAiWorkspaceIndex : public QObject
     void layerSnapshotsReindexWithoutDroppingFileChunks();
     void chunkerOutputPersistsAsLayerChunks();
     void reindexLayersToolRequiresConfirm();
+    void e5AvailabilityDoesNotLoadTheModel();
+    void workspaceScanPrunesExcludedFoldersAtAnyDepth();
+    void searchWaitsForOneBatchNotTheWholeReindex();
+    void reindexStopsWithinOneBatchWhenCanceled();
+    void setEmbeddingProviderDoesNotWaitForTheReindex();
+    void schedulerRerunsARequestMadeDuringAPass();
+    void databaseUsesWriteAheadLog();
+    void layerRemovalsReachTheDatabaseTogether();
+    void staleDatabasesAreRemoved();
+    void clearRemovesTheWriteAheadLog();
+    void unchangedLayerIsNotEmbeddedAgain();
+    void editedLayerReusesUnchangedChunks();
+    void unchangedFilesAreNotReadAgain();
+    void searchSkipsLayersOutsideTheProject();
+    void layersUnseenForAMonthExpire();
+    void remoteProviderNeedsConsent();
+    void projectChangeDuringAReindexKeepsProjectsApart();
 
   private:
+    //! Writes a workspace file that chunkText() splits into \a chunkCount chunks.
+    static void writeManyChunkFile( const QString &path, int chunkCount );
     static QgsAiWorkspaceIndex::Chunk makeFileChunk( const QString &rel, int index, const QString &text );
     static QgsAiWorkspaceIndex::Chunk makeLayerChunk( const QString &layerId, const QString &name, qint64 fidMin, qint64 fidMax, int index, const QString &text, const QByteArray &wkt );
     static QVector<float> dummyEmbedding( float seed );
@@ -426,6 +492,10 @@ void TestQgsAiWorkspaceIndex::workspaceRootChangeLoadsSeparateIndex()
 
   contextProvider.setWorkspaceRoot( root1.path() );
   QCOMPARE( index.status().workspaceRoot, QDir( root1.path() ).absolutePath() );
+  // The previous workspace's cache loads in the background after the switch.
+  QVERIFY( index.status().loading );
+  QVERIFY( index.ensureLoaded() );
+  QVERIFY( !index.status().loading );
   QCOMPARE( index.status().chunkCount, 1 );
   QCOMPARE( index.chunks().first().relativePath, u"a.md"_s );
 }
@@ -585,6 +655,128 @@ void TestQgsAiWorkspaceIndex::e5ProviderIntegrationWhenModelDirIsConfigured()
       norm += static_cast<double>( value ) * static_cast<double>( value );
     QVERIFY( std::abs( std::sqrt( norm ) - 1.0 ) < 0.001 );
   }
+}
+
+void TestQgsAiWorkspaceIndex::e5EmbeddingsDoNotDependOnTheSpeed()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings were not compiled because ONNX Runtime and/or SentencePiece were not found." );
+  if ( qgetenv( "STRATA_AI_EMBEDDING_MODEL_DIR" ).trimmed().isEmpty() )
+    QSKIP( "STRATA_AI_EMBEDDING_MODEL_DIR is not set; skipping optional E5 ONNX integration test." );
+
+  const QStringList texts { u"strade comunali e civici"_s, u"uso del suolo agricolo, particelle catastali"_s, u"alberi monumentali del parco"_s };
+  // One provider: a new speed applies to the next call, which makes the session again.
+  QgsAiE5EmbeddingProvider provider;
+  const auto embedAtSpeed = [&texts, &provider]( const QString &speed, QList<QVector<float>> &vectors ) {
+    QgsSettings().setValue( QgsAiIndexingThrottle::speedSettingsKey(), speed );
+    QString error;
+    const bool ok = provider.embed( texts, QgsAiEmbeddingRole::Passage, vectors, &error );
+    if ( !ok )
+      qWarning() << error;
+    return ok;
+  };
+  const auto restoreSpeed = qScopeGuard( []() { QgsSettings().remove( QgsAiIndexingThrottle::speedSettingsKey() ); } );
+
+  QList<QVector<float>> oneThread;
+  QList<QVector<float>> fourThreads;
+  QVERIFY( embedAtSpeed( u"low"_s, oneThread ) );
+  QVERIFY( embedAtSpeed( u"high"_s, fourThreads ) );
+  QCOMPARE( oneThread.size(), texts.size() );
+  QCOMPARE( fourThreads.size(), texts.size() );
+  for ( int i = 0; i < texts.size(); ++i )
+  {
+    for ( int d = 0; d < oneThread.at( i ).size(); ++d )
+      QVERIFY( std::abs( oneThread.at( i ).at( d ) - fourThreads.at( i ).at( d ) ) < 1e-4f );
+  }
+}
+
+void TestQgsAiWorkspaceIndex::e5BatchesStayWithinTheTokenBudget()
+{
+  const QVector<int> tokens { 512, 10, 20, 512, 300, 15, 512, 40, 512, 512, 512, 512, 512, 60, 8, 700 };
+  const int budget = QgsAiE5EmbeddingProvider::BATCH_TOKEN_BUDGET;
+  const QList<QList<int>> batches = QgsAiE5EmbeddingProvider::planBatches( tokens, 16, budget );
+
+  QList<int> seen;
+  int previousLongest = 0;
+  for ( const QList<int> &batch : batches )
+  {
+    QVERIFY( !batch.isEmpty() );
+    QVERIFY( batch.size() <= 16 );
+    int longest = 0;
+    for ( const int index : batch )
+      longest = std::max( longest, tokens.at( index ) );
+    // Padded to its longest text, a batch stays within the budget (a longer text goes alone).
+    QVERIFY( batch.size() * longest <= budget || batch.size() == 1 );
+    // Shortest first: short texts are not padded to long ones.
+    QVERIFY( longest >= previousLongest );
+    previousLongest = longest;
+    seen.append( batch );
+  }
+  std::sort( seen.begin(), seen.end() );
+  QList<int> all( tokens.size() );
+  std::iota( all.begin(), all.end(), 0 );
+  QCOMPARE( seen, all );
+
+  // Short texts share one batch up to the batch size.
+  QCOMPARE( QgsAiE5EmbeddingProvider::planBatches( QVector<int>( 40, 20 ), 16, budget ).size(), 3 );
+  QVERIFY( QgsAiE5EmbeddingProvider::planBatches( {}, 16, budget ).isEmpty() );
+}
+
+void TestQgsAiWorkspaceIndex::e5ModelIsReleasedWhenIdle()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings were not compiled because ONNX Runtime and/or SentencePiece were not found." );
+  if ( qgetenv( "STRATA_AI_EMBEDDING_MODEL_DIR" ).trimmed().isEmpty() )
+    QSKIP( "STRATA_AI_EMBEDDING_MODEL_DIR is not set; skipping optional E5 ONNX integration test." );
+
+  QgsAiE5EmbeddingProvider provider;
+  QList<QVector<float>> first;
+  QString error;
+  QVERIFY2( provider.embed( { u"strade comunali"_s }, QgsAiEmbeddingRole::Passage, first, &error ), error.toUtf8().constData() );
+  QVERIFY( provider.runtimeLoaded() );
+
+  // Used a moment ago: kept.
+  provider.releaseIdleResources( 60000 );
+  QVERIFY( provider.runtimeLoaded() );
+
+  provider.releaseIdleResources( 0 );
+  QVERIFY( !provider.runtimeLoaded() );
+  QVERIFY( provider.isAvailable( &error ) );
+
+  // Loaded again on demand, with the same result.
+  QList<QVector<float>> second;
+  QVERIFY2( provider.embed( { u"strade comunali"_s }, QgsAiEmbeddingRole::Passage, second, &error ), error.toUtf8().constData() );
+  QVERIFY( provider.runtimeLoaded() );
+  QCOMPARE( second.size(), 1 );
+  for ( int d = 0; d < first.first().size(); ++d )
+    QVERIFY( std::abs( first.first().at( d ) - second.first().at( d ) ) < 1e-5f );
+}
+
+void TestQgsAiWorkspaceIndex::indexReleasesAnIdleModel()
+{
+  class ReleaseCountingProvider : public FakeEmbeddingProvider
+  {
+    public:
+      void releaseIdleResources( qint64 idleMs ) override
+      {
+        lastIdleMs = idleMs;
+        ++releases;
+      }
+      std::atomic_int releases { 0 };
+      std::atomic<qint64> lastIdleMs { 0 };
+  };
+
+  QgsSettings settings;
+  settings.setValue( u"strata/index/model_idle_unload_s"_s, 2 );
+  const auto restore = qScopeGuard( []() { QgsSettings().remove( u"strata/index/model_idle_unload_s"_s ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  ReleaseCountingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QTRY_VERIFY_WITH_TIMEOUT( provider.releases > 0, 5000 );
+  QCOMPARE( provider.lastIdleMs.load(), 2000 );
 }
 
 void TestQgsAiWorkspaceIndex::embeddingClientDefaultsToOpenAi()
@@ -767,7 +959,15 @@ void TestQgsAiWorkspaceIndex::layerSnapshotsReindexWithoutDroppingFileChunks()
   QVERIFY2( index.createWorkspaceLayerSnapshot( allSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( allSnapshot.scope, QgsAiWorkspaceIndex::ReplaceScope::AllLayers );
   QCOMPARE( allSnapshot.layerCount, 1 );
-  QVERIFY( !allSnapshot.chunks.isEmpty() );
+  // Prepared on this thread, read into chunks where the snapshot is indexed (a worker in the app).
+  QCOMPARE( allSnapshot.preparedLayers.size(), 1 );
+  QVERIFY( allSnapshot.chunks.isEmpty() );
+  {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot materialized = allSnapshot;
+    QVERIFY( QgsAiWorkspaceIndex::materializeLayerSnapshot( materialized ) );
+    QVERIFY( !materialized.chunks.isEmpty() );
+    QVERIFY( materialized.preparedLayers.isEmpty() );
+  }
 
   QVERIFY2( index.reindexLayerSnapshot( allSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( index.status().fileChunkCount, 1 );
@@ -777,7 +977,7 @@ void TestQgsAiWorkspaceIndex::layerSnapshotsReindexWithoutDroppingFileChunks()
   QVERIFY2( index.createWorkspaceLayerSnapshotForLayer( layerId, singleSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( singleSnapshot.scope, QgsAiWorkspaceIndex::ReplaceScope::SingleLayer );
   QCOMPARE( singleSnapshot.scopedLayerId, layerId );
-  QVERIFY( !singleSnapshot.chunks.isEmpty() );
+  QCOMPARE( singleSnapshot.preparedLayers.size(), 1 );
 
   QVERIFY2( index.reindexLayerSnapshot( singleSnapshot, &err ), err.toUtf8().constData() );
   QCOMPARE( index.status().fileChunkCount, 1 );
@@ -800,6 +1000,10 @@ void TestQgsAiWorkspaceIndex::chunkerOutputPersistsAsLayerChunks()
   auto layer = std::make_unique<QgsVectorLayer>( shpPath, u"points"_s, u"ogr"_s );
   QVERIFY( layer->isValid() );
 
+  // WKT blobs are only collected when the privacy setting allows geometries in the model context.
+  QgsSettings wktSettings;
+  wktSettings.setValue( u"strata/privacy/include_layer_wkt_in_model_context"_s, true );
+  const auto restoreWkt = qScopeGuard( [&wktSettings]() { wktSettings.remove( u"strata/privacy/include_layer_wkt_in_model_context"_s ); } );
   const auto chunks = QgsAiLayerChunker::chunkVector( layer.get() );
   QVERIFY( !chunks.isEmpty() );
 
@@ -854,6 +1058,628 @@ void TestQgsAiWorkspaceIndex::reindexLayersToolRequiresConfirm()
   const QgsAiToolResult confirmed = tool.execute( args );
   QVERIFY( !confirmed.success );
   QVERIFY2( confirmed.errorMessage.contains( u"Local embedding model"_s, Qt::CaseInsensitive ), confirmed.errorMessage.toUtf8().constData() );
+}
+
+void TestQgsAiWorkspaceIndex::writeManyChunkFile( const QString &path, int chunkCount )
+{
+  QFile file( path );
+  QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
+  // One line per chunk, a bit shorter than CHUNK_TARGET_CHARS so each chunk ends on its newline.
+  const QByteArray line = QByteArray( QgsAiWorkspaceIndex::CHUNK_TARGET_CHARS - 10, 'a' ) + '\n';
+  for ( int i = 0; i < chunkCount; ++i )
+    file.write( line );
+}
+
+void TestQgsAiWorkspaceIndex::e5AvailabilityDoesNotLoadTheModel()
+{
+  if ( !QgsAiEmbeddingProviderRegistry::providerIds().contains( QgsAiE5EmbeddingProvider::staticProviderId() ) )
+    QSKIP( "Local E5 embeddings are not compiled in." );
+
+  ScopedEmbeddingConfiguration scopedConfiguration;
+  QTemporaryDir modelDir;
+  QVERIFY( modelDir.isValid() );
+  QVERIFY( QDir( modelDir.path() ).mkpath( u"onnx"_s ) );
+  // Files that exist but are not a model: availability must not notice, only a real load does.
+  for ( const QString &relative : { u"onnx/model_qint8_avx512_vnni.onnx"_s, u"sentencepiece.bpe.model"_s } )
+  {
+    QFile file( QDir( modelDir.path() ).filePath( relative ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "not a model" );
+  }
+  qputenv( "STRATA_AI_EMBEDDING_MODEL_DIR", QFile::encodeName( modelDir.path() ) );
+
+  QgsAiE5EmbeddingProvider provider;
+  QString error;
+  QVERIFY2( provider.isAvailable( &error ), error.toUtf8().constData() );
+  QVERIFY( !provider.runtimeLoaded() );
+
+  // The first embed() loads the model on its own thread; a failed load is then reported.
+  QList<QVector<float>> out;
+  QVERIFY( !provider.embed( { u"alpha"_s }, out, &error ) );
+  QVERIFY( !provider.runtimeLoaded() );
+  error.clear();
+  QVERIFY( !provider.isAvailable( &error ) );
+  QVERIFY( !error.isEmpty() );
+}
+
+void TestQgsAiWorkspaceIndex::workspaceScanPrunesExcludedFoldersAtAnyDepth()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QDir dir( root.path() );
+  for ( const QString &relative : { u"a/node_modules/skip.md"_s, u"a/.git/skip.md"_s, u"b/keep.md"_s, u"build/skip.md"_s, u"a/build/keep.md"_s } )
+  {
+    QVERIFY( dir.mkpath( QFileInfo( dir.filePath( relative ) ).path() ) );
+    QFile file( dir.filePath( relative ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "text" );
+  }
+
+  QgsAiFileContextProvider::WorkspaceScanOptions options;
+  const QgsAiFileContextProvider::WorkspaceScanResult result = QgsAiFileContextProvider::scanWorkspace( root.path(), options );
+  QStringList found;
+  for ( const QgsAiFileContextProvider::WorkspaceFile &file : result.files )
+    found << file.relativePath;
+  found.sort();
+  // "build" is excluded at the root only: a project's own build folder deeper down is data.
+  QCOMPARE( found, QStringList( { u"a/build/keep.md"_s, u"b/keep.md"_s } ) );
+  QVERIFY( !result.truncated );
+  // Excluded folders are not even walked.
+  QVERIFY2( result.visitedEntries <= 7, QString::number( result.visitedEntries ).toUtf8().constData() );
+
+  options.maxEntries = 2;
+  QVERIFY( QgsAiFileContextProvider::scanWorkspace( root.path(), options ).truncated );
+}
+
+void TestQgsAiWorkspaceIndex::searchWaitsForOneBatchNotTheWholeReindex()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  // 10 batches of 200 ms: about 2 s of embedding.
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { QVector<float> { 1.0f, 0.0f, 0.1f } }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+  std::atomic_bool reindexFinished { false };
+  std::thread worker( [&index, &reindexFinished]() {
+    QString reindexError;
+    index.reindex( 10, &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+    reindexFinished = true;
+  } );
+  QThread::msleep( 300 );
+
+  QElapsedTimer clock;
+  clock.start();
+  const QList<QgsAiWorkspaceIndex::Chunk> hits = index.search( u"alpha"_s, 1, &err );
+  const qint64 searchMs = clock.elapsed();
+  const bool reindexWasRunning = !reindexFinished;
+  worker.join();
+
+  QVERIFY2( !hits.isEmpty(), err.toUtf8().constData() );
+  QVERIFY( reindexWasRunning );
+  // At most the batch in progress plus the query itself, not the rest of the reindex.
+  QVERIFY2( searchMs < 1000, QString::number( searchMs ).toUtf8().constData() );
+}
+
+void TestQgsAiWorkspaceIndex::reindexStopsWithinOneBatchWhenCanceled()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  QgsFeedback feedback;
+  std::thread canceller( [&feedback]() {
+    QThread::msleep( 300 );
+    feedback.cancel();
+  } );
+  QElapsedTimer clock;
+  clock.start();
+  QString err;
+  const bool ok = index.reindex( 10, &err, &feedback );
+  const qint64 elapsedMs = clock.elapsed();
+  canceller.join();
+
+  QVERIFY( !ok );
+  QVERIFY2( err.contains( u"canceled"_s, Qt::CaseInsensitive ), err.toUtf8().constData() );
+  QVERIFY2( elapsedMs < 1000, QString::number( elapsedMs ).toUtf8().constData() );
+  QVERIFY( provider.calls < 10 );
+  // Nothing half-done reached the index.
+  QCOMPARE( index.status().fileChunkCount, 0 );
+}
+
+void TestQgsAiWorkspaceIndex::setEmbeddingProviderDoesNotWaitForTheReindex()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 10 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  FakeEmbeddingProvider replacement;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  std::atomic_bool reindexFinished { false };
+  std::thread worker( [&index, &reindexFinished]() {
+    QString reindexError;
+    index.reindex( 10, &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+    reindexFinished = true;
+  } );
+  QThread::msleep( 300 );
+
+  QElapsedTimer clock;
+  clock.start();
+  index.setEmbeddingProvider( &replacement );
+  const qint64 swapMs = clock.elapsed();
+  const bool reindexWasRunning = !reindexFinished;
+  worker.join();
+
+  QVERIFY( reindexWasRunning );
+  QVERIFY2( swapMs < 1000, QString::number( swapMs ).toUtf8().constData() );
+  // The running pass kept the provider it started with.
+  QVERIFY( provider.calls >= 10 );
+}
+
+void TestQgsAiWorkspaceIndex::schedulerRerunsARequestMadeDuringAPass()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  writeManyChunkFile( QDir( root.path() ).filePath( u"big.md"_s ), 3 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 200 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QgsAiIndexingScheduler scheduler( &index );
+  scheduler.setAutomaticEnabled( true );
+
+  int passes = 0;
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  const QMetaObject::Connection counter = connect( manager, &QgsTaskManager::taskAdded, this, [&passes, manager]( long taskId ) {
+    if ( QgsTask *task = manager->task( taskId ); task && task->description() == QObject::tr( "Index AI workspace" ) )
+      ++passes;
+  } );
+
+  scheduler.scheduleWorkspaceIndexing( 0 );
+  QTRY_VERIFY_WITH_TIMEOUT( scheduler.isRunning(), 5000 );
+  // A request during the pass is kept and runs once the pass ends.
+  scheduler.scheduleWorkspaceIndexing( 0 );
+  QTRY_COMPARE_WITH_TIMEOUT( passes, 2, 10000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !scheduler.isRunning(), 10000 );
+  disconnect( counter );
+  QCOMPARE( passes, 2 );
+}
+
+void TestQgsAiWorkspaceIndex::databaseUsesWriteAheadLog()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+  const QString connection = u"test_wal_check"_s;
+  {
+    QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+    db.setDatabaseName( index.databasePath() );
+    QVERIFY( db.open() );
+    QSqlQuery mode( db );
+    QVERIFY( mode.exec( u"PRAGMA journal_mode"_s ) && mode.next() );
+    QCOMPARE( mode.value( 0 ).toString(), u"wal"_s );
+    db.close();
+  }
+  QSqlDatabase::removeDatabase( connection );
+  QVERIFY( index.databaseSizeBytes() > 0 );
+}
+
+void TestQgsAiWorkspaceIndex::layerRemovalsReachTheDatabaseTogether()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  {
+    QgsAiWorkspaceIndex index( &contextProvider, &provider );
+    QList<QgsAiWorkspaceIndex::Chunk> chunks;
+    QList<QVector<float>> embeddings;
+    for ( int i = 0; i < 20; ++i )
+    {
+      chunks << makeLayerChunk( u"layer_%1"_s.arg( i ), u"Layer %1"_s.arg( i ), 0, 10, 0, u"layer text %1"_s.arg( i ), QByteArray() );
+      embeddings << dummyEmbedding( static_cast<float>( i + 1 ) );
+    }
+    chunks << makeFileChunk( u"notes.md"_s, 0, u"alpha"_s );
+    embeddings << dummyEmbedding( 0.5f );
+    QString err;
+    QVERIFY2( index.persistChunks( chunks, embeddings, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+
+    // A project closing removes its layers one signal at a time, without waiting on the database.
+    for ( int i = 0; i < 20; ++i )
+      QVERIFY( index.removeLayer( u"layer_%1"_s.arg( i ), &err ) );
+    QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+  }
+
+  // A fresh index reads what reached the database.
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 1 );
+}
+
+void TestQgsAiWorkspaceIndex::staleDatabasesAreRemoved()
+{
+  QTemporaryDir directory;
+  QVERIFY( directory.isValid() );
+  const QDateTime old = QDateTime::currentDateTimeUtc().addDays( -( QgsAiWorkspaceIndex::STALE_DATABASE_DAYS + 5 ) );
+  const auto writeFile = [&directory]( const QString &name, const QDateTime &modified ) {
+    QFile file( QDir( directory.path() ).filePath( name ) );
+    QVERIFY( file.open( QIODevice::WriteOnly ) );
+    file.write( "x" );
+    // Written data reaches the file first, or closing it would set the time again.
+    QVERIFY( file.flush() );
+    if ( modified.isValid() )
+      QVERIFY( file.setFileTime( modified, QFileDevice::FileModificationTime ) );
+    file.close();
+  };
+  writeFile( u"ws_old_e5.sqlite"_s, old );
+  writeFile( u"ws_old_e5.sqlite-wal"_s, old );
+  writeFile( u"ws_fresh_e5.sqlite"_s, QDateTime() );
+  writeFile( u"ws_current_e5.sqlite"_s, old );
+  writeFile( u"ws_recentwal_e5.sqlite"_s, old );
+  writeFile( u"ws_recentwal_e5.sqlite-wal"_s, QDateTime() );
+  writeFile( u"history.sqlite"_s, old );
+
+  const QString keep = QDir( directory.path() ).filePath( u"ws_current_e5.sqlite"_s );
+  QCOMPARE( QgsAiWorkspaceIndex::removeStaleDatabases( directory.path(), keep ), 1 );
+
+  const QDir dir( directory.path() );
+  QVERIFY( !dir.exists( u"ws_old_e5.sqlite"_s ) );
+  QVERIFY( !dir.exists( u"ws_old_e5.sqlite-wal"_s ) );
+  QVERIFY( dir.exists( u"ws_fresh_e5.sqlite"_s ) );
+  QVERIFY( dir.exists( u"ws_current_e5.sqlite"_s ) );
+  // Recently written through its log: still in use.
+  QVERIFY( dir.exists( u"ws_recentwal_e5.sqlite"_s ) );
+  // Only index databases are touched.
+  QVERIFY( dir.exists( u"history.sqlite"_s ) );
+}
+
+void TestQgsAiWorkspaceIndex::clearRemovesTheWriteAheadLog()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.persistChunks( { makeFileChunk( u"notes.md"_s, 0, u"alpha"_s ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ), err.toUtf8().constData() );
+  const QString path = index.databasePath();
+  QVERIFY( QFileInfo::exists( path ) );
+
+  index.clear();
+  QVERIFY( !QFileInfo::exists( path ) );
+  QVERIFY( !QFileInfo::exists( path + u"-wal"_s ) );
+  QVERIFY( !QFileInfo::exists( path + u"-shm"_s ) );
+  QCOMPARE( index.databaseSizeBytes(), 0 );
+}
+
+void TestQgsAiWorkspaceIndex::unchangedLayerIsNotEmbeddedAgain()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  for ( const QString &ext : { u".shp"_s, u".shx"_s, u".dbf"_s, u".prj"_s } )
+    QFile::copy( QStringLiteral( TEST_DATA_DIR ) + u"/points"_s + ext, root.path() + u"/points"_s + ext );
+  QgsVectorLayer *layer = new QgsVectorLayer( root.path() + u"/points.shp"_s, u"points"_s, u"ogr"_s );
+  QVERIFY( layer->isValid() );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  const auto reindex = [&index, layer]() {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QString err;
+    const bool ok = index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) && index.reindexLayerSnapshot( snapshot, &err );
+    if ( !ok )
+      qWarning() << err;
+    return ok;
+  };
+
+  QVERIFY( reindex() );
+  const int firstTexts = provider.embeddedTexts;
+  QVERIFY( firstTexts > 0 );
+  const int chunkCount = static_cast<int>( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size() );
+
+  // Same files, same settings: nothing is read or embedded.
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+
+  // Another index of the same workspace (Strata started again) knows the layer too.
+  QgsAiWorkspaceIndex reopened( &contextProvider, &provider );
+  QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+  QString err;
+  QVERIFY( reopened.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) );
+  QVERIFY2( reopened.reindexLayerSnapshot( snapshot, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+  QCOMPARE( reopened.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size(), chunkCount );
+
+  // A newer .dbf (attributes saved) means reading the layer again; its unchanged chunks keep their embeddings.
+  QFile dbf( root.path() + u"/points.dbf"_s );
+  QVERIFY( dbf.open( QIODevice::ReadWrite ) );
+  QVERIFY( dbf.setFileTime( QDateTime::currentDateTime().addSecs( 60 ), QFileDevice::FileModificationTime ) );
+  dbf.close();
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() ).size(), chunkCount );
+}
+
+void TestQgsAiWorkspaceIndex::editedLayerReusesUnchangedChunks()
+{
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=name:string"_s, u"memory points"_s, u"memory"_s );
+  QgsFeatureList features;
+  for ( int i = 0; i < 150; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, u"feature number %1 with a reasonably long descriptive name"_s.arg( i ) );
+    feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( i, i ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  const auto reindex = [&index, layer]() {
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QString err;
+    return index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) && index.reindexLayerSnapshot( snapshot, &err );
+  };
+
+  QVERIFY( reindex() );
+  const int firstTexts = provider.embeddedTexts;
+  QVERIFY( firstTexts > 2 );
+
+  // A memory layer has no file to compare: it is read again, but only new text is embedded.
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts );
+
+  // Editing the last feature changes its chunk only.
+  QgsFeature last;
+  QgsFeatureIterator it = layer->getFeatures();
+  while ( it.nextFeature( last ) )
+    ;
+  QVERIFY( layer->dataProvider()->changeAttributeValues( { { last.id(), { { 0, u"renamed feature"_s } } } } ) );
+  QVERIFY( reindex() );
+  QCOMPARE( provider.embeddedTexts.load(), firstTexts + 1 );
+}
+
+void TestQgsAiWorkspaceIndex::unchangedFilesAreNotReadAgain()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  const QString notesPath = QDir( root.path() ).filePath( u"notes.md"_s );
+  const QString otherPath = QDir( root.path() ).filePath( u"other.md"_s );
+  const auto writeText = []( const QString &path, const QString &text ) {
+    QFile file( path );
+    QVERIFY( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    file.write( text.toUtf8() );
+  };
+  writeText( notesPath, u"original notes about parcels"_s );
+  writeText( otherPath, u"other notes about roads"_s );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  SlowEmbeddingProvider provider( 0 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 2 );
+
+  // New content with the old modification time: the file is not read, so the old text stays.
+  const QDateTime modified = QFileInfo( notesPath ).lastModified();
+  writeText( notesPath, u"rewritten without touching the time"_s );
+  {
+    QFile file( notesPath );
+    QVERIFY( file.open( QIODevice::ReadWrite ) );
+    QVERIFY( file.setFileTime( modified, QFileDevice::FileModificationTime ) );
+  }
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 2 );
+  const auto textOf = [&index]( const QString &relativePath ) {
+    for ( const QgsAiWorkspaceIndex::Chunk &chunk : index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ) )
+    {
+      if ( chunk.relativePath == relativePath )
+        return chunk.text;
+    }
+    return QString();
+  };
+  QCOMPARE( textOf( u"notes.md"_s ), u"original notes about parcels"_s );
+
+  // A newer time: read again. The removed file leaves the index; the other one is untouched.
+  {
+    QFile file( notesPath );
+    QVERIFY( file.open( QIODevice::ReadWrite ) );
+    QVERIFY( file.setFileTime( modified.addSecs( 60 ), QFileDevice::FileModificationTime ) );
+  }
+  QVERIFY( QFile::remove( otherPath ) );
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QCOMPARE( provider.embeddedTexts.load(), 3 );
+  QCOMPARE( textOf( u"notes.md"_s ), u"rewritten without touching the time"_s );
+  QVERIFY( textOf( u"other.md"_s ).isEmpty() );
+
+  // What reached the database matches.
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  const QList<QgsAiWorkspaceIndex::Chunk> stored = reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles );
+  QCOMPARE( stored.size(), 1 );
+  QCOMPARE( stored.first().text, u"rewritten without touching the time"_s );
+}
+
+void TestQgsAiWorkspaceIndex::searchSkipsLayersOutsideTheProject()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QString err;
+  QVERIFY( index.persistChunks(
+    { makeLayerChunk( u"open_layer"_s, u"Open"_s, 0, 1, 0, u"parcels"_s, QByteArray() ),
+      makeLayerChunk( u"closed_layer"_s, u"Closed"_s, 0, 1, 0, u"parcels"_s, QByteArray() ),
+      makeFileChunk( u"notes.md"_s, 0, u"parcels"_s ) },
+    { dummyEmbedding( 1.0f ), dummyEmbedding( 1.0f ), dummyEmbedding( 1.0f ) },
+    QgsAiWorkspaceIndex::ReplaceScope::All,
+    QString(),
+    &err
+  ) );
+
+  QCOMPARE( index.search( u"parcels"_s, 10, &err ).size(), 3 );
+
+  index.setActiveLayerIds( { u"open_layer"_s } );
+  const QList<QgsAiWorkspaceIndex::Chunk> hits = index.search( u"parcels"_s, 10, &err );
+  QCOMPARE( hits.size(), 2 );
+  for ( const QgsAiWorkspaceIndex::Chunk &hit : hits )
+    QVERIFY( hit.layerId != "closed_layer"_L1 );
+  // The closed project's layer is still indexed, for when it opens again.
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, u"closed_layer"_s ).size(), 1 );
+}
+
+void TestQgsAiWorkspaceIndex::layersUnseenForAMonthExpire()
+{
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326&field=name:string"_s, u"memory points"_s, u"memory"_s );
+  QgsFeature feature( layer->fields() );
+  feature.setAttribute( 0, u"a"_s );
+  feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 1, 1 ) ) );
+  QVERIFY( layer->dataProvider()->addFeature( feature ) );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto removeLayer = qScopeGuard( [layer]() { QgsProject::instance()->removeMapLayer( layer ); } );
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  FakeEmbeddingProvider provider;
+  QString path;
+  {
+    QgsAiWorkspaceIndex index( &contextProvider, &provider );
+    QString err;
+    QVERIFY2(
+      index.persistChunks( { makeLayerChunk( u"old_layer"_s, u"Old"_s, 0, 1, 0, u"old"_s, QByteArray() ) }, { dummyEmbedding( 1.0f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &err ),
+      err.toUtf8().constData()
+    );
+    QgsAiWorkspaceIndex::WorkspaceLayerSnapshot snapshot;
+    QVERIFY( index.createWorkspaceLayerSnapshotForLayer( layer->id(), snapshot, &err ) );
+    QVERIFY2( index.reindexLayerSnapshot( snapshot, &err ), err.toUtf8().constData() );
+    path = index.databasePath();
+  }
+
+  // Age both layers: the one with a recorded sighting through layer_state, the other through its rows.
+  const QString connection = u"test_age_layers"_s;
+  {
+    QSqlDatabase db = QSqlDatabase::addDatabase( u"QSQLITE"_s, connection );
+    db.setDatabaseName( path );
+    QVERIFY( db.open() );
+    QSqlQuery q( db );
+    const qint64 old = QDateTime::currentDateTimeUtc().addDays( -( QgsAiWorkspaceIndex::STALE_DATABASE_DAYS + 1 ) ).toMSecsSinceEpoch();
+    QVERIFY( q.exec( u"UPDATE chunks SET last_sync = %1"_s.arg( old ) ) );
+    QVERIFY( q.exec( u"INSERT OR REPLACE INTO layer_state (layer_id, fingerprint, last_seen) VALUES ('%1', 'x', %2)"_s.arg( layer->id() ).arg( old ) ) );
+    db.close();
+  }
+  QSqlDatabase::removeDatabase( connection );
+
+  QgsAiWorkspaceIndex reloaded( &contextProvider, &provider );
+  QVERIFY( reloaded.ensureLoaded() );
+  QCOMPARE( reloaded.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllLayers ).size(), 0 );
+}
+
+void TestQgsAiWorkspaceIndex::remoteProviderNeedsConsent()
+{
+  class RemoteProvider : public SlowEmbeddingProvider
+  {
+    public:
+      RemoteProvider()
+        : SlowEmbeddingProvider( 0 )
+      {}
+      QString providerId() const override { return u"openai"_s; }
+      QString displayName() const override { return u"OpenAI"_s; }
+      bool isRemote() const override { return true; }
+  };
+
+  const QString consentKey = QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsentSettingsKey( u"openai"_s );
+  QgsSettings().remove( consentKey );
+  const auto restore = qScopeGuard( [consentKey]() { QgsSettings().remove( consentKey ); } );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QFile file( QDir( root.path() ).filePath( u"notes.md"_s ) );
+  QVERIFY( file.open( QIODevice::WriteOnly ) );
+  file.write( "private notes" );
+  file.close();
+
+  QgsAiFileContextProvider contextProvider( root.path() );
+  RemoteProvider provider;
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+
+  // Nothing leaves the computer until the user agrees.
+  QVERIFY( !index.embeddingProviderAvailable() );
+  QString err;
+  QVERIFY( !index.reindex( 10, &err ) );
+  QVERIFY2( err.contains( u"OpenAI"_s ) && err.contains( u"AI settings"_s ), err.toUtf8().constData() );
+  QVERIFY( index.search( u"notes"_s, 3, &err ).isEmpty() );
+  QCOMPARE( provider.calls.load(), 0 );
+  QVERIFY( !QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( u"openai"_s ) );
+  // Local providers need no consent.
+  QVERIFY( QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( QgsAiE5EmbeddingProvider::staticProviderId() ) );
+
+  QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( u"openai"_s, true );
+  QVERIFY( index.embeddingProviderAvailable() );
+  QVERIFY2( index.reindex( 10, &err ), err.toUtf8().constData() );
+  QVERIFY( provider.calls > 0 );
+}
+
+void TestQgsAiWorkspaceIndex::projectChangeDuringAReindexKeepsProjectsApart()
+{
+  QTemporaryDir first;
+  QTemporaryDir second;
+  QVERIFY( first.isValid() && second.isValid() );
+  writeManyChunkFile( QDir( first.path() ).filePath( u"big.md"_s ), 5 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+
+  QgsAiFileContextProvider contextProvider( first.path() );
+  SlowEmbeddingProvider provider( 150 );
+  QgsAiWorkspaceIndex index( &contextProvider, &provider );
+  QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
+  QString err;
+  QVERIFY( QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( first.path(), 10, snapshot, &err ) );
+
+  std::thread worker( [&index, &snapshot, &first]() {
+    QString reindexError;
+    index.reindex( snapshot, first.path(), &reindexError );
+    index.closeDatabaseConnectionForCurrentThread();
+  } );
+  QThread::msleep( 250 );
+  // Another project opens in another folder while the first one is still being indexed.
+  contextProvider.setWorkspaceRoot( second.path() );
+  worker.join();
+
+  // The new project's index holds nothing of the first one…
+  QVERIFY( index.ensureLoaded() );
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 0 );
+  // …which went to its own database.
+  QgsAiFileContextProvider firstProvider( first.path() );
+  QgsAiWorkspaceIndex firstIndex( &firstProvider, &provider );
+  QVERIFY( firstIndex.ensureLoaded() );
+  QCOMPARE( firstIndex.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 5 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

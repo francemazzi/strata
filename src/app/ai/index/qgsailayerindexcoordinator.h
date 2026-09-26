@@ -43,6 +43,8 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
 
   public:
     explicit QgsAiLayerIndexCoordinator( QgsAiWorkspaceIndex *index, QObject *parent = nullptr );
+    //! Cancels the running layer and waits for it: the task reads the index, which may go next.
+    ~QgsAiLayerIndexCoordinator() override;
 
     bool isEnabled() const { return mEnabled; }
     void setEnabled( bool enabled );
@@ -66,6 +68,25 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
 
     bool isBulkOperationActive() const { return mBulkOperationDepth > 0; }
 
+    //! True while a layer is being indexed in the background.
+    bool isRunning() const;
+
+    /**
+     * Holds layer indexing back until resumed. The running layer stops within one batch and is
+     * indexed again on resume, with every layer that changed meanwhile.
+     */
+    void setPaused( bool paused );
+    bool isPaused() const { return mPaused; }
+
+    //! Layers waiting to be indexed, the running one included.
+    int pendingLayerCount() const;
+
+    //! Name of the layer being indexed, empty when none.
+    QString runningLayerName() const;
+
+    //! Stops indexing for good (Strata is quitting): disconnects and cancels the running layer.
+    void shutdown();
+
     //! Idle gap between two consecutive per-layer snapshot flushes (main-thread work).
     int interFlushDelayMs() const { return mInterFlushDelayMs; }
     void setInterFlushDelayMs( int ms );
@@ -77,6 +98,8 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     void setProject( QgsProject *project );
 
   signals:
+    //! The set of layers waiting to be indexed changed.
+    void queueChanged();
     void reindexStarted( const QString &layerId );
     void reindexFinished( const QString &layerId, bool success, const QString &errorMessage );
 
@@ -94,13 +117,24 @@ class APP_EXPORT QgsAiLayerIndexCoordinator : public QObject
     void scheduleDirty( const QString &layerId );
     void startDebounceTimer();
     void scheduleNextFlush();
+    //! Tells the index which layers are open, so search leaves out the others.
+    void publishActiveLayers();
 
     QgsAiWorkspaceIndex *mIndex = nullptr;
     QgsProject *mProject = nullptr;
     QSet<QString> mDirtyLayers;
     QTimer mDebounceTimer;
     QPointer<QgsTask> mRunningTask;
+    QString mRunningLayerId;
+    //! Layers of the open project.
+    QSet<QString> mActiveLayerIds;
+    //! The project is being cleared: its layers leave, but their chunks stay for the next time it opens.
+    bool mProjectClosing = false;
+    //! Layers the user removed while their task was running, whose chunks it may still write.
+    QSet<QString> mRemovedWhileRunning;
     bool mEnabled = false;
+    bool mShutdown = false;
+    bool mPaused = false;
     bool mUseBulkDebounce = false;
     int mDebounceMs = 5000;
     int mBulkDebounceMs = 15000;

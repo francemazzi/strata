@@ -222,6 +222,13 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QCheckBox *mEnableLayerIndexing = nullptr;
     QCheckBox *mCloudContextOptIn = nullptr;
     QLabel *mIndexStatusLabel = nullptr;
+    QComboBox *mIndexingSpeed = nullptr;
+    QCheckBox *mPauseIndexingOnBattery = nullptr;
+    QCheckBox *mIndexRemoteLayers = nullptr;
+    QLineEdit *mExcludedIndexFolders = nullptr;
+    QSpinBox *mMaxIndexedFiles = nullptr;
+    QLabel *mIndexSizeLabel = nullptr;
+    QPushButton *mClearIndexButton = nullptr;
     QLabel *mCloudIndexStatusLabel = nullptr;
     QPushButton *mSyncCloudContextButton = nullptr;
     QPushButton *mRebuildWorkspaceIndexButton = nullptr;

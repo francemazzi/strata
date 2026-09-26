@@ -21,6 +21,7 @@
 
 #include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsairunpythontool.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiauditlog.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaigissuggestionengine.h"
@@ -41,6 +42,7 @@
 #include "qgsproject.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
+#include "qgsvectorlayer.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -54,7 +56,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QLocale>
 #include <QMessageBox>
+#include <QMetaMethod>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
@@ -565,6 +569,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   , mReviewEngine( reviewEngine )
 {
   loadPersistedBehaviorSettings();
+  // The mode the user picked last; otherwise Agent, so the first prompt acts. Profiles that
+  // turned tools off keep starting in Plan, as before.
+  const QString startAgent = QgsSettings().value( startAgentSettingsKey() ).toString();
+  mActiveAgent = availableAgents().contains( startAgent ) ? startAgent : ( mBehaviorSettings.allowCustomActions ? u"editor"_s : u"planner"_s );
   refreshRouterToolPolicy();
   mDesktopClientSessionId = QUuid::createUuid().toString( QUuid::WithoutBraces );
   mAgentHeartbeatTimer = new QTimer( this );
@@ -575,6 +583,8 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
 
   qgsAiSetBackgroundToolProgressHandler( [this]( const QString &label, double progress ) {
     emit requestStateChanged( u"tool_use"_s, tr( "%1… %2%" ).arg( label, QString::number( static_cast<int>( std::round( progress ) ) ) ) );
+    if ( !mRunningToolCallId.isEmpty() )
+      emit toolProgress( mRunningToolCallId, progress, label );
   } );
 
   if ( mRouter )
@@ -605,7 +615,12 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       // An empty reply after this turn's tools ran is recovered below (retry prompt or a local
       // summary of the tool results). Any other failure, including an empty reply before any
       // tool or a provider error delivered inside a 200 stream, takes the error path.
-      const bool emptyReplyAfterTools = !success && httpStatus >= 200 && httpStatus < 300 && responseText.trimmed().isEmpty() && mStreamedText.trimmed().isEmpty() && mTotalToolIterations > 0
+      const bool emptyReplyAfterTools = !success
+                                        && httpStatus >= 200
+                                        && httpStatus < 300
+                                        && responseText.trimmed().isEmpty()
+                                        && mStreamedText.trimmed().isEmpty()
+                                        && mTotalToolIterations > 0
                                         && ( errorMessage.isEmpty() || errorMessage == QgsAiModelRouter::emptyCompletionErrorMessage() );
       if ( success || emptyReplyAfterTools )
       {
@@ -697,6 +712,69 @@ QStringList QgsAiAgentSessionManager::availableAgents() const
   return QStringList() << u"planner"_s << u"reviewer"_s << u"ask_before_edits"_s << u"editor"_s;
 }
 
+QString QgsAiAgentSessionManager::mapContextText() const
+{
+  if ( !mMapContextProvider || !mMapContextIncluded )
+    return QString();
+  const QgsAiMapContext context = mMapContextProvider();
+  QString text;
+  if ( !context.extent.isEmpty() )
+  {
+    text += u"Map view: %1, scale 1:%2, extent %3\n"_s.arg( context.crs.authid().isEmpty() ? u"(no CRS)"_s : context.crs.authid() )
+              .arg( QString::number( std::round( context.scale ) ) )
+              .arg( context.extent.toString( 2 ) );
+  }
+  QgsMapLayer *layer = context.activeLayerId.isEmpty() ? nullptr : QgsProject::instance()->mapLayer( context.activeLayerId );
+  if ( layer )
+  {
+    // Layer names are workspace-controlled: flattened like the layer list above.
+    const QString name = sanitizeUntrustedLabel( layer->name() );
+    text += u"Active layer: %1 (id=%2). When the user says \"the layer\" without a name, this is it.\n"_s.arg( name, sanitizeUntrustedLabel( layer->id() ) );
+    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      const QgsFeatureIds selected = vector->selectedFeatureIds();
+      if ( !selected.isEmpty() )
+      {
+        QList<QgsFeatureId> sample( selected.cbegin(), selected.cend() );
+        std::sort( sample.begin(), sample.end() );
+        QStringList ids;
+        for ( int i = 0; i < std::min<qsizetype>( 20, sample.size() ); ++i )
+          ids << QString::number( sample.at( i ) );
+        text += u"Selected features in %1: %2 (feature ids %3%4). \"The selected features\" means these.\n"_s.arg( name )
+                  .arg( selected.size() )
+                  .arg( ids.join( ", "_L1 ) )
+                  .arg( sample.size() > 20 ? u", …"_s : QString() );
+      }
+    }
+  }
+  return text;
+}
+
+QString QgsAiAgentSessionManager::mapContextSummary() const
+{
+  if ( !mMapContextProvider )
+    return QString();
+  const QgsAiMapContext context = mMapContextProvider();
+  QStringList parts;
+  if ( QgsMapLayer *layer = context.activeLayerId.isEmpty() ? nullptr : QgsProject::instance()->mapLayer( context.activeLayerId ) )
+  {
+    parts << layer->name();
+    if ( QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer ) )
+    {
+      if ( vector->selectedFeatureCount() > 0 )
+        parts << tr( "%n selected", nullptr, static_cast<int>( vector->selectedFeatureCount() ) );
+    }
+  }
+  if ( context.scale > 0 )
+    parts << u"1:%1"_s.arg( QLocale().toString( std::round( context.scale ), 'f', 0 ) );
+  return parts.join( u" · "_s );
+}
+
+void QgsAiAgentSessionManager::rememberActiveAgent() const
+{
+  QgsSettings().setValue( startAgentSettingsKey(), mActiveAgent );
+}
+
 void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
 {
   if ( availableAgents().contains( agentName ) )
@@ -755,6 +833,232 @@ bool QgsAiAgentSessionManager::updateMessageMetadata( const QString &messageId, 
     return true;
   }
 
+  return false;
+}
+
+bool QgsAiAgentSessionManager::toolMessageCanBeUndone( const QgsAiChatMessage &message )
+{
+  if ( message.role != QgsAiChatRole::Tool || message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1 )
+    return false;
+  const QJsonObject output = QJsonDocument::fromJson( message.content.toUtf8() ).object();
+  return !output.value( u"rollback_token"_s ).toString().isEmpty() && !message.metadata.value( u"tool_name"_s ).toString().isEmpty();
+}
+
+bool QgsAiAgentSessionManager::undoToolCall( const QString &toolMessageId, QString *error )
+{
+  QString toolName;
+  if ( !undoToolCallWithoutNote( toolMessageId, error, &toolName ) )
+    return false;
+  recordUndoNote( { toolName } );
+  emit toolCallsUndone();
+  return true;
+}
+
+bool QgsAiAgentSessionManager::undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName )
+{
+  const auto fail = [error]( const QString &message ) {
+    if ( error )
+      *error = message;
+    return false;
+  };
+  if ( hasActiveRequest() )
+    return fail( tr( "Wait for the assistant to finish before undoing." ) );
+  if ( !mToolRegistry )
+    return fail( tr( "No tools are available." ) );
+
+  for ( const QgsAiChatMessage &message : std::as_const( mHistory ) )
+  {
+    if ( message.id != toolMessageId )
+      continue;
+    if ( !toolMessageCanBeUndone( message ) )
+      return fail( tr( "This change cannot be undone from the chat." ) );
+
+    const QString name = message.metadata.value( u"tool_name"_s ).toString();
+    const QString token = QJsonDocument::fromJson( message.content.toUtf8() ).object().value( u"rollback_token"_s ).toString();
+    // The same tool takes its own rollback token back, as the model would call it.
+    const QgsAiToolResult result = mToolRegistry->execute( name, QJsonObject { { u"rollback_token"_s, token } } );
+    QVariantMap memory;
+    memory.insert( u"tool_name"_s, name );
+    memory.insert( u"success"_s, result.success );
+    rememberAgentEvent( u"tool_undone_by_user"_s, memory );
+    if ( !result.success )
+      return fail( result.errorMessage.isEmpty() ? tr( "Undo failed." ) : result.errorMessage );
+
+    QVariantMap metadata = message.metadata;
+    metadata.insert( u"undo_status"_s, u"undone"_s );
+    updateMessageMetadata( message.id, metadata );
+    if ( toolName )
+      *toolName = name;
+    return true;
+  }
+  return fail( tr( "The change was not found in this chat." ) );
+}
+
+void QgsAiAgentSessionManager::recordUndoNote( const QStringList &toolNames )
+{
+  if ( toolNames.isEmpty() )
+    return;
+  // The model sees the undo on the next turn and does not assume the change is still there.
+  QgsAiChatMessage note = buildAssistantMessage( tr( "The user undid %1 from the chat; those changes are no longer in the project." ).arg( toolNames.join( ", "_L1 ) ) );
+  note.metadata.insert( u"ui_kind"_s, u"undo_note"_s );
+  recordHistoryMessage( note );
+}
+
+QStringList QgsAiAgentSessionManager::undoableToolCallsInTurn( const QString &messageId ) const
+{
+  int index = -1;
+  for ( int i = 0; i < mHistory.size(); ++i )
+  {
+    if ( mHistory.at( i ).id == messageId )
+    {
+      index = i;
+      break;
+    }
+  }
+  if ( index < 0 )
+    return QStringList();
+  // A turn runs from a user message to the next one.
+  int start = index;
+  while ( start > 0 && mHistory.at( start ).role != QgsAiChatRole::User )
+    --start;
+  QStringList undoable;
+  for ( int i = start + 1; i < mHistory.size() && mHistory.at( i ).role != QgsAiChatRole::User; ++i )
+  {
+    if ( toolMessageCanBeUndone( mHistory.at( i ) ) )
+      undoable.prepend( mHistory.at( i ).id );
+  }
+  return undoable;
+}
+
+int QgsAiAgentSessionManager::undoTurn( const QString &messageId, QStringList *failures )
+{
+  QStringList undoneTools;
+  const QStringList ids = undoableToolCallsInTurn( messageId );
+  for ( const QString &id : ids )
+  {
+    QString error;
+    QString toolName;
+    if ( undoToolCallWithoutNote( id, &error, &toolName ) )
+      undoneTools << toolName;
+    else if ( failures )
+      *failures << error;
+  }
+  recordUndoNote( undoneTools );
+  if ( !undoneTools.isEmpty() )
+    emit toolCallsUndone();
+  return static_cast<int>( undoneTools.size() );
+}
+
+bool QgsAiAgentSessionManager::askToolApproval( const QgsAiToolCall &call, QgsAiToolRiskLevel risk )
+{
+  static const QMetaMethod approvalSignal = QMetaMethod::fromSignal( &QgsAiAgentSessionManager::toolApprovalRequested );
+  if ( !isSignalConnected( approvalSignal ) )
+    return approveGenericToolCall( call.name, risk, call.args );
+
+  // The chat shows the question in its transcript; the round waits here, the window stays live.
+  QEventLoop loop;
+  mApprovalLoop = &loop;
+  mApprovalCallId = call.id;
+  mApprovalGranted = false;
+  emit toolApprovalRequested( call.id, call.name, call.args.toVariantMap(), QgsAiToolRiskLevelName( risk ) );
+  if ( mApprovalLoop && !mToolRunCanceled )
+    loop.exec();
+  mApprovalLoop = nullptr;
+  mApprovalCallId.clear();
+  return mApprovalGranted && !mToolRunCanceled;
+}
+
+void QgsAiAgentSessionManager::resolveToolApproval( const QString &callId, bool approved )
+{
+  if ( callId != mApprovalCallId || !mApprovalLoop )
+    return;
+  mApprovalGranted = approved;
+  QEventLoop *loop = mApprovalLoop;
+  mApprovalLoop = nullptr;
+  loop->quit();
+}
+
+bool QgsAiAgentSessionManager::dropHistoryFrom( int index, QString *error )
+{
+  const auto fail = [error]( const QString &message ) {
+    if ( error )
+      *error = message;
+    return false;
+  };
+  // A change that stays in the project must not be made a second time by the new answer.
+  for ( int i = index; i < mHistory.size(); ++i )
+  {
+    const QgsAiChatMessage &message = mHistory.at( i );
+    if ( message.role != QgsAiChatRole::Tool || message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1 )
+      continue;
+    const QJsonObject diff = QJsonDocument::fromJson( message.content.toUtf8() ).object().value( u"diff"_s ).toObject();
+    if ( diff.contains( u"rollback_supported"_s ) && !diff.value( u"rollback_supported"_s ).toBool() && !toolMessageCanBeUndone( message ) )
+      return fail( tr( "The answer made a change that cannot be undone (%1); ask a new question instead." ).arg( message.metadata.value( u"tool_name"_s ).toString() ) );
+  }
+  for ( int i = mHistory.size() - 1; i >= index; --i )
+  {
+    if ( toolMessageCanBeUndone( mHistory.at( i ) ) )
+    {
+      QString undoError;
+      if ( !undoToolCallWithoutNote( mHistory.at( i ).id, &undoError, nullptr ) )
+        return fail( tr( "A change of that answer could not be undone: %1" ).arg( undoError ) );
+    }
+  }
+
+  QStringList removed;
+  for ( int i = index; i < mHistory.size(); ++i )
+    removed << mHistory.at( i ).id;
+  mHistory.erase( mHistory.begin() + index, mHistory.end() );
+  if ( mHistoryStore && mHistoryStore->hasPersistentHistoryScope() && !mActiveSessionId.isEmpty() && !removed.isEmpty() )
+    mHistoryStore->removeMessages( mActiveSessionId, removed );
+  emit historyReplaced();
+  return true;
+}
+
+bool QgsAiAgentSessionManager::retryLastTurn( QString *error )
+{
+  if ( hasActiveRequest() )
+  {
+    if ( error )
+      *error = tr( "Wait for the assistant to finish before retrying." );
+    return false;
+  }
+  for ( int i = mHistory.size() - 1; i >= 0; --i )
+  {
+    if ( mHistory.at( i ).role != QgsAiChatRole::User )
+      continue;
+    return editAndResend( mHistory.at( i ).id, mHistory.at( i ).content, error );
+  }
+  if ( error )
+    *error = tr( "There is no message to send again." );
+  return false;
+}
+
+bool QgsAiAgentSessionManager::editAndResend( const QString &messageId, const QString &text, QString *error )
+{
+  if ( hasActiveRequest() )
+  {
+    if ( error )
+      *error = tr( "Wait for the assistant to finish before sending again." );
+    return false;
+  }
+  if ( text.trimmed().isEmpty() )
+  {
+    if ( error )
+      *error = tr( "The message is empty." );
+    return false;
+  }
+  for ( int i = 0; i < mHistory.size(); ++i )
+  {
+    if ( mHistory.at( i ).id != messageId || mHistory.at( i ).role != QgsAiChatRole::User )
+      continue;
+    if ( !dropHistoryFrom( i, error ) )
+      return false;
+    sendUserMessage( text );
+    return true;
+  }
+  if ( error )
+    *error = tr( "The message was not found in this chat." );
   return false;
 }
 
@@ -1189,6 +1493,9 @@ void QgsAiAgentSessionManager::cancelActiveRequest()
   if ( mExecutingToolCalls || qgsAiHasActiveBackgroundTool() )
   {
     mToolRunCanceled = true;
+    // Stop while an approval waits: the answer is no.
+    if ( mApprovalLoop )
+      mApprovalLoop->quit();
     qgsAiCancelActiveBackgroundTool();
     emit requestStateChanged( u"cancelling"_s, tr( "Stopping…" ) );
     return;
@@ -1918,7 +2225,7 @@ void QgsAiAgentSessionManager::loadPersistedBehaviorSettings()
 {
   QgsSettings settings;
   mBehaviorSettings.allowCustomActions
-    = settingValueWithLegacy( settings, u"strata/agent/allow_custom_actions"_s, QStringList { u"geoai/agent/allow_custom_actions"_s, u"qgis_ai/agent/allow_custom_actions"_s }, false ).toBool();
+    = settingValueWithLegacy( settings, u"strata/agent/allow_custom_actions"_s, QStringList { u"geoai/agent/allow_custom_actions"_s, u"qgis_ai/agent/allow_custom_actions"_s }, true ).toBool();
   mBehaviorSettings.rulesText = settingValueWithLegacy( settings, u"strata/agent/rules_text"_s, QStringList { u"geoai/agent/rules_text"_s, u"qgis_ai/agent/rules_text"_s }, QString() ).toString();
   mBehaviorSettings.skillsText = settingValueWithLegacy( settings, u"strata/agent/skills_text"_s, QStringList { u"geoai/agent/skills_text"_s, u"qgis_ai/agent/skills_text"_s }, QString() ).toString();
   mBehaviorSettings.loadWorkspaceRules
@@ -2204,6 +2511,8 @@ QString QgsAiAgentSessionManager::buildSystemPrompt( const QString &extraContext
     if ( layers.size() > 10 )
       prompt += u"  …%1 more (use list_project_layers for the full list).\n"_s.arg( layers.size() - 10 );
   }
+  // What the user is looking at: "the selected features" or "this area" need no layer name.
+  prompt += mapContextText();
 
   // Tool list is injected so the model has discoverable names alongside the JSON schema,
   // but only when the user actually allows custom actions. Otherwise we hide the catalog
@@ -2509,6 +2818,20 @@ QString QgsAiAgentSessionManager::wrapUntrusted( const QString &sourceLabel, con
   return u"<untrusted-data source=\"%1\">\n%2\n</untrusted-data>"_s.arg( sanitizeUntrustedLabel( sourceLabel ), body );
 }
 
+QList<QgsAiWorkspaceIndex::Chunk> QgsAiAgentSessionManager::filterRetrievedChunks( const QList<QgsAiWorkspaceIndex::Chunk> &hits, float spread )
+{
+  if ( hits.isEmpty() )
+    return hits;
+  const float best = hits.first().score;
+  QList<QgsAiWorkspaceIndex::Chunk> kept;
+  for ( const QgsAiWorkspaceIndex::Chunk &hit : hits )
+  {
+    if ( hit.score >= best - spread )
+      kept.append( hit );
+  }
+  return kept;
+}
+
 QString QgsAiAgentSessionManager::formatRetrievedContext( const QList<QgsAiWorkspaceIndex::Chunk> &chunks, int byteCap )
 {
   const QgsSettings settings;
@@ -2597,7 +2920,7 @@ namespace
       return QString();
 
     QString err;
-    const QList<QgsAiWorkspaceIndex::Chunk> hits = index->search( query, QgsAiAgentSessionManager::RETRIEVAL_TOP_K, &err, feedback );
+    const QList<QgsAiWorkspaceIndex::Chunk> hits = QgsAiAgentSessionManager::filterRetrievedChunks( index->search( query, QgsAiAgentSessionManager::RETRIEVAL_TOP_K, &err, feedback ) );
     QgsMessageLog::logMessage( u"Retrieval: hits=%1 err=%2"_s.arg( hits.size() ).arg( err.isEmpty() ? u"(none)"_s : err ), u"AI/Index"_s, Qgis::MessageLevel::Info, false );
 
     if ( hits.isEmpty() )
@@ -2864,6 +3187,7 @@ QList<QgsAiChatMessage> QgsAiAgentSessionManager::trimHistoryByTokenBudget( int 
 
 QList<QgsAiChatMessage> QgsAiAgentSessionManager::buildOutgoingMessages() const
 {
+  QgsAiPerfScope perf( u"chat"_s, u"build_messages"_s, 50 );
   QList<QgsAiChatMessage> result;
 
   QgsAiChatMessage systemMessage;
@@ -2982,6 +3306,13 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
     QJsonObject errObj;
     errObj.insert( u"error"_s, result.errorMessage );
     errObj.insert( u"verification"_s, verification );
+    // What a failing tool adds, e.g. that the outcome is uncertain and must not be retried.
+    const QJsonObject details = result.output.toObject();
+    for ( auto it = details.constBegin(); it != details.constEnd(); ++it )
+    {
+      if ( !errObj.contains( it.key() ) )
+        errObj.insert( it.key(), it.value() );
+    }
     serialized = QString::fromUtf8( QJsonDocument( errObj ).toJson( QJsonDocument::Compact ) );
   }
   if ( serialized.size() > MAX_TOOL_RESULT_CHARS )
@@ -3089,7 +3420,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
                                       && !mManagedAgentPolicy.isEmpty()
                                       && !managedPolicyReferencesUnknownTools( mManagedAgentPolicy, mToolRegistry );
       const QStringList managedAllowed = applyManagedPolicy ? ( roundAgent == "ask_before_edits"_L1 ? mManagedAgentPolicy.allowedTools
-                                                                                                      : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
+                                                                                                    : mManagedAgentPolicy.allowedToolsForPreset( QgsAiPresetModeForAgent( roundAgent ) ) )
                                                             : QStringList();
       const bool blockedByManagedPolicy = modeAllowsTool && applyManagedPolicy && !managedAllowed.contains( call.name ) && !mcpToolAllowedForAgent( mManagedAgentPolicy, call.name, roundAgent );
       const QString blockedReason = blockedByManagedPolicy ? u"managed_policy"_s : ( toolAvailable ? u"agent_mode"_s : u"tool_unavailable"_s );
@@ -3147,10 +3478,7 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
   if ( mToolIterations >= maxToolIterations && !mBehaviorSettings.autoContinueToolBlocks )
   {
     QgsAiChatMessage limitMessage = buildAssistantMessage(
-      tr( "Numero massimo raggiunto: l'agente ha usato %1 round di tool call in questo blocco (%2/%3 totali). Premi Continue per concedere un altro blocco di %1." )
-        .arg( maxToolIterations )
-        .arg( mTotalToolIterations )
-        .arg( maxTotalToolIterations )
+      tr( "Paused after %1 rounds of tool calls (%2 of the %3 allowed in this turn). Press Continue to allow %1 more." ).arg( maxToolIterations ).arg( mTotalToolIterations ).arg( maxTotalToolIterations )
     );
     limitMessage.metadata.insert( u"ui_kind"_s, u"tool_limit"_s );
     limitMessage.metadata.insert( u"tool_limit_status"_s, u"pending"_s );
@@ -3249,11 +3577,16 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         logMessage( u"Tool call: name=%1 id=%2 argsBytes=%3"_s.arg( call.name, call.id ).arg( QJsonDocument( call.args ).toJson( QJsonDocument::Compact ).size() ), u"AI"_s, Qgis::MessageLevel::Info, false );
 
       QgsAiToolResult result;
+      qint64 toolElapsedMs = -1;
       const QgsAiTool *calledTool = mToolRegistry->find( call.name );
       const QgsAiManagedMcpTool *mcpTool = mToolRegistry->findManagedMcpTool( call.name );
-      const bool needsGenericApproval = roundAgent == "ask_before_edits"_L1 && ( ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating ) );
+      const bool genericApproval = ( calledTool && calledTool->approvalMode() == QgsAiToolApprovalMode::Generic ) || ( mcpTool && mcpTool->mutating );
+      // Agent mode applies changes that can be undone right away, but still asks before a
+      // database write or a remote change that Strata cannot take back.
+      const bool cannotBeUndone = ( calledTool && !calledTool->canBeUndone() ) || ( mcpTool && mcpTool->mutating );
+      const bool needsGenericApproval = genericApproval && ( roundAgent == "ask_before_edits"_L1 || ( roundAgent == "editor"_L1 && cannotBeUndone ) );
       const QgsAiToolRiskLevel approvalRisk = calledTool ? calledTool->riskLevel() : ( mcpTool && mcpTool->mutating ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low );
-      if ( needsGenericApproval && !approveGenericToolCall( call.name, approvalRisk, call.args ) )
+      if ( needsGenericApproval && !askToolApproval( call, approvalRisk ) )
       {
         QJsonObject metadata;
         metadata.insert( u"agent_mode"_s, roundAgent );
@@ -3271,8 +3604,16 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
       {
         QElapsedTimer toolTimer;
         toolTimer.start();
-        result = mToolRegistry->execute( call.name, call.args );
-        QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolTimer.elapsed() ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
+        mRunningToolCallId = call.id;
+        emit toolStarted( call.id, call.name, call.args.toVariantMap() );
+        {
+          QgsAiPerfScope perf( u"tool"_s, call.name, 200 );
+          result = mToolRegistry->execute( call.name, call.args, call.id );
+        }
+        toolElapsedMs = toolTimer.elapsed();
+        mRunningToolCallId.clear();
+        emit toolFinished( call.id, result.success, toolElapsedMs );
+        QgsMessageLog::logMessage( u"Tool call finished: name=%1 elapsedMs=%2 success=%3"_s.arg( call.name ).arg( toolElapsedMs ).arg( result.success ), u"AI"_s, Qgis::MessageLevel::Info, false );
       }
 
       if ( generation != mSessionGeneration )
@@ -3301,7 +3642,9 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
         }
       }
       rememberAgentEvent( u"tool_result"_s, memory );
-      const QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
+      QgsAiChatMessage resultMessage = buildToolResultMessage( call, result );
+      if ( toolElapsedMs >= 0 )
+        resultMessage.metadata.insert( u"elapsed_ms"_s, toolElapsedMs );
       if ( resultMessage.metadata.value( u"is_error"_s ).toBool() )
         roundHadError = true;
       recordHistoryMessage( resultMessage );

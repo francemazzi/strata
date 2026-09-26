@@ -99,6 +99,7 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QThread>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
@@ -111,6 +112,7 @@ namespace
   enum class RollbackType
   {
     RemoveLayer,
+    RemoveLoadedLayers,
     RestoreLayerStyle,
     RemoveLayout,
     RestoreLayoutEdit,
@@ -129,6 +131,8 @@ namespace
       int pageCountBefore = 0;
       QString filePath;
       QString description;
+      //! Layers a Processing run loaded into the project.
+      QStringList layerIds;
   };
 
   QHash<QString, RollbackEntry> &rollbackStore()
@@ -430,6 +434,46 @@ namespace
   {
     const QString extension = QFileInfo( path ).suffix().toLower();
     return extension == "csv"_L1 || extension == "gpkg"_L1 || extension == "sqlite"_L1 || extension == "db"_L1;
+  }
+
+  //! Deletes a layer handed over to the interface thread from that thread's event loop.
+  struct LayerToolsLaterDeleter
+  {
+      void operator()( QgsMapLayer *layer ) const
+      {
+        if ( layer )
+          layer->deleteLater();
+      }
+  };
+
+  //! A layer opened and checked on a worker thread, owned by the interface thread once handed over.
+  struct LayerToolsLoad
+  {
+      std::unique_ptr<QgsMapLayer, LayerToolsLaterDeleter> layer;
+      QString error;
+      QJsonObject facts;
+  };
+
+  /**
+   * Runs \a open on a worker thread with Stop, and hands the layer it returns over to the calling
+   * (interface) thread. \a open reports a refusal through LayerToolsLoad::error and returns null.
+   */
+  QgsAiTaskWaitResult layerToolsOpenInBackground(
+    const QString &label, const std::function<std::unique_ptr<QgsMapLayer>( LayerToolsLoad &load, QgsFeedback *feedback )> &open, const std::shared_ptr<LayerToolsLoad> &load
+  )
+  {
+    QThread *interfaceThread = QThread::currentThread();
+    return qgsAiRunFunction( label, [open, load, interfaceThread]( QgsFeedback *feedback ) {
+      std::unique_ptr<QgsMapLayer> layer = open( *load, feedback );
+      if ( !layer || feedback->isCanceled() )
+        return !feedback->isCanceled();
+      // The extent may mean a scan of the data: learn it here, not on the interface thread.
+      if ( layer->isSpatial() && layer->extent().isFinite() )
+        load->facts.insert( u"extent"_s, extentJson( layer->extent() ) );
+      layer->moveToThread( interfaceThread );
+      load->layer.reset( layer.release() );
+      return true;
+    } );
   }
 
   QString validateUsableVectorLayer( QgsVectorLayer *layer, bool allowNonSpatialTable )
@@ -914,6 +958,32 @@ namespace
     return QgsAiToolResult::ok( output );
   }
 
+  QgsAiToolResult rollbackLoadedLayers( QgsProject *project, const QString &token )
+  {
+    if ( !rollbackStore().contains( token ) || rollbackStore().value( token ).type != RollbackType::RemoveLoadedLayers )
+      return QgsAiToolResult::error( u"Unknown or expired rollback token."_s );
+    const RollbackEntry entry = rollbackStore().take( token );
+    if ( !project )
+      return QgsAiToolResult::error( u"No active QgsProject available."_s );
+    QStringList removed;
+    for ( const QString &layerId : entry.layerIds )
+    {
+      if ( project->mapLayer( layerId ) )
+      {
+        project->removeMapLayer( layerId );
+        removed << layerId;
+      }
+    }
+    QJsonObject diff;
+    diff.insert( u"summary"_s, u"Removed the %1 output layers of a Processing run from the project."_s.arg( removed.size() ) );
+    diff.insert( u"layer_ids"_s, QJsonArray::fromStringList( removed ) );
+    QJsonObject output;
+    output.insert( u"status"_s, u"rolled_back"_s );
+    output.insert( u"rollback_token"_s, token );
+    output.insert( u"diff"_s, diff );
+    return QgsAiToolResult::ok( output );
+  }
+
   QgsAiToolResult rollbackLayerStyle( QgsProject *project, const QString &token )
   {
     if ( !rollbackStore().contains( token ) )
@@ -1115,46 +1185,65 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
 
   const QString name = args.value( u"name"_s ).toString().trimmed().isEmpty() ? QFileInfo( path ).completeBaseName() : args.value( u"name"_s ).toString().trimmed();
 
-  QgsMapLayer *added = nullptr;
+  if ( kind != "vector"_L1 && kind != "raster"_L1 )
+    return QgsAiToolResult::error( u"Unknown 'kind': %1 (expected 'vector' or 'raster')."_s.arg( kind ) );
+
   QJsonObject output;
   output.insert( u"kind"_s, kind );
 
+  // The file is opened, checked and counted in the background: a large file or a slow disk
+  // never freezes Strata, and Stop leaves no layer behind.
   QElapsedTimer phaseTimer;
-  if ( kind == "vector"_L1 )
+  phaseTimer.start();
+  auto load = std::make_shared<LayerToolsLoad>();
+  const bool mayBeTable = fileMayBeNonSpatialTable( path );
+  const QgsAiTaskWaitResult wait = layerToolsOpenInBackground(
+    u"Loading %1"_s.arg( name ),
+    [path, name, kind, mayBeTable]( LayerToolsLoad &load, QgsFeedback * ) -> std::unique_ptr<QgsMapLayer> {
+      if ( kind == "vector"_L1 )
+      {
+        auto layer = std::make_unique<QgsVectorLayer>( path, name, u"ogr"_s );
+        if ( !layer->isValid() )
+        {
+          load.error = u"Vector layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() );
+          return nullptr;
+        }
+        const QString validationError = validateUsableVectorLayer( layer.get(), mayBeTable );
+        if ( !validationError.isEmpty() )
+        {
+          load.error = u"Refusing to add unusable vector layer '%1': %2 No project layer was added."_s.arg( name, validationError );
+          return nullptr;
+        }
+        load.facts.insert( u"feature_count"_s, static_cast<qint64>( layer->featureCount() ) );
+        load.facts.insert( u"geometry_type"_s, QgsWkbTypes::geometryDisplayString( layer->geometryType() ) );
+        return layer;
+      }
+      auto layer = std::make_unique<QgsRasterLayer>( path, name, u"gdal"_s );
+      if ( !layer->isValid() )
+      {
+        load.error = u"Raster layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() );
+        return nullptr;
+      }
+      load.facts.insert( u"width"_s, layer->width() );
+      load.facts.insert( u"height"_s, layer->height() );
+      load.facts.insert( u"bands"_s, layer->bandCount() );
+      return layer;
+    },
+    load
+  );
+  qgsAiLogPerf( u"add_layer_from_file"_s, u"open_in_background"_s, phaseTimer.elapsed() );
+  if ( wait.canceled || wait.abandoned )
+    return QgsAiToolResult::canceledResult( u"Adding the layer was canceled."_s );
+  if ( !load->error.isEmpty() )
+    return QgsAiToolResult::error( load->error );
+  if ( !wait.succeeded || !load->layer )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"The layer could not be opened: %1"_s.arg( path ) : wait.error );
+  for ( auto it = load->facts.constBegin(); it != load->facts.constEnd(); ++it )
   {
-    phaseTimer.start();
-    auto layer = std::make_unique<QgsVectorLayer>( path, name, u"ogr"_s );
-    qgsAiLogPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
-    if ( !layer->isValid() )
-      return QgsAiToolResult::error( u"Vector layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
-
-    phaseTimer.restart();
-    const QString validationError = validateUsableVectorLayer( layer.get(), fileMayBeNonSpatialTable( path ) );
-    qgsAiLogPerf( u"add_layer_from_file"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
-    if ( !validationError.isEmpty() )
-      return QgsAiToolResult::error( u"Refusing to add unusable vector layer '%1': %2 No project layer was added."_s.arg( name, validationError ) );
-
-    output.insert( u"feature_count"_s, static_cast<qint64>( layer->featureCount() ) );
-    output.insert( u"geometry_type"_s, QgsWkbTypes::geometryDisplayString( layer->geometryType() ) );
-    added = layer.release();
+    if ( it.key() != "extent"_L1 )
+      output.insert( it.key(), it.value() );
   }
-  else if ( kind == "raster"_L1 )
-  {
-    phaseTimer.start();
-    auto layer = std::make_unique<QgsRasterLayer>( path, name, u"gdal"_s );
-    qgsAiLogPerf( u"add_layer_from_file"_s, u"construction"_s, phaseTimer.elapsed() );
-    if ( !layer->isValid() )
-      return QgsAiToolResult::error( u"Raster layer is invalid: %1 (provider error: %2)"_s.arg( path, layer->error().summary() ) );
-
-    output.insert( u"width"_s, layer->width() );
-    output.insert( u"height"_s, layer->height() );
-    output.insert( u"bands"_s, layer->bandCount() );
-    added = layer.release();
-  }
-  else
-  {
-    return QgsAiToolResult::error( u"Unknown 'kind': %1 (expected 'vector' or 'raster')."_s.arg( kind ) );
-  }
+  QgsMapLayer *added = load->layer.release();
 
   phaseTimer.restart();
   project->addMapLayer( added );
@@ -1177,7 +1266,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"crs"_s, added->crs().authid() );
   output.insert( u"source"_s, added->publicSource() );
   output.insert( u"spatial"_s, added->isSpatial() );
-  output.insert( u"extent"_s, added->isSpatial() && added->extent().isFinite() ? QJsonValue( extentJson( added->extent() ) ) : QJsonValue( QJsonValue::Null ) );
+  output.insert( u"extent"_s, load->facts.contains( u"extent"_s ) ? load->facts.value( u"extent"_s ) : QJsonValue( QJsonValue::Null ) );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
@@ -1278,55 +1367,73 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   const QString name = args.value( u"name"_s ).toString().trimmed().isEmpty() ? provider.toUpper() : args.value( u"name"_s ).toString().trimmed();
   const int beforeLayerCount = project->mapLayers().size();
 
-  QgsMapLayer *added = nullptr;
   QJsonObject output;
   output.insert( u"provider"_s, provider );
   output.insert( u"provider_key"_s, providerKey );
   output.insert( u"layer_type"_s, layerType );
 
+  // Capabilities requests, database queries and the checks run in the background: a slow
+  // service never freezes Strata, and Stop leaves no layer behind.
   QElapsedTimer phaseTimer;
-  if ( layerType == "raster"_L1 )
-  {
-    phaseTimer.start();
-    auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
-    qgsAiLogPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
-    if ( !layer->isValid() )
-      return QgsAiToolResult::error( u"Service raster layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() ) );
-    output.insert( u"width"_s, layer->width() );
-    output.insert( u"height"_s, layer->height() );
-    output.insert( u"bands"_s, layer->bandCount() );
-    added = layer.release();
-  }
-  else
-  {
-    phaseTimer.start();
-    auto layer = std::make_unique<QgsVectorLayer>( uri, name, providerKey );
-    qgsAiLogPerf( u"add_layer_from_service"_s, u"construction"_s, phaseTimer.elapsed() );
-    if ( !layer->isValid() )
-    {
-      if ( provider == "wfs"_L1 )
+  phaseTimer.start();
+  auto load = std::make_shared<LayerToolsLoad>();
+  const QgsAiTaskWaitResult wait = layerToolsOpenInBackground(
+    u"Loading %1"_s.arg( name ),
+    [uri, name, provider, providerKey, layerType]( LayerToolsLoad &load, QgsFeedback * ) -> std::unique_ptr<QgsMapLayer> {
+      if ( layerType == "raster"_L1 )
       {
-        return QgsAiToolResult::error(
-          u"WFS layer could not be loaded. Verify that the endpoint is reachable, the URI includes a valid typename, the server advertises that layer in GetCapabilities, and authentication is configured. Provider detail: %1"_s
-            .arg( layer->error().summary() )
-        );
+        auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
+        if ( !layer->isValid() )
+        {
+          load.error = u"Service raster layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() );
+          return nullptr;
+        }
+        load.facts.insert( u"width"_s, layer->width() );
+        load.facts.insert( u"height"_s, layer->height() );
+        load.facts.insert( u"bands"_s, layer->bandCount() );
+        return layer;
       }
-      return QgsAiToolResult::error( u"Service vector layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() ) );
-    }
-
-    const bool allowNonSpatialTable = provider == "postgres"_L1 || provider == "postgis"_L1;
-    phaseTimer.restart();
-    const QString validationError = validateUsableVectorLayer( layer.get(), allowNonSpatialTable );
-    qgsAiLogPerf( u"add_layer_from_service"_s, u"validateUsableVectorLayer"_s, phaseTimer.elapsed() );
-    if ( !validationError.isEmpty() )
-    {
-      const QString guidance = provider == "wfs"_L1 ? u" Verify the WFS typename, filters, server capabilities, and response payload."_s : QString();
-      return QgsAiToolResult::error( u"Refusing to add unusable service vector layer '%1': %2%3 No project layer was added."_s.arg( name, validationError, guidance ) );
-    }
-    output.insert( u"feature_count"_s, static_cast<qint64>( layer->featureCount() ) );
-    output.insert( u"geometry_type"_s, QgsWkbTypes::geometryDisplayString( layer->geometryType() ) );
-    added = layer.release();
+      auto layer = std::make_unique<QgsVectorLayer>( uri, name, providerKey );
+      if ( !layer->isValid() )
+      {
+        if ( provider == "wfs"_L1 )
+        {
+          load.error = u"WFS layer could not be loaded. Verify that the endpoint is reachable, the URI includes a valid typename, the server advertises that layer in GetCapabilities, and authentication is configured. Provider detail: %1"_s
+                         .arg( layer->error().summary() );
+        }
+        else
+        {
+          load.error = u"Service vector layer is invalid for provider '%1': %2"_s.arg( provider, layer->error().summary() );
+        }
+        return nullptr;
+      }
+      const bool allowNonSpatialTable = provider == "postgres"_L1 || provider == "postgis"_L1;
+      const QString validationError = validateUsableVectorLayer( layer.get(), allowNonSpatialTable );
+      if ( !validationError.isEmpty() )
+      {
+        const QString guidance = provider == "wfs"_L1 ? u" Verify the WFS typename, filters, server capabilities, and response payload."_s : QString();
+        load.error = u"Refusing to add unusable service vector layer '%1': %2%3 No project layer was added."_s.arg( name, validationError, guidance );
+        return nullptr;
+      }
+      load.facts.insert( u"feature_count"_s, static_cast<qint64>( layer->featureCount() ) );
+      load.facts.insert( u"geometry_type"_s, QgsWkbTypes::geometryDisplayString( layer->geometryType() ) );
+      return layer;
+    },
+    load
+  );
+  qgsAiLogPerf( u"add_layer_from_service"_s, u"open_in_background"_s, phaseTimer.elapsed() );
+  if ( wait.canceled || wait.abandoned )
+    return QgsAiToolResult::canceledResult( u"Adding the service layer was canceled."_s );
+  if ( !load->error.isEmpty() )
+    return QgsAiToolResult::error( load->error );
+  if ( !wait.succeeded || !load->layer )
+    return QgsAiToolResult::error( wait.error.isEmpty() ? u"The service layer could not be opened."_s : wait.error );
+  for ( auto it = load->facts.constBegin(); it != load->facts.constEnd(); ++it )
+  {
+    if ( it.key() != "extent"_L1 )
+      output.insert( it.key(), it.value() );
   }
+  QgsMapLayer *added = load->layer.release();
 
   phaseTimer.restart();
   project->addMapLayer( added );
@@ -1349,7 +1456,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"crs"_s, added->crs().authid() );
   output.insert( u"source"_s, added->publicSource() );
   output.insert( u"spatial"_s, added->isSpatial() );
-  output.insert( u"extent"_s, added->isSpatial() && added->extent().isFinite() ? QJsonValue( extentJson( added->extent() ) ) : QJsonValue( QJsonValue::Null ) );
+  output.insert( u"extent"_s, load->facts.contains( u"extent"_s ) ? load->facts.value( u"extent"_s ) : QJsonValue( QJsonValue::Null ) );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_added_layer"_s ) );
@@ -1565,6 +1672,7 @@ QJsonObject QgsAiRunProcessingAlgorithmTool::schema() const
   properties.insert( u"parameters"_s, prop( u"object"_s, u"Algorithm parameters as a JSON object. Use dry_run first if unsure. Layer destinations such as OUTPUT or OUTPUT_LINES default to TEMPORARY_OUTPUT and are loaded into the project."_s ) );
   properties.insert( u"configuration"_s, prop( u"object"_s, u"Optional Processing algorithm configuration map."_s ) );
   properties.insert( u"dry_run"_s, prop( u"boolean"_s, u"If true, returns algorithm parameter/output metadata without executing it."_s ) );
+  properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous run. If set, removes the output layers that run loaded into the project (files it wrote stay)."_s ) );
   return schemaObject( properties, QJsonArray { u"algorithm_id"_s } );
 }
 
@@ -1720,6 +1828,10 @@ namespace
 
 QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &args )
 {
+  const QString rollbackToken = args.value( u"rollback_token"_s ).toString().trimmed();
+  if ( !rollbackToken.isEmpty() )
+    return rollbackLoadedLayers( mProject ? mProject : QgsProject::instance(), rollbackToken );
+
   QgsProcessingRegistry *registry = QgsApplication::processingRegistry();
   if ( !registry )
     return QgsAiToolResult::error( availabilityReason() );
@@ -1834,7 +1946,21 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   QJsonObject diff;
   diff.insert( u"summary"_s, loadedLayers.isEmpty() ? u"Executed a QGIS Processing algorithm."_s : u"Executed a QGIS Processing algorithm and loaded the output layers into the project."_s );
   diff.insert( u"algorithm_id"_s, resolvedAlgorithmId );
-  diff.insert( u"rollback_supported"_s, false );
+  // Undo takes the loaded outputs out of the project; files the algorithm wrote stay on disk.
+  diff.insert( u"rollback_supported"_s, !loadedLayers.isEmpty() );
+  if ( !loadedLayers.isEmpty() )
+  {
+    RollbackEntry rollback;
+    rollback.type = RollbackType::RemoveLoadedLayers;
+    for ( const QJsonValue &layer : loadedLayers )
+      rollback.layerIds << layer.toObject().value( u"id"_s ).toString();
+    rollback.description = u"Remove the output layers loaded by a Processing run."_s;
+    const QString token = storeRollback( rollback );
+    output.insert( u"rollback_token"_s, token );
+    output.insert( u"rollback"_s, rollbackJson( token, u"remove_loaded_layers"_s ) );
+    // "Show on map" goes to the first output.
+    output.insert( u"layer_id"_s, loadedLayers.at( 0 ).toObject().value( u"id"_s ).toString() );
+  }
   output.insert( u"dry_run"_s, false );
   output.insert( u"result"_s, QJsonObject::fromVariantMap( results ) );
   output.insert( u"loaded_layers"_s, loadedLayers );

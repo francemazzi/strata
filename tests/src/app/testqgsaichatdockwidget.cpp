@@ -22,6 +22,7 @@
 #include "ai/tools/qgsaiechotool.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaisecretstoretestutils.h"
+#include "qgsaitestloopbackserver.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
@@ -180,6 +181,59 @@ namespace
         qputenv( entry.first.constData(), entry.second );
     } );
   }
+
+  //! Returns a rollback token on each change, records the tokens taken back, and runs onChange meanwhile.
+  class DockUndoableTool : public QgsAiTool
+  {
+    public:
+      DockUndoableTool( QStringList *undone, std::function<void()> onChange )
+        : mUndone( undone )
+        , mOnChange( std::move( onChange ) )
+      {}
+      QString name() const override { return u"set_value"_s; }
+      QString description() const override { return u"undoable tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject &args ) override
+      {
+        const QString token = args.value( u"rollback_token"_s ).toString();
+        if ( !token.isEmpty() )
+        {
+          *mUndone << token;
+          return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s } } );
+        }
+        mOnChange();
+        QJsonObject output;
+        output.insert( u"status"_s, u"ok"_s );
+        output.insert( u"rollback_token"_s, u"tok_1"_s );
+        output.insert( u"diff"_s, QJsonObject { { u"summary"_s, u"Changed value 1."_s }, { u"rollback_supported"_s, true } } );
+        return QgsAiToolResult::ok( output );
+      }
+
+    private:
+      QStringList *mUndone = nullptr;
+      std::function<void()> mOnChange;
+  };
+
+  //! A change that asks before it runs in "Ask before edits"; counts its runs.
+  class DockApprovalTool : public QgsAiTool
+  {
+    public:
+      explicit DockApprovalTool( int *runs )
+        : mRuns( runs )
+      {}
+      QString name() const override { return u"approval_tool"_s; }
+      QString description() const override { return u"approval tool"_s; }
+      QJsonObject schema() const override { return QJsonObject { { u"type"_s, u"object"_s } }; }
+      QgsAiToolResult execute( const QJsonObject & ) override
+      {
+        ++*mRuns;
+        return QgsAiToolResult::ok( QJsonObject { { u"status"_s, u"ok"_s } } );
+      }
+      bool requiresApproval() const override { return true; }
+
+    private:
+      int *mRuns = nullptr;
+  };
 } // namespace
 
 class TestQgsAiChatDockWidget : public QObject
@@ -204,12 +258,18 @@ class TestQgsAiChatDockWidget : public QObject
     void acceptingPlanSwitchesToAgentAndSendsPlan();
     void acceptingAgentPlanJsonSwitchesToAgent();
     void acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks();
+    void pickedModeIsRemembered();
+    void toolCardsShowLiveStateAndUndo();
+    void messagesTypedDuringATurnAreQueued();
+    void emptyChatSuggestsPromptsForTheProject();
+    void mapContextPillShowsWhatIsSent();
+    void toolCardShowsChangesOnMap();
+    void toolApprovalIsAskedInTheChat();
     void acceptingPlanWithAllowedToolsStaysInAgentAndExecutes();
     void cancelClearsOrphanStreamingAssistantCard();
     void workflowComposerExportsReportAndDryRun();
     void questionCardSendsStructuredAnswers();
     void toolLimitMessageShowsContinueButton();
-    void layerIndexingConsentPolicy();
     void settingsDialogContainsManualIndexingControls();
     void settingsSaveFailureStaysOpen();
     void settingsSessionOnlyRequiresChoice();
@@ -490,9 +550,10 @@ void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
   QVERIFY( !dock.findChild<QWidget *>( u"aiGisSuggestionsTab"_s ) );
   QVERIFY( !dock.findChild<QListWidget *>( u"aiGisSuggestionList"_s ) );
 
+  // The check samples geometries on a worker thread: the card appears when it ends.
   QFrame *card = dock.findChild<QFrame *>( u"aiGisSuggestionCard"_s );
   QVERIFY( card );
-  QVERIFY( card->isVisible() );
+  QTRY_VERIFY_WITH_TIMEOUT( card->isVisible(), 10000 );
 
   QPushButton *review = dock.findChild<QPushButton *>( u"aiGisCardReviewButton"_s );
   QVERIFY( review );
@@ -636,7 +697,8 @@ void TestQgsAiChatDockWidget::doesNotDuplicateStreamedAssistantResponse()
 
   manager.responseChunkReceived( u"Ciao! Come posso "_s );
   manager.responseChunkReceived( u"aiutarti con QGIS oggi?"_s );
-  QCOMPARE( transcriptText( dock ).count( u"Ciao! Come posso aiutarti con QGIS oggi?"_s ), 1 );
+  // The streamed text is rendered as markdown every 80 ms.
+  QTRY_COMPARE_WITH_TIMEOUT( transcriptText( dock ).count( u"Ciao! Come posso aiutarti con QGIS oggi?"_s ), 1, 2000 );
 
   manager.messageAdded( assistantMessage );
   QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
@@ -938,6 +1000,394 @@ void TestQgsAiChatDockWidget::acceptingAgentPlanJsonSwitchesToAgent()
   QVERIFY( manager.history().first().content.contains( u"Load boundary"_s ) );
 }
 
+void TestQgsAiChatDockWidget::pickedModeIsRemembered()
+{
+  QgsSettings().remove( u"strata/agent"_s );
+  const QScopeGuard cleanup( [] { QgsSettings().remove( u"strata/agent"_s ); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+
+  // A new profile starts in Agent mode.
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiModePill"_s );
+  QVERIFY( pill && pill->menu() );
+  QVERIFY( pill->text().startsWith( "Agent"_L1 ) );
+
+  for ( QAction *action : pill->menu()->actions() )
+  {
+    if ( action->text() == "Ask"_L1 )
+      action->trigger();
+  }
+  QCOMPARE( manager.activeAgent(), u"reviewer"_s );
+  QCOMPARE( QgsSettings().value( QgsAiAgentSessionManager::startAgentSettingsKey() ).toString(), u"reviewer"_s );
+}
+
+void TestQgsAiChatDockWidget::toolCardsShowLiveStateAndUndo()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::
+         jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"set_value","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  // The key through the environment: this test has no secret store (the guard above unsets it again).
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QStringList undone;
+  QString liveTitle;
+  QgsAiChatDockWidget *dockPtr = nullptr;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<DockUndoableTool>( &undone, [&dockPtr, &liveTitle]() {
+    // While the tool runs, its card shows what it does.
+    QFrame *card = dockPtr ? dockPtr->findChild<QFrame *>( u"aiLiveToolCard"_s ) : nullptr;
+    QLabel *title = card ? card->findChild<QLabel *>( u"aiLiveToolTitle"_s ) : nullptr;
+    liveTitle = title ? title->text() : QString();
+  } ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dockPtr = &dock;
+  dock.show();
+
+  manager.sendUserMessage( u"change a value"_s );
+  const auto answered = [&manager]() {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return std::any_of( history.cbegin(), history.cend(), []( const QgsAiChatMessage &message ) { return message.content == "Done"_L1; } );
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( answered() || ( manager.history().size() > 1 && !manager.hasActiveRequest() ), 60000 );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  if ( !answered() )
+  {
+    QStringList transcript;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      transcript << qgsAiChatRoleToString( message.role ) + u": "_s + message.content.left( 200 );
+    QFAIL( qPrintable( transcript.join( '\n' ) ) );
+  }
+
+  QVERIFY2( liveTitle.startsWith( "set_value"_L1 ), qPrintable( liveTitle ) );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiLiveToolCard"_s ) );
+
+  // The result card says what changed, without raw tokens, and can be undone.
+  bool summaryShown = false;
+  for ( QLabel *body : dock.findChildren<QLabel *>( u"aiMessageBody"_s ) )
+  {
+    summaryShown = summaryShown || body->text().contains( u"Changed value 1."_s );
+    QVERIFY( !body->text().contains( u"tok_1"_s ) );
+  }
+  QVERIFY( summaryShown );
+  QPushButton *undo = dock.findChild<QPushButton *>( u"aiUndoToolButton"_s );
+  QVERIFY( undo && undo->isEnabled() );
+  // Messages have their actions: Copy on the answer, Copy, Edit and Retry on the question.
+  QCOMPARE( dock.findChildren<QToolButton *>( u"aiCopyMessageButton"_s ).size(), 2 );
+  QVERIFY( dock.findChild<QToolButton *>( u"aiEditMessageButton"_s ) );
+  QVERIFY( dock.findChild<QToolButton *>( u"aiRetryMessageButton"_s ) );
+  QVERIFY( dock.findChild<QPushButton *>( u"aiRequestErrorRetry"_s ) );
+  QPushButton *undoTurn = dock.findChild<QPushButton *>( u"aiUndoTurnButton"_s );
+  QVERIFY( undoTurn && !undoTurn->isHidden() );
+
+  undoTurn->click();
+  QCOMPARE( undone, QStringList( { u"tok_1"_s } ) );
+  QTRY_VERIFY( dock.findChild<QLabel *>( u"aiToolUndoneLabel"_s ) );
+  QTRY_VERIFY( !dock.findChild<QPushButton *>( u"aiUndoToolButton"_s ) );
+}
+
+void TestQgsAiChatDockWidget::messagesTypedDuringATurnAreQueued()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse slow
+    = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"First answer"},"finish_reason":"stop"}]})" ) );
+  slow.responseDelayMs = 800;
+  server.responses << slow << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Second answer"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+  const QString trustRoot = QgsAiWorkspaceTrust::currentWorkspaceRoot();
+  const QgsAiWorkspaceTrust::State savedTrust = trustRoot.isEmpty() ? QgsAiWorkspaceTrust::State::Unknown : QgsAiWorkspaceTrust::state( trustRoot );
+  if ( !trustRoot.isEmpty() )
+    QgsAiWorkspaceTrust::setState( trustRoot, QgsAiWorkspaceTrust::State::Trusted );
+  const auto restoreTrust = qScopeGuard( [trustRoot, savedTrust]() {
+    if ( !trustRoot.isEmpty() )
+      QgsAiWorkspaceTrust::setState( trustRoot, savedTrust );
+  } );
+
+  QgsAiChatPromptEdit *input = dock.findChild<QgsAiChatPromptEdit *>( u"aiPromptInput"_s );
+  QWidget *queueBar = dock.findChild<QWidget *>( u"aiQueueBar"_s );
+  QVERIFY( input && queueBar );
+  input->setPlainText( u"first question"_s );
+  QVERIFY( QMetaObject::invokeMethod( &dock, "sendMessage", Qt::DirectConnection ) );
+  QTRY_VERIFY_WITH_TIMEOUT( manager.hasActiveRequest(), 10000 );
+
+  // The message box stays open while the assistant works; what is sent now waits in a queue.
+  QVERIFY( input->isEnabled() );
+  input->setPlainText( u"second question"_s );
+  QVERIFY( QMetaObject::invokeMethod( &dock, "sendMessage", Qt::DirectConnection ) );
+  QCOMPARE( dock.queuedMessageCount(), 1 );
+  QVERIFY( !queueBar->isHidden() );
+  QVERIFY( input->toPlainText().isEmpty() );
+
+  const auto contents = [&manager]() {
+    QStringList texts;
+    for ( const QgsAiChatMessage &message : manager.history() )
+      texts << message.content;
+    return texts;
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( contents().contains( u"Second answer"_s ), 60000 );
+  QCOMPARE( contents(), QStringList( { u"first question"_s, u"First answer"_s, u"second question"_s, u"Second answer"_s } ) );
+  QCOMPARE( dock.queuedMessageCount(), 0 );
+  QVERIFY( queueBar->isHidden() );
+}
+
+void TestQgsAiChatDockWidget::emptyChatSuggestsPromptsForTheProject()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+
+  // An empty chat offers prompts that work, even without a project.
+  QTRY_VERIFY( dock.findChild<QFrame *>( u"aiEmptyState"_s ) );
+  QVERIFY( dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s ).size() >= 3 );
+
+  // With a layer, the prompts name it.
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:3003"_s, u"Parcels"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  const auto hasPrompt = [&dock]( const QString &text ) {
+    const QList<QPushButton *> prompts = dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s );
+    return std::any_of( prompts.cbegin(), prompts.cend(), [&text]( QPushButton *button ) { return button->text() == text; } );
+  };
+  QTRY_VERIFY_WITH_TIMEOUT( hasPrompt( u"Buffer Parcels by 100 m and add the result to the map."_s ), 5000 );
+
+  // A click sends the prompt, and the suggestions go away.
+  const QString trustRoot = QgsAiWorkspaceTrust::currentWorkspaceRoot();
+  const QgsAiWorkspaceTrust::State savedTrust = trustRoot.isEmpty() ? QgsAiWorkspaceTrust::State::Unknown : QgsAiWorkspaceTrust::state( trustRoot );
+  if ( !trustRoot.isEmpty() )
+    QgsAiWorkspaceTrust::setState( trustRoot, QgsAiWorkspaceTrust::State::Trusted );
+  const auto restoreTrust = qScopeGuard( [trustRoot, savedTrust]() {
+    if ( !trustRoot.isEmpty() )
+      QgsAiWorkspaceTrust::setState( trustRoot, savedTrust );
+  } );
+  const QList<QPushButton *> prompts = dock.findChildren<QPushButton *>( u"aiSuggestedPrompt"_s );
+  for ( QPushButton *button : prompts )
+  {
+    if ( button->text().startsWith( "Buffer Parcels"_L1 ) )
+    {
+      button->click();
+      break;
+    }
+  }
+  QVERIFY( !manager.history().isEmpty() );
+  QCOMPARE( manager.history().first().content, u"Buffer Parcels by 100 m and add the result to the map."_s );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiEmptyState"_s ) );
+}
+
+void TestQgsAiChatDockWidget::mapContextPillShowsWhatIsSent()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:4326"_s, u"Trees"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  const QString layerId = layer->id();
+  manager.setMapContextProvider( [layerId]() {
+    QgsAiMapContext context;
+    context.activeLayerId = layerId;
+    return context;
+  } );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiMapContextPill"_s );
+  QVERIFY( pill );
+  dock.scheduleMapContextRefresh();
+  QTRY_COMPARE( pill->text(), u"Trees"_s );
+  QVERIFY( !pill->isHidden() );
+
+  // A click leaves the map context out of the next messages; another brings it back.
+  pill->click();
+  QVERIFY( !manager.isMapContextIncluded() );
+  pill->click();
+  QVERIFY( manager.isMapContextIncluded() );
+}
+
+void TestQgsAiChatDockWidget::toolCardShowsChangesOnMap()
+{
+  QgsProject::instance()->clear();
+  const auto cleanup = qScopeGuard( []() { QgsProject::instance()->clear(); } );
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:3003"_s, u"Parcels"_s, u"memory"_s );
+  QgsProject::instance()->addMapLayer( layer );
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+
+  QgsAiChatMessage result;
+  result.id = u"tool-1"_s;
+  result.role = QgsAiChatRole::Tool;
+  result.metadata.insert( u"tool_name"_s, u"calculate_field"_s );
+  QJsonObject output;
+  output.insert( u"layer_id"_s, layer->id() );
+  output.insert( u"changed_feature_ids"_s, QJsonArray { 4, 9 } );
+  output.insert( u"diff"_s, QJsonObject { { u"summary"_s, u"Calculated AREA for 2 features of Parcels."_s } } );
+  result.content = QString::fromUtf8( QJsonDocument( output ).toJson( QJsonDocument::Compact ) );
+  manager.messageAdded( result );
+
+  // The card leads to the changed features on the map.
+  QPushButton *show = dock.findChild<QPushButton *>( u"aiShowOnMapButton"_s );
+  QVERIFY( show );
+  QSignalSpy spy( &dock, &QgsAiChatDockWidget::showOnMapRequested );
+  show->click();
+  QCOMPARE( spy.count(), 1 );
+  QCOMPARE( spy.at( 0 ).at( 0 ).toString(), layer->id() );
+  QCOMPARE( spy.at( 0 ).at( 1 ).value<QList<qint64>>(), QList<qint64>( { 4, 9 } ) );
+}
+
+void TestQgsAiChatDockWidget::toolApprovalIsAskedInTheChat()
+{
+  const auto isolated = isolatePlanModelPickerState();
+  QgsSettings settings;
+  settings.remove( u"ai/provider/openrouter"_s );
+  settings.remove( u"strata/agent"_s );
+  const auto cleanup = qScopeGuard( [&settings]() {
+    settings.remove( u"ai/provider/openrouter"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+    settings.remove( u"strata/agent"_s );
+  } );
+  const QByteArray call = QByteArrayLiteral(
+    R"({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_a","type":"function","function":{"name":"approval_tool","arguments":"{\"layer_id\":\"x\"}"}}]},"finish_reason":"tool_calls"}]})"
+  );
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", call )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Done"},"finish_reason":"stop"}]})" ) )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", call )
+    << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( R"({"choices":[{"message":{"role":"assistant","content":"Not done"},"finish_reason":"stop"}]})" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+  qputenv( "OPENROUTER_API_KEY", "sk-or-loopback-test" );
+  settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+  int runs = 0;
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<DockApprovalTool>( &runs ) );
+  QgsAiModelRouter router;
+  router.setToolRegistry( &registry );
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::OpenRouter );
+  providerSettings.endpoint = u"http://127.0.0.1:%1/api/v1/chat/completions"_s.arg( server.serverPort() );
+  providerSettings.model = u"test/model"_s;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::OpenRouter, providerSettings );
+  router.setActiveProvider( QgsAiModelRouter::Provider::OpenRouter );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  manager.setActiveAgent( u"ask_before_edits"_s );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  dock.show();
+  const auto answered = [&manager]( const QString &text ) {
+    const QList<QgsAiChatMessage> history = manager.history();
+    return !manager.hasActiveRequest() && std::any_of( history.cbegin(), history.cend(), [&text]( const QgsAiChatMessage &message ) { return message.content == text; } );
+  };
+
+  // The question is a card in the chat, not a modal box. The round waits in a nested event
+  // loop: answer from a timer, as a user would click while it runs.
+  QString summary;
+  bool approve = true;
+  QTimer answer;
+  connect( &answer, &QTimer::timeout, this, [&dock, &summary, &approve, &runs]() {
+    QFrame *card = dock.findChild<QFrame *>( u"aiApprovalCard"_s );
+    if ( !card || runs < 0 )
+      return;
+    summary = card->findChild<QLabel *>( u"aiApprovalSummary"_s )->text();
+    card->findChild<QPushButton *>( approve ? u"aiApproveToolButton"_s : u"aiRejectToolButton"_s )->click();
+  } );
+  answer.start( 20 );
+
+  manager.sendUserMessage( u"change it"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( answered( u"Done"_s ), 60000 );
+  QVERIFY2( summary.startsWith( "approval_tool"_L1 ), qPrintable( summary ) );
+  QCOMPARE( runs, 1 );
+  QTRY_VERIFY( !dock.findChild<QFrame *>( u"aiApprovalCard"_s ) );
+
+  // Reject: the tool does not run.
+  approve = false;
+  summary.clear();
+  manager.sendUserMessage( u"change it again"_s );
+  QTRY_VERIFY_WITH_TIMEOUT( answered( u"Not done"_s ), 60000 );
+  QVERIFY( !summary.isEmpty() );
+  QCOMPARE( runs, 1 );
+}
+
 void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlocks()
 {
   QTemporaryDir tempDir;
@@ -951,8 +1401,11 @@ void TestQgsAiChatDockWidget::acceptingPlanWithDisallowedToolsStaysInAgentAndBlo
   QgsAiReviewPatchEngine reviewEngine;
   QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
   manager.setToolRegistry( &registry );
-  // Default allowCustomActions=false makes the Agent allowlist empty.
-  QCOMPARE( manager.agentBehaviorSettings().allowCustomActions, false );
+  // Tools turned off in the settings make the Agent allowlist empty.
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = false;
+  manager.setAgentBehaviorSettings( behavior );
+  const QScopeGuard restoreTools( [] { QgsSettings().remove( u"strata/agent"_s ); } );
 
   QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
 
@@ -1261,50 +1714,6 @@ void TestQgsAiChatDockWidget::toolLimitMessageShowsContinueButton()
     QVERIFY( continueButton );
     QVERIFY( !continueButton->isEnabled() );
   }
-}
-
-void TestQgsAiChatDockWidget::layerIndexingConsentPolicy()
-{
-  // Round-trip the single key in the user's QSettings without redirecting the
-  // global path (which would break sibling tests that read other AI settings).
-  QSettings settings;
-  const QString key = u"strata/index/layer_indexing_consented"_s;
-  const QString geoAiLegacyKey = u"geoai/index/layer_indexing_consented"_s;
-  const QString qgisAiLegacyKey = u"qgis_ai/index/layer_indexing_consented"_s;
-  const QVariant savedValue = settings.value( key );
-  const QVariant savedGeoAiLegacyValue = settings.value( geoAiLegacyKey );
-  const QVariant savedQgisAiLegacyValue = settings.value( qgisAiLegacyKey );
-
-  settings.remove( key );
-  settings.remove( geoAiLegacyKey );
-  settings.remove( qgisAiLegacyKey );
-  QVERIFY( QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-
-  settings.setValue( geoAiLegacyKey, true );
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-  settings.remove( geoAiLegacyKey );
-
-  settings.setValue( qgisAiLegacyKey, true );
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-  settings.remove( qgisAiLegacyKey );
-
-  QgsAiChatDockWidget::recordLayerIndexingConsent();
-  QVERIFY( !QgsAiChatDockWidget::requiresLayerIndexingConsent() );
-
-  if ( savedValue.isValid() )
-    settings.setValue( key, savedValue );
-  else
-    settings.remove( key );
-
-  if ( savedGeoAiLegacyValue.isValid() )
-    settings.setValue( geoAiLegacyKey, savedGeoAiLegacyValue );
-  else
-    settings.remove( geoAiLegacyKey );
-
-  if ( savedQgisAiLegacyValue.isValid() )
-    settings.setValue( qgisAiLegacyKey, savedQgisAiLegacyValue );
-  else
-    settings.remove( qgisAiLegacyKey );
 }
 
 void TestQgsAiChatDockWidget::settingsDialogContainsManualIndexingControls()
@@ -1655,7 +2064,7 @@ void TestQgsAiChatDockWidget::dropLocalFileCreatesAttachmentChip()
   QLabel *stateLabel = dock.findChild<QLabel *>( u"aiAttachmentStateLabel"_s );
   QToolButton *knowledgeButton = dock.findChild<QToolButton *>( u"aiAttachmentKnowledgeButton"_s );
   QVERIFY( stateLabel );
-  QCOMPARE( stateLabel->text(), u"richiede consenso"_s );
+  QCOMPARE( stateLabel->text(), u"needs consent"_s );
   QVERIFY( knowledgeButton );
   QCOMPARE( knowledgeButton->text(), u"Add to Knowledge Base"_s );
 }

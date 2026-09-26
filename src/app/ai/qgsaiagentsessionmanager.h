@@ -16,6 +16,8 @@
 #ifndef QGSAIAGENTSESSIONMANAGER_H
 #define QGSAIAGENTSESSIONMANAGER_H
 
+#include <functional>
+
 #include "ai/index/qgsaiworkspaceindex.h"
 #include "qgis_app.h"
 #include "qgsaiagentpolicy.h"
@@ -23,7 +25,10 @@
 #include "qgsaimodelrouter.h"
 #include "qgsaimodels.h"
 #include "qgsaitool.h"
+#include "qgscoordinatereferencesystem.h"
+#include "qgsrectangle.h"
 
+#include <QEventLoop>
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -39,6 +44,19 @@ class QgsAiToolRegistry;
 class QgsTask;
 class QTimer;
 
+/**
+ * What the user is looking at in the map: the model gets it with every message, so "the
+ * selected features" or "this area" need no layer name or coordinates.
+ */
+struct APP_EXPORT QgsAiMapContext
+{
+    //! Layer selected in the Layers panel, empty for none.
+    QString activeLayerId;
+    QgsRectangle extent;
+    QgsCoordinateReferenceSystem crs;
+    double scale = 0;
+};
+
 struct APP_EXPORT QgsAiChatContextFile
 {
     QString filePath;
@@ -53,7 +71,7 @@ struct APP_EXPORT QgsAiChatContextFile
  */
 struct APP_EXPORT QgsAiAgentBehaviorSettings
 {
-    static constexpr int DEFAULT_TOOL_CALL_PAUSE_LIMIT = 5;
+    static constexpr int DEFAULT_TOOL_CALL_PAUSE_LIMIT = 20;
     static constexpr int MIN_TOOL_CALL_PAUSE_LIMIT = 1;
     static constexpr int MAX_TOOL_CALL_PAUSE_LIMIT = 50;
     static constexpr int DEFAULT_TOTAL_TOOL_CALL_LIMIT = 48;
@@ -63,8 +81,8 @@ struct APP_EXPORT QgsAiAgentBehaviorSettings
     static constexpr int MAX_RUN_PYTHON_TIMEOUT_SECONDS = 3600;
     static constexpr int DEFAULT_RUN_PYTHON_TIMEOUT_SECONDS = 120;
 
-    //! Master toggle. When false the agent must not use any custom tool/action.
-    bool allowCustomActions = false;
+    //! Master toggle. When false the agent must not use any custom tool/action. On by default: the first prompt acts.
+    bool allowCustomActions = true;
     //! Inline rules text injected into the system prompt.
     QString rulesText;
     //! Inline skills text injected into the system prompt.
@@ -101,9 +119,66 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QString activeAgent() const { return mActiveAgent; }
     void setActiveAgent( const QString &agentName );
 
+    //! Stores the active agent as the one to start with next time (the user picked it).
+    void rememberActiveAgent() const;
+
+    //! Where the map context comes from (the main window's canvas).
+    void setMapContextProvider( const std::function<QgsAiMapContext()> &provider ) { mMapContextProvider = provider; }
+
+    /**
+     * Lines about the map sent with each message: view, active layer and its selection. Empty
+     * without a provider or when the user left the map context out.
+     */
+    QString mapContextText() const;
+
+    //! One short line for the chat ("Parcels · 12 selected · 1:5,000"), empty when there is nothing to say.
+    QString mapContextSummary() const;
+
+    //! Answers toolApprovalRequested(): the tool call runs when \a approved.
+    void resolveToolApproval( const QString &callId, bool approved );
+
+    //! The user may leave the map context out of the next messages.
+    void setMapContextIncluded( bool included ) { mMapContextIncluded = included; }
+    bool isMapContextIncluded() const { return mMapContextIncluded; }
+
+    //! Settings key of the agent Strata starts with.
+    static QString startAgentSettingsKey() { return u"strata/agent/mode"_s; }
+
     QList<QgsAiChatMessage> history() const { return mHistory; }
     void clearHistory();
     bool updateMessageMetadata( const QString &messageId, const QVariantMap &metadata );
+
+    //! TRUE if the tool result \a message carries a rollback token and was not undone yet.
+    static bool toolMessageCanBeUndone( const QgsAiChatMessage &message );
+
+    /**
+     * Undoes the tool call behind the tool result message \a toolMessageId directly, without the
+     * model, with the rollback token the tool returned. The message is marked undone and a note
+     * tells the model. Not while a request runs. Returns FALSE with \a error when it fails.
+     */
+    bool undoToolCall( const QString &toolMessageId, QString *error = nullptr );
+
+    //! Tool result messages of the turn that contains \a messageId which can still be undone, newest first.
+    QStringList undoableToolCallsInTurn( const QString &messageId ) const;
+
+    /**
+     * Undoes every tool call of the turn containing \a messageId that can be undone, newest first.
+     * Returns how many were undone; \a failures lists the ones that could not be.
+     */
+    int undoTurn( const QString &messageId, QStringList *failures = nullptr );
+
+    /**
+     * Sends the last user message again and drops the answer after it, e.g. after an error.
+     * Changes of the dropped answer are undone first; returns FALSE with \a error when a
+     * request runs, nothing can be retried, or a change cannot be undone.
+     */
+    bool retryLastTurn( QString *error = nullptr );
+
+    /**
+     * Replaces the user message \a messageId with \a text and sends it, dropping everything
+     * after it. Changes made since are undone first, as for retryLastTurn().
+     */
+    bool editAndResend( const QString &messageId, const QString &text, QString *error = nullptr );
 
     /**
      * Sets the persistent chat history store. When set, every message appended
@@ -205,8 +280,16 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
 
     //! Maximum number of chunks injected into the system prompt for a single turn.
     static constexpr int RETRIEVAL_TOP_K = 8;
-    //! Hard byte cap for the "Retrieved context" block appended to the system prompt.
-    static constexpr int RETRIEVAL_BYTE_CAP = 64 * 1024;
+    //! Hard byte cap for the "Retrieved context" block appended to the system prompt, every turn.
+    static constexpr int RETRIEVAL_BYTE_CAP = 16 * 1024;
+    //! Retrieved chunks scoring more than this below the best one are left out.
+    static constexpr float RETRIEVAL_SCORE_SPREAD = 0.1f;
+
+    /**
+     * Keeps the \a hits (sorted best first) within \a spread of the best score: when a chunk
+     * matches the question well, weaker ones are noise that costs tokens every turn.
+     */
+    static QList<QgsAiWorkspaceIndex::Chunk> filterRetrievedChunks( const QList<QgsAiWorkspaceIndex::Chunk> &hits, float spread = RETRIEVAL_SCORE_SPREAD );
 
     /**
      * Renders \a chunks as a textual block ready to be appended to the system prompt.
@@ -282,6 +365,21 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     void requestStateChanged( const QString &state, const QString &detail );
     void requestRunningChanged( bool running );
 
+    //! A tool call starts running, after any approval.
+    void toolStarted( const QString &callId, const QString &toolName, const QVariantMap &args );
+    //! Progress of the running tool call, 0 to 100, with what it is doing.
+    void toolProgress( const QString &callId, double percent, const QString &label );
+    //! The tool call ended; its result message follows through messageAdded().
+    void toolFinished( const QString &callId, bool success, qint64 elapsedMs );
+    //! Tool calls were undone from the chat; the transcript should render again.
+    void toolCallsUndone();
+
+    /**
+     * A tool call waits for the user's approval; answer with resolveToolApproval(). While
+     * nothing is connected, a message box asks instead.
+     */
+    void toolApprovalRequested( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel );
+
     /**
      * Emitted whenever the cumulative per-session token/cost accounting changes:
      * after every model response carrying usage, and with an empty total when a
@@ -336,6 +434,14 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QList<QgsAiChatMessage> buildOutgoingMessages() const;
     void onToolCallsRequested( const QString &requestId, const QString &providerName, const QString &assistantText, const QList<QgsAiToolCall> &calls );
     void rememberAgentEvent( const QString &event, const QVariantMap &metadata );
+    //! Undoes one tool call and marks its message; the caller adds the note for the model.
+    bool undoToolCallWithoutNote( const QString &toolMessageId, QString *error, QString *toolName );
+    //! Tells the model which tool calls the user undid.
+    void recordUndoNote( const QStringList &toolNames );
+    //! Asks the user whether \a call may run: in the chat when it is connected, otherwise with a message box.
+    bool askToolApproval( const QgsAiToolCall &call, QgsAiToolRiskLevel risk );
+    //! Undoes the changes of the history from \a index on, then drops those messages.
+    bool dropHistoryFrom( int index, QString *error );
 
     void loadPersistedBehaviorSettings();
     void persistBehaviorSettings() const;
@@ -369,6 +475,14 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QList<QgsAiChatMessage> mHistory;
     QList<QgsAiModelRouter::Provider> mPendingProviders;
     QString mActiveRequestId;
+    //! Id of the tool call running now, for its progress.
+    QString mRunningToolCallId;
+    std::function<QgsAiMapContext()> mMapContextProvider;
+    //! The approval being waited for, answered by resolveToolApproval() or Stop.
+    QPointer<QEventLoop> mApprovalLoop;
+    QString mApprovalCallId;
+    bool mApprovalGranted = false;
+    bool mMapContextIncluded = true;
     QgsAiModelRouter::Provider mActiveProvider = QgsAiModelRouter::Provider::OpenAi;
     QString mCurrentPrompt;
     QList<QgsAiChatContextFile> mCurrentContextFiles;
@@ -410,6 +524,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QTimer *mAgentHeartbeatTimer = nullptr;
 
     friend class TestQgsAiDatabaseTools;
+    friend class TestQgsAiAgentSessionManager;
 };
 
 #endif // QGSAIAGENTSESSIONMANAGER_H

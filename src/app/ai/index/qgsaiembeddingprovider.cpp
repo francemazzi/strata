@@ -20,16 +20,21 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "qgsaiembeddingclient.h"
+#include "qgsaiindexingthrottle.h"
 #include "qgsapplication.h"
+#include "qgsfeedback.h"
 #include "qgssettings.h"
 
 #include <QString>
 
 #ifdef HAVE_AI_E5_EMBEDDINGS
+#include <thread>
+
 #include <onnxruntime_cxx_api.h>
 #include <sentencepiece_processor.h>
 #endif
@@ -37,12 +42,14 @@
 #include <QByteArray>
 #include <QChar>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
 #include <QMutexLocker>
 #include <QObject>
+#include <QScopeGuard>
 #include <QThread>
 
 using namespace Qt::StringLiterals;
@@ -130,6 +137,18 @@ namespace
     return cleaned;
   }
 
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  QString e5MissingModelMessage( const QString &filesError )
+  {
+    const QString developerDir = QgsAiE5EmbeddingProvider::developerModelDirectory();
+    return developerDir.isEmpty()
+             ? u"Local multilingual E5 embedding model is not installed. Download it from the AI settings dialog or set STRATA_AI_EMBEDDING_MODEL_DIR for development builds. Expected cache: %1"_s.arg(
+                 QgsAiE5EmbeddingProvider::userModelDirectory()
+               )
+             : u"STRATA_AI_EMBEDDING_MODEL_DIR is set to %1, but the local multilingual E5 files are not usable: %2"_s.arg( developerDir, filesError );
+  }
+#endif
+
   QString modelDownloadUrl( const QString &relativePath )
   {
     return u"https://huggingface.co/intfloat/multilingual-e5-small/resolve/%1/%2"_s.arg( QString::fromLatin1( E5_HF_REVISION ), relativePath );
@@ -199,6 +218,25 @@ namespace
       mutable QgsAiEmbeddingClient mClient;
       QgsAiEmbeddingClient::Provider mProvider = QgsAiEmbeddingClient::Provider::OpenAi;
   };
+
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  //! Creates ONNX Runtime's worker threads at low priority, so the model never competes with the user.
+  OrtCustomThreadHandle e5CreateLowPriorityThread( void *, OrtThreadWorkerFn work, void *parameter )
+  {
+    auto *thread = new std::thread( [work, parameter]() {
+      QgsAiIndexingThrottle::lowerCurrentThreadPriority();
+      work( parameter );
+    } );
+    return reinterpret_cast<OrtCustomThreadHandle>( thread );
+  }
+
+  void e5JoinLowPriorityThread( OrtCustomThreadHandle handle )
+  {
+    auto *thread = reinterpret_cast<std::thread *>( const_cast<OrtCustomHandleType *>( handle ) );
+    thread->join();
+    delete thread;
+  }
+#endif
 } // namespace
 
 #ifdef HAVE_AI_E5_EMBEDDINGS
@@ -214,9 +252,21 @@ struct QgsAiE5EmbeddingProvider::Runtime
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
     int outputIndex = 0;
+    //! Intra-op threads of the session, from the "Indexing speed" setting.
+    int threads = 0;
 };
 #else
 struct QgsAiE5EmbeddingProvider::Runtime
+{};
+#endif
+
+#ifdef HAVE_AI_E5_EMBEDDINGS
+struct QgsAiE5EmbeddingProvider::CountingTokenizer
+{
+    sentencepiece::SentencePieceProcessor processor;
+};
+#else
+struct QgsAiE5EmbeddingProvider::CountingTokenizer
 {};
 #endif
 
@@ -446,11 +496,16 @@ bool QgsAiE5EmbeddingProvider::fileMatchesSha256( const QString &path, const QSt
 
 bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 {
-  QMutexLocker locker( &mRuntimeMutex );
+  const QMutexLocker locker( &mRuntimeMutex );
+  return ensureRuntimeLocked( errorMessage );
+}
 
+bool QgsAiE5EmbeddingProvider::ensureRuntimeLocked( QString *errorMessage ) const
+{
 #ifndef HAVE_AI_E5_EMBEDDINGS
   mRuntimeError = u"Local multilingual E5 embedding support was not compiled because ONNX Runtime and/or SentencePiece were not found."_s;
   mRuntimeLoadAttempted = true;
+  setLoadFailure( mRuntimeError );
   if ( errorMessage )
     *errorMessage = mRuntimeError;
   return false;
@@ -471,13 +526,9 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
   QString filesError;
   if ( !modelFilesAvailable( modelDir, &filesError ) )
   {
-    const QString developerDir = developerModelDirectory();
-    mRuntimeError
-      = developerDir.isEmpty()
-          ? u"Local multilingual E5 embedding model is not installed. Download it from the AI settings dialog or set STRATA_AI_EMBEDDING_MODEL_DIR for development builds. Expected cache: %1"_s.arg(
-              userModelDirectory()
-            )
-          : u"STRATA_AI_EMBEDDING_MODEL_DIR is set to %1, but the local multilingual E5 files are not usable: %2"_s.arg( developerDir, filesError );
+    mRuntimeError = e5MissingModelMessage( filesError );
+    // Not a load failure: the files may be installed later from the settings dialog.
+    mRuntimeLoadAttempted = false;
     if ( errorMessage )
       *errorMessage = mRuntimeError;
     return false;
@@ -485,6 +536,19 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 
   const QString onnxPath = modelPath( modelDir );
   const QString spPath = tokenizerPath( modelDir );
+
+  // A damaged tokenizer must never reach SentencePiece: its failure status is an absl::Status,
+  // and destroying one crashes when SentencePiece and Strata were built against different
+  // abseil versions. The file is small, so check it against its pinned hash first.
+  QString tokenizerHashError;
+  if ( !fileMatchesSha256( spPath, QString::fromLatin1( E5_SENTENCEPIECE_SHA256 ), &tokenizerHashError ) )
+  {
+    mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer %1: the file is damaged or incompatible (%2). Download the model again from the AI settings."_s.arg( spPath, tokenizerHashError );
+    setLoadFailure( mRuntimeError );
+    if ( errorMessage )
+      *errorMessage = mRuntimeError;
+    return false;
+  }
 
   try
   {
@@ -494,15 +558,28 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     const auto tokenizerStatus = runtime->tokenizer->Load( QFile::encodeName( spPath ).toStdString() );
     if ( !tokenizerStatus.ok() )
     {
-      mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer: %1"_s.arg( QString::fromStdString( tokenizerStatus.ToString() ) );
+      // Only ok() is read: formatting the absl::Status crashes when SentencePiece and Strata
+      // link different abseil builds, and a damaged file is enough to get here.
+      mRuntimeError = u"Failed to load multilingual E5 SentencePiece tokenizer %1: the file is damaged or incompatible. Download the model again from the AI settings."_s.arg( spPath );
+      setLoadFailure( mRuntimeError );
       if ( errorMessage )
         *errorMessage = mRuntimeError;
       return false;
     }
 
+    // Two threads by default ("Indexing speed" in the settings), not every core: indexing runs
+    // for minutes, and the user keeps working meanwhile.
     Ort::SessionOptions sessionOptions;
     sessionOptions.SetGraphOptimizationLevel( GraphOptimizationLevel::ORT_ENABLE_ALL );
-    sessionOptions.SetIntraOpNumThreads( std::max( 1, std::min( 4, QThread::idealThreadCount() ) ) );
+    runtime->threads = QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() );
+    sessionOptions.SetIntraOpNumThreads( runtime->threads );
+    sessionOptions.SetInterOpNumThreads( 1 );
+    sessionOptions.SetExecutionMode( ExecutionMode::ORT_SEQUENTIAL );
+    // Idle threads wait for work instead of spinning at full CPU between batches.
+    sessionOptions.AddConfigEntry( "session.intra_op.allow_spinning", "0" );
+    sessionOptions.AddConfigEntry( "session.inter_op.allow_spinning", "0" );
+    sessionOptions.SetCustomCreateThreadFn( e5CreateLowPriorityThread );
+    sessionOptions.SetCustomJoinThreadFn( e5JoinLowPriorityThread );
 
 #ifdef _WIN32
     const std::wstring ortModelPath = QDir::toNativeSeparators( onnxPath ).toStdWString();
@@ -532,6 +609,7 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     if ( runtime->inputNames.empty() || runtime->outputNames.empty() )
     {
       mRuntimeError = u"Failed to load multilingual E5 ONNX model: model has no usable inputs or outputs."_s;
+      setLoadFailure( mRuntimeError );
       if ( errorMessage )
         *errorMessage = mRuntimeError;
       return false;
@@ -539,6 +617,7 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
 
     mRuntime = std::move( runtime );
     mRuntimeError.clear();
+    mRuntimeReady = true;
     return true;
   }
   catch ( const Ort::Exception &e )
@@ -550,15 +629,129 @@ bool QgsAiE5EmbeddingProvider::ensureRuntime( QString *errorMessage ) const
     mRuntimeError = u"Failed to load multilingual E5 embedding model: %1"_s.arg( QString::fromUtf8( e.what() ) );
   }
 
+  setLoadFailure( mRuntimeError );
   if ( errorMessage )
     *errorMessage = mRuntimeError;
   return false;
 #endif
 }
 
+void QgsAiE5EmbeddingProvider::releaseIdleResources( qint64 idleMs )
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  std::unique_ptr<Runtime> released;
+  // Busy embedding: not idle.
+  if ( !mRuntimeMutex.tryLock() )
+    return;
+  if ( mRuntime && QDateTime::currentMSecsSinceEpoch() - mLastUseMs.load() >= idleMs )
+  {
+    released = std::move( mRuntime );
+    mRuntimeReady = false;
+    mRuntimeLoadAttempted = false;
+  }
+  mRuntimeMutex.unlock();
+  // The session and its memory go outside the lock.
+  released.reset();
+#else
+  Q_UNUSED( idleMs )
+#endif
+}
+
+int QgsAiE5EmbeddingProvider::maxInputTokens() const
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  return E5_MAX_SEQUENCE_LENGTH;
+#else
+  return 0;
+#endif
+}
+
+int QgsAiE5EmbeddingProvider::tokenCount( const QString &text ) const
+{
+#ifdef HAVE_AI_E5_EMBEDDINGS
+  const QMutexLocker locker( &mCountingTokenizerMutex );
+  if ( !mCountingTokenizer )
+  {
+    if ( mCountingTokenizerFailed )
+      return -1;
+    const QString modelDir = activeModelDirectory();
+    const QString path = tokenizerPath( modelDir );
+    // Same rule as the model: a damaged tokenizer must never reach SentencePiece.
+    auto tokenizer = std::make_unique<CountingTokenizer>();
+    if ( !modelFilesAvailable( modelDir ) || !fileMatchesSha256( path, QString::fromLatin1( E5_SENTENCEPIECE_SHA256 ) ) || !tokenizer->processor.Load( QFile::encodeName( path ).toStdString() ).ok() )
+    {
+      mCountingTokenizerFailed = true;
+      return -1;
+    }
+    mCountingTokenizer = std::move( tokenizer );
+  }
+  std::vector<int> pieceIds;
+  if ( !mCountingTokenizer->processor.Encode( text.toStdString(), &pieceIds ).ok() )
+    return -1;
+  return static_cast<int>( pieceIds.size() );
+#else
+  Q_UNUSED( text )
+  return -1;
+#endif
+}
+
+QList<QList<int>> QgsAiE5EmbeddingProvider::planBatches( const QVector<int> &tokenCounts, int maxBatch, int tokenBudget )
+{
+  QVector<int> order( tokenCounts.size() );
+  std::iota( order.begin(), order.end(), 0 );
+  std::stable_sort( order.begin(), order.end(), [&tokenCounts]( int a, int b ) { return tokenCounts.at( a ) < tokenCounts.at( b ); } );
+
+  const int limit = std::max( 1, maxBatch );
+  QList<QList<int>> batches;
+  QList<int> current;
+  for ( const int index : std::as_const( order ) )
+  {
+    // Sorted by length: this text is the longest of the batch, and every text is padded to it.
+    const int length = tokenCounts.at( index );
+    if ( !current.isEmpty() && ( current.size() >= limit || ( current.size() + 1 ) * length > tokenBudget ) )
+    {
+      batches.append( current );
+      current.clear();
+    }
+    current.append( index );
+  }
+  if ( !current.isEmpty() )
+    batches.append( current );
+  return batches;
+}
+
+void QgsAiE5EmbeddingProvider::setLoadFailure( const QString &error ) const
+{
+  const QMutexLocker locker( &mLoadFailureMutex );
+  mLoadFailure = error;
+  mRuntimeFailed = true;
+}
+
 bool QgsAiE5EmbeddingProvider::isAvailable( QString *errorMessage ) const
 {
+#ifndef HAVE_AI_E5_EMBEDDINGS
   return ensureRuntime( errorMessage );
+#else
+  // Cheap on purpose: callers include timers on the interface thread. The model itself is
+  // loaded by embed(), which only runs in background tasks.
+  if ( mRuntimeReady )
+    return true;
+  if ( mRuntimeFailed )
+  {
+    if ( errorMessage )
+    {
+      const QMutexLocker locker( &mLoadFailureMutex );
+      *errorMessage = mLoadFailure;
+    }
+    return false;
+  }
+  QString filesError;
+  if ( modelFilesAvailable( activeModelDirectory(), &filesError ) )
+    return true;
+  if ( errorMessage )
+    *errorMessage = e5MissingModelMessage( filesError );
+  return false;
+#endif
 }
 
 bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QList<QVector<float>> &out, QString *errorMessage, int maxBatch )
@@ -574,46 +767,71 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
   if ( texts.isEmpty() )
     return true;
 
-  if ( !ensureRuntime( errorMessage ) )
-    return false;
-
 #ifndef HAVE_AI_E5_EMBEDDINGS
   Q_UNUSED( role )
   Q_UNUSED( options )
+  ensureRuntime( errorMessage );
   return false;
 #else
+  // One lock for loading and running, so releaseIdleResources() cannot unload in between.
   QMutexLocker locker( &mRuntimeMutex );
-  const int requestedBatch = options.maxBatch > 0 ? options.maxBatch : 1;
-  const int batchLimit = std::max( 1, requestedBatch );
-  const int textCount = static_cast<int>( texts.size() );
-  out.reserve( texts.size() );
+  // A new "Indexing speed" applies from the next call: the session is made again with its threads.
+  if ( mRuntime && mRuntime->threads != QgsAiIndexingThrottle::threadsForSpeed( QgsAiIndexingThrottle::speed(), QThread::idealThreadCount() ) )
+  {
+    mRuntime.reset();
+    mRuntimeReady = false;
+    mRuntimeLoadAttempted = false;
+  }
+  if ( !ensureRuntimeLocked( errorMessage ) )
+    return false;
+  const auto markUsed = qScopeGuard( [this]() { mLastUseMs = QDateTime::currentMSecsSinceEpoch(); } );
+
+  // Every text is tokenized first, so that batches group similar lengths within a token budget:
+  // short chunks are not padded to the longest one, and the memory peak stays bounded.
+  QVector<QVector<qint64>> allTokenIds;
+  QVector<int> tokenCounts;
+  allTokenIds.reserve( texts.size() );
+  tokenCounts.reserve( texts.size() );
+  for ( const QString &text : texts )
+  {
+    std::vector<int> pieceIds;
+    const QString formatted = formatInputForRole( text, role );
+    const auto encodeStatus = mRuntime->tokenizer->Encode( formatted.toStdString(), &pieceIds );
+    if ( !encodeStatus.ok() )
+    {
+      if ( errorMessage )
+        *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings."_s;
+      return false;
+    }
+
+    QVector<int> qPieceIds;
+    qPieceIds.reserve( static_cast<int>( pieceIds.size() ) );
+    for ( const int pieceId : pieceIds )
+      qPieceIds.append( pieceId );
+    allTokenIds.append( tokenIdsWithSpecials( qPieceIds, E5_MAX_SEQUENCE_LENGTH ) );
+    tokenCounts.append( static_cast<int>( allTokenIds.constLast().size() ) );
+  }
+  const int batchLimit = std::max( 1, options.maxBatch > 0 ? options.maxBatch : 1 );
+  const QList<QList<int>> batches = planBatches( tokenCounts, batchLimit );
+  QVector<QVector<float>> results( texts.size() );
 
   Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu( OrtArenaAllocator, OrtMemTypeDefault );
 
-  for ( int start = 0; start < textCount; start += batchLimit )
+  for ( const QList<int> &batch : batches )
   {
-    const int batchSize = std::min( batchLimit, textCount - start );
+    if ( options.feedback && options.feedback->isCanceled() )
+    {
+      if ( errorMessage )
+        *errorMessage = u"Embedding canceled."_s;
+      return false;
+    }
+    const int batchSize = static_cast<int>( batch.size() );
     QVector<QVector<qint64>> batchTokenIds;
     batchTokenIds.reserve( batchSize );
     int sequenceLength = 0;
-
-    for ( int i = 0; i < batchSize; ++i )
+    for ( const int index : batch )
     {
-      std::vector<int> pieceIds;
-      const QString formatted = formatInputForRole( texts.at( start + i ), role );
-      const auto encodeStatus = mRuntime->tokenizer->Encode( formatted.toStdString(), &pieceIds );
-      if ( !encodeStatus.ok() )
-      {
-        if ( errorMessage )
-          *errorMessage = u"Failed to tokenize text for multilingual E5 embeddings: %1"_s.arg( QString::fromStdString( encodeStatus.ToString() ) );
-        return false;
-      }
-
-      QVector<int> qPieceIds;
-      qPieceIds.reserve( static_cast<int>( pieceIds.size() ) );
-      for ( const int pieceId : pieceIds )
-        qPieceIds.append( pieceId );
-      batchTokenIds.append( tokenIdsWithSpecials( qPieceIds, E5_MAX_SEQUENCE_LENGTH ) );
+      batchTokenIds.append( allTokenIds.at( index ) );
       sequenceLength = std::max( sequenceLength, static_cast<int>( batchTokenIds.constLast().size() ) );
     }
 
@@ -705,10 +923,13 @@ bool QgsAiE5EmbeddingProvider::embed( const QStringList &texts, QgsAiEmbeddingRo
       for ( int col = 0; col < outputSequenceLength && col < sequenceLength; ++col )
         sampleMask[col] = static_cast<qint64>( attentionMask.at( static_cast<size_t>( row * sequenceLength + col ) ) );
 
-      out.append( meanPoolAndNormalize( sampleStates, sampleMask, hiddenSize ) );
+      results[batch.at( row )] = meanPoolAndNormalize( sampleStates, sampleMask, hiddenSize );
     }
   }
 
+  out.reserve( texts.size() );
+  for ( const QVector<float> &vector : std::as_const( results ) )
+    out.append( vector );
   return out.size() == texts.size();
 #endif
 }
@@ -859,6 +1080,26 @@ QString QgsAiEmbeddingProviderRegistry::displayNameForProviderId( const QString 
   if ( normalized == "strata-cloud"_L1 )
     return u"Strata Cloud"_s;
   return u"Local multilingual E5 small (recommended)"_s;
+}
+
+QString QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsentSettingsKey( const QString &providerId )
+{
+  QString slug;
+  for ( const QChar ch : providerId.toLower() )
+    slug.append( ch.isLetterOrNumber() ? ch : QChar( u'_' ) );
+  return u"strata/privacy/remote_embedding_consent/%1"_s.arg( slug );
+}
+
+bool QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( const QString &providerId )
+{
+  if ( !isRemoteProviderId( providerId ) )
+    return true;
+  return QgsSettings().value( remoteEmbeddingConsentSettingsKey( providerId ), false ).toBool();
+}
+
+void QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( const QString &providerId, bool consented )
+{
+  QgsSettings().setValue( remoteEmbeddingConsentSettingsKey( providerId ), consented );
 }
 
 bool QgsAiEmbeddingProviderRegistry::isRemoteProviderId( const QString &providerId )

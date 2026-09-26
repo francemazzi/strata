@@ -92,6 +92,9 @@ class APP_EXPORT QgsAiChatHistoryStore : public QObject
     //! Updates metadata for an existing message. Used for UI state such as accepted/rejected plans.
     bool updateMessageMetadata( const QString &sessionId, const QString &messageId, const QVariantMap &metadata );
 
+    //! Deletes messages of a session, e.g. an answer the user asks again. Returns false on SQL error.
+    bool removeMessages( const QString &sessionId, const QStringList &messageIds );
+
     //! Updates the session title. Returns false on SQL error or unknown id.
     bool renameSession( const QString &sessionId, const QString &newTitle );
 

@@ -20,6 +20,7 @@
 #include "qgsaiagentpolicy.h"
 
 #include <QList>
+#include <QNetworkRequest>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -111,6 +112,12 @@ class APP_EXPORT QgsAiPlanClient : public QObject
     static void clearNetworkCaches();
     //! Convenience lookup used by the chat dock to filter out models the user disabled.
     static bool isModelDisabled( const QString &modelId );
+
+    /**
+     * Asks Strata Plan to cancel a remote job (POST to \a request, e.g. /v1/trees/jobs/<id>/cancel)
+     * without waiting for the answer: the job keeps running and spending quota otherwise.
+     */
+    static void requestRemoteJobCancel( const QNetworkRequest &request );
 
     void login( const QString &chatEndpoint, const QString &email, const QString &password );
     void registerAccount( const QString &chatEndpoint, const QString &email, const QString &password );

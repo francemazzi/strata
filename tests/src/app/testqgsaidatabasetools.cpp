@@ -14,6 +14,7 @@
 #include "ai/qgsaimodelrouter.h"
 #include "ai/qgsaireviewpatchengine.h"
 #include "ai/tools/qgsaidatabasetools.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "qgsabstractproviderconnection.h"
 #include "qgsapplication.h"
@@ -28,12 +29,14 @@
 #include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScopeGuard>
 #include <QString>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QVariantMap>
 
 using namespace Qt::StringLiterals;
@@ -53,6 +56,7 @@ class TestQgsAiDatabaseTools : public QObject
     void classifyDeleteIsMutation();
     void classifyExplainIsReadOnly();
     void classifyExplainAnalyzeInsertIsMutation();
+    void classifySideEffectFunctionsAsMutations();
     void listConnectionsOmitsPassword();
     void listConnectionsEmptyNote();
     void querySqlRejectsWritesWithoutConnecting();
@@ -60,6 +64,8 @@ class TestQgsAiDatabaseTools : public QObject
     void describeUnknownConnectionListsSavedNames();
     void exportMissingLayer();
     void askModeAllowsQuerySqlButNotExecuteSql();
+    void queriesRunOnTheServerSafely();
+    void exportNeverLosesTheExistingTable();
 #ifdef ENABLE_PGTEST
     void queryExecuteAndExportAgainstPostgres();
 #endif
@@ -117,6 +123,201 @@ void TestQgsAiDatabaseTools::classifyExplainIsReadOnly()
 void TestQgsAiDatabaseTools::classifyExplainAnalyzeInsertIsMutation()
 {
   QCOMPARE( classifyAiSql( u"EXPLAIN ANALYZE INSERT INTO roads(id) VALUES (1)"_s ).kind, QgsAiSqlStatementKind::Mutation );
+}
+
+void TestQgsAiDatabaseTools::classifySideEffectFunctionsAsMutations()
+{
+  // Looks like a read, but ends sessions, moves sequences or runs SQL elsewhere.
+  for ( const QString &sql :
+        { u"SELECT pg_terminate_backend( 1234 )"_s,
+          u"SELECT nextval( 'roads_id_seq' )"_s,
+          u"select setval('s', 1)"_s,
+          u"SELECT * FROM dblink_exec( 'dbname=x', 'DROP TABLE t' )"_s,
+          u"VALUES ( nextval( 's' ) )"_s,
+          u"WITH x AS ( SELECT 1 ) SELECT pg_cancel_backend( 1 ) FROM x"_s } )
+    QCOMPARE( classifyAiSql( sql ).kind, QgsAiSqlStatementKind::Mutation );
+  // The names only count as calls, not inside strings.
+  QCOMPARE( classifyAiSql( u"SELECT 'nextval' AS word, count(*) FROM roads"_s ).kind, QgsAiSqlStatementKind::ReadOnly );
+
+  QgsAiDatabaseSqlTool query( nullptr, true );
+  QJsonObject args;
+  args.insert( u"connection_name"_s, u"missing"_s );
+  args.insert( u"sql"_s, u"SELECT pg_terminate_backend( 1234 )"_s );
+  const QgsAiToolResult result = query.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY( result.errorMessage.contains( u"execute_sql"_s ) );
+}
+
+namespace
+{
+  //! Saves a connection to the server named by QGIS_PGTEST_DB; false when none is configured.
+  bool savePostgresTestConnection( const QString &name, QString &skipReason )
+  {
+    const QString connstring = qEnvironmentVariable( "QGIS_PGTEST_DB" );
+    if ( connstring.isEmpty() )
+    {
+      skipReason = u"Set QGIS_PGTEST_DB to run the PostgreSQL checks of the AI database tools."_s;
+      return false;
+    }
+    QgsProviderMetadata *md = QgsProviderRegistry::instance()->providerMetadata( u"postgres"_s );
+    try
+    {
+      std::unique_ptr<QgsAbstractProviderConnection> conn( md->createConnection( u"%1 sslmode=disable"_s.arg( connstring ), QVariantMap() ) );
+      md->saveConnection( conn.get(), name );
+    }
+    catch ( const QgsProviderConnectionException &ex )
+    {
+      skipReason = ex.what();
+      return false;
+    }
+    return true;
+  }
+
+  QgsAiToolResult runSql( QgsAiDatabaseSqlTool &tool, const QString &connection, const QString &sql, int limit = 50 )
+  {
+    QJsonObject args;
+    args.insert( u"connection_name"_s, connection );
+    args.insert( u"sql"_s, sql );
+    args.insert( u"limit"_s, limit );
+    return tool.execute( args );
+  }
+
+  int countRows( QgsAiDatabaseSqlTool &query, const QString &connection, const QString &sql )
+  {
+    const QgsAiToolResult result = runSql( query, connection, sql );
+    if ( !result.success )
+      return -1;
+    return result.output.toObject().value( u"rows"_s ).toArray().at( 0 ).toObject().value( u"c"_s ).toInt( -1 );
+  }
+} // namespace
+
+void TestQgsAiDatabaseTools::queriesRunOnTheServerSafely()
+{
+  const QString name = u"ai_pg_safety"_s;
+  QString skipReason;
+  if ( !savePostgresTestConnection( name, skipReason ) )
+    QSKIP( qPrintable( skipReason ) );
+
+  QgsAiDatabaseSqlTool query( nullptr, true );
+  QgsAiDatabaseSqlTool exec( nullptr, false );
+  const QScopeGuard cleanup( [&] {
+    runSql( exec, name, u"DROP TABLE IF EXISTS ai_big_table"_s );
+    runSql( exec, name, u"DROP FUNCTION IF EXISTS ai_ro_write()"_s );
+    runSql( exec, name, u"DROP TABLE IF EXISTS ai_ro_probe"_s );
+    QgsSettings().remove( u"strata/ai/sql_timeout_s"_s );
+    QgsProviderRegistry::instance()->providerMetadata( u"postgres"_s )->deleteConnection( name );
+  } );
+
+  // The server stops at the rows the tool can return, instead of sending two million.
+  QgsAiToolResult created = runSql( exec, name, u"CREATE TABLE ai_big_table AS SELECT g AS n, md5( g::text ) AS label FROM generate_series( 1, 2000000 ) AS g"_s );
+  QVERIFY2( created.success, created.errorMessage.toUtf8().constData() );
+  QElapsedTimer clock;
+  clock.start();
+  const QgsAiToolResult page = runSql( query, name, u"SELECT * FROM ai_big_table -- every row"_s, 100 );
+  const qint64 pageMs = clock.elapsed();
+  QVERIFY2( page.success, page.errorMessage.toUtf8().constData() );
+  QCOMPARE( page.output.toObject().value( u"rows"_s ).toArray().size(), 100 );
+  QVERIFY2( pageMs < 1000, QString::number( pageMs ).toUtf8().constData() );
+
+  // query_sql is read-only on the server too: a function that writes is refused.
+  QVERIFY( runSql( exec, name, u"CREATE TABLE ai_ro_probe ( n integer )"_s ).success );
+  const QgsAiToolResult function = runSql( exec, name, u"CREATE FUNCTION ai_ro_write() RETURNS integer LANGUAGE sql VOLATILE AS $$ INSERT INTO ai_ro_probe VALUES ( 1 ) RETURNING n $$"_s );
+  QVERIFY2( function.success, function.errorMessage.toUtf8().constData() );
+  const QgsAiToolResult refused = runSql( query, name, u"SELECT ai_ro_write()"_s );
+  QVERIFY( !refused.success );
+  QVERIFY2( refused.errorMessage.contains( u"read-only"_s ), refused.errorMessage.toUtf8().constData() );
+  // The model sees its own SQL, not what Strata wrapped around it.
+  QVERIFY( !refused.errorMessage.contains( u"strata_query"_s ) );
+  QCOMPARE( countRows( query, name, u"SELECT count(*) AS c FROM ai_ro_probe"_s ), 0 );
+
+  // A query that runs too long is stopped by the server.
+  QgsSettings().setValue( u"strata/ai/sql_timeout_s"_s, 1 );
+  clock.restart();
+  const QgsAiToolResult slow = runSql( query, name, u"SELECT pg_sleep( 10 )"_s );
+  QVERIFY( !slow.success );
+  QVERIFY2( slow.errorMessage.contains( u"sql_timeout_s"_s ), slow.errorMessage.toUtf8().constData() );
+  QVERIFY2( clock.elapsed() < 5000, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QgsSettings().remove( u"strata/ai/sql_timeout_s"_s );
+
+  // Stop cancels the query on the server, not only in the window.
+  QTimer::singleShot( 500, [] { qgsAiCancelActiveBackgroundTool(); } );
+  clock.restart();
+  const QgsAiToolResult stopped = runSql( query, name, u"SELECT pg_sleep( 30 )"_s );
+  QVERIFY( stopped.canceled );
+  QVERIFY2( clock.elapsed() < 5000, QString::number( clock.elapsed() ).toUtf8().constData() );
+  QTRY_COMPARE_WITH_TIMEOUT( countRows( query, name, u"SELECT count(*) AS c FROM pg_stat_activity WHERE state = 'active' AND query LIKE '%pg_sleep( 30 )%' AND pid <> pg_backend_pid()"_s ), 0, 5000 );
+}
+
+void TestQgsAiDatabaseTools::exportNeverLosesTheExistingTable()
+{
+  const QString name = u"ai_pg_export"_s;
+  QString skipReason;
+  if ( !savePostgresTestConnection( name, skipReason ) )
+    QSKIP( qPrintable( skipReason ) );
+
+  QgsProject project;
+  QgsAiDatabaseSqlTool query( nullptr, true );
+  QgsAiDatabaseSqlTool exec( nullptr, false );
+  const QScopeGuard cleanup( [&] {
+    runSql( exec, name, u"DROP TABLE IF EXISTS ai_export_safe"_s );
+    qgsAiSetBackgroundToolProgressHandler( {} );
+    QgsProviderRegistry::instance()->providerMetadata( u"postgres"_s )->deleteConnection( name );
+  } );
+
+  auto makeLayer = [&project]( const QString &layerName, int count, int duplicateAt = -1 ) {
+    auto *layer = new QgsVectorLayer( u"None?field=fid_value:integer&field=name:string"_s, layerName, u"memory"_s );
+    QgsFeatureList features;
+    features.reserve( count );
+    for ( int i = 0; i < count; ++i )
+    {
+      QgsFeature feature( layer->fields() );
+      feature.setAttribute( 0, i == duplicateAt ? 0 : i );
+      feature.setAttribute( 1, u"row %1"_s.arg( i ) );
+      features << feature;
+    }
+    layer->dataProvider()->addFeatures( features );
+    project.addMapLayer( layer );
+    return layer;
+  };
+  auto exportLayer = [&name]( QgsProject &project, QgsVectorLayer *layer ) {
+    QgsAiExportLayerToPostgisTool exporter( &project );
+    QJsonObject args;
+    args.insert( u"layer_id"_s, layer->id() );
+    args.insert( u"connection_name"_s, name );
+    args.insert( u"schema"_s, u"public"_s );
+    args.insert( u"table"_s, u"ai_export_safe"_s );
+    args.insert( u"primary_key"_s, u"fid_value"_s );
+    args.insert( u"overwrite"_s, true );
+    return exporter.execute( args );
+  };
+  const QString leftovers = u"SELECT count(*) AS c FROM pg_tables WHERE tablename LIKE 'strata_tmp_%'"_s;
+
+  const QgsAiToolResult first = exportLayer( project, makeLayer( u"three"_s, 3 ) );
+  QVERIFY2( first.success, first.errorMessage.toUtf8().constData() );
+  QCOMPARE( countRows( query, name, u"SELECT count(*) AS c FROM ai_export_safe"_s ), 3 );
+
+  // Overwriting with the same rows works and replaces the table.
+  const QgsAiToolResult again = exportLayer( project, makeLayer( u"five"_s, 5 ) );
+  QVERIFY2( again.success, again.errorMessage.toUtf8().constData() );
+  QCOMPARE( countRows( query, name, u"SELECT count(*) AS c FROM ai_export_safe"_s ), 5 );
+
+  // An error half way (a duplicate key) leaves the table as it was.
+  const QgsAiToolResult failed = exportLayer( project, makeLayer( u"broken"_s, 3000, 2500 ) );
+  QVERIFY( !failed.success );
+  QVERIFY2( failed.errorMessage.contains( u"was not changed"_s ), failed.errorMessage.toUtf8().constData() );
+  QCOMPARE( countRows( query, name, u"SELECT count(*) AS c FROM ai_export_safe"_s ), 5 );
+  QCOMPARE( countRows( query, name, leftovers ), 0 );
+
+  // Stop half way does the same.
+  qgsAiSetBackgroundToolProgressHandler( []( const QString &, double progress ) {
+    if ( progress > 10 )
+      qgsAiCancelActiveBackgroundTool();
+  } );
+  const QgsAiToolResult stopped = exportLayer( project, makeLayer( u"large"_s, 50000 ) );
+  qgsAiSetBackgroundToolProgressHandler( {} );
+  QVERIFY( stopped.canceled );
+  QCOMPARE( countRows( query, name, u"SELECT count(*) AS c FROM ai_export_safe"_s ), 5 );
+  QTRY_COMPARE_WITH_TIMEOUT( countRows( query, name, leftovers ), 0, 5000 );
 }
 
 void TestQgsAiDatabaseTools::listConnectionsOmitsPassword()

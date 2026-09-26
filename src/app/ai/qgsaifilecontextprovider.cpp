@@ -18,14 +18,25 @@
 #include <algorithm>
 
 #include "qgsapplication.h"
+#include "qgsfeedback.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
 
 #include <QDir>
-#include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
+#include <QSet>
+#include <QStorageInfo>
 #include <QString>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "moc_qgsaifilecontextprovider.cpp"
 
@@ -118,35 +129,158 @@ QString QgsAiFileContextProvider::resolveWorkspaceFile( const QString &filePath 
   return normalizedPath;
 }
 
+namespace
+{
+  // Workspace folders of the Strata source tree itself, excluded at the root only (a user's
+  // "build" or "external" folder deeper in a project can hold real data).
+  const QStringList FILE_CONTEXT_ROOT_ONLY_EXCLUSIONS {
+    u"build/"_s,
+    u"external/"_s,
+    u"i18n/"_s,
+    u"tests/testdata/"_s,
+    u"vcpkg/"_s,
+  };
+
+  bool fileContextIsCloudPlaceholder( const QString &absolutePath )
+  {
+#ifdef Q_OS_WIN
+    // OneDrive "Files On-Demand": reading these files downloads them.
+    const DWORD attributes = GetFileAttributesW( reinterpret_cast<const wchar_t *>( QDir::toNativeSeparators( absolutePath ).utf16() ) );
+    if ( attributes == INVALID_FILE_ATTRIBUTES )
+      return false;
+    constexpr DWORD recallOnDataAccess = 0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+    constexpr DWORD recallOnOpen = 0x00040000;       // FILE_ATTRIBUTE_RECALL_ON_OPEN
+    return ( attributes & ( recallOnDataAccess | recallOnOpen | FILE_ATTRIBUTE_OFFLINE ) ) != 0;
+#else
+    Q_UNUSED( absolutePath )
+    return false;
+#endif
+  }
+} // namespace
+
+bool QgsAiFileContextProvider::isExcludedFolderName( const QString &folderName )
+{
+  static const QSet<QString> excluded {
+    u".git"_s,
+    u".svn"_s,
+    u".hg"_s,
+    u"node_modules"_s,
+    u"__pycache__"_s,
+    u"__MACOSX"_s,
+    u".venv"_s,
+    u"venv"_s,
+    u".tox"_s,
+    u".mypy_cache"_s,
+    u".pytest_cache"_s,
+    u".cache"_s,
+    u".Trash"_s,
+    u"$RECYCLE.BIN"_s,
+    u"System Volume Information"_s,
+  };
+  return excluded.contains( folderName );
+}
+
+bool QgsAiFileContextProvider::isNetworkPath( const QString &path )
+{
+  if ( path.startsWith( "\\\\"_L1 ) || path.startsWith( "//"_L1 ) )
+    return true;
+  const QStorageInfo storage( path );
+  if ( !storage.isValid() )
+    return false;
+  static const QSet<QByteArray> networkFileSystems { "smbfs", "cifs", "smb2", "smb3", "nfs", "nfs4", "afpfs", "webdav", "davfs", "fuse.sshfs", "9p" };
+  return networkFileSystems.contains( storage.fileSystemType().toLower() );
+}
+
+QgsAiFileContextProvider::WorkspaceScanResult QgsAiFileContextProvider::scanWorkspace( const QString &workspaceRoot, const WorkspaceScanOptions &options, QgsFeedback *feedback )
+{
+  WorkspaceScanResult result;
+  if ( workspaceRoot.isEmpty() || !QFileInfo( workspaceRoot ).isDir() )
+    return result;
+
+  const QDir rootDir( workspaceRoot );
+  const QString query = options.query.trimmed();
+  QList<QRegularExpression> userExclusions;
+  for ( const QString &pattern : options.excludedFolders )
+  {
+    if ( !pattern.trimmed().isEmpty() )
+      userExclusions << QRegularExpression( QRegularExpression::wildcardToRegularExpression( pattern.trimmed() ), QRegularExpression::CaseInsensitiveOption );
+  }
+  const auto userExcluded = [&userExclusions]( const QString &name ) {
+    return std::any_of( userExclusions.cbegin(), userExclusions.cend(), [&name]( const QRegularExpression &exclusion ) { return exclusion.match( name ).hasMatch(); } );
+  };
+  QElapsedTimer clock;
+  clock.start();
+
+  // Breadth-first, so a truncated walk still covers the top of the tree.
+  QStringList pendingDirs { rootDir.absolutePath() };
+  while ( !pendingDirs.isEmpty() )
+  {
+    if ( feedback && feedback->isCanceled() )
+    {
+      result.truncated = true;
+      break;
+    }
+    if ( options.timeBudgetMs > 0 && clock.elapsed() > options.timeBudgetMs )
+    {
+      result.truncated = true;
+      result.timedOut = true;
+      break;
+    }
+
+    const QDir dir( pendingDirs.takeFirst() );
+    const QFileInfoList entries = dir.entryInfoList( QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDir::Name );
+    for ( const QFileInfo &entry : entries )
+    {
+      if ( ++result.visitedEntries > options.maxEntries )
+      {
+        result.truncated = true;
+        return result;
+      }
+
+      const QString absolutePath = QDir::cleanPath( entry.absoluteFilePath() );
+      const QString relativePath = rootDir.relativeFilePath( absolutePath );
+      if ( entry.isDir() )
+      {
+        const QString relativeDir = relativePath + '/';
+        const bool rootOnlyExcluded = std::any_of( FILE_CONTEXT_ROOT_ONLY_EXCLUSIONS.cbegin(), FILE_CONTEXT_ROOT_ONLY_EXCLUSIONS.cend(), [&relativeDir]( const QString &excluded ) {
+          return relativeDir == excluded;
+        } );
+        if ( !rootOnlyExcluded && !isExcludedFolderName( entry.fileName() ) && !userExcluded( entry.fileName() ) )
+          pendingDirs.append( absolutePath );
+        continue;
+      }
+
+      if ( !query.isEmpty() && !relativePath.contains( query, Qt::CaseInsensitive ) )
+        continue;
+      if ( fileContextIsCloudPlaceholder( absolutePath ) )
+        continue;
+
+      result.files.append( { relativePath, absolutePath, entry.size(), entry.lastModified().toMSecsSinceEpoch() } );
+      if ( options.maxResults > 0 && result.files.size() >= options.maxResults )
+      {
+        result.truncated = !pendingDirs.isEmpty() || &entry != &entries.constLast();
+        return result;
+      }
+    }
+  }
+  return result;
+}
+
 QStringList QgsAiFileContextProvider::workspaceFileCandidates( const QString &query, int maxResults ) const
 {
   QStringList candidates;
   if ( maxResults <= 0 || mWorkspaceRoot.isEmpty() )
     return candidates;
 
-  const QString normalizedQuery = query.trimmed();
-  QDir rootDir( mWorkspaceRoot );
-  QDirIterator iterator( mWorkspaceRoot, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories );
-  int visited = 0;
-  while ( iterator.hasNext() && candidates.size() < maxResults && visited < 50000 )
-  {
-    const QString absolutePath = QDir::cleanPath( iterator.next() );
-    ++visited;
-
-    const QString relativePath = rootDir.relativeFilePath( absolutePath );
-    if ( relativePath.startsWith( ".git/"_L1 )
-         || relativePath.startsWith( "build/"_L1 )
-         || relativePath.startsWith( "external/"_L1 )
-         || relativePath.startsWith( "i18n/"_L1 )
-         || relativePath.startsWith( "tests/testdata/"_L1 )
-         || relativePath.startsWith( "vcpkg/"_L1 ) )
-    {
-      continue;
-    }
-
-    if ( normalizedQuery.isEmpty() || relativePath.contains( normalizedQuery, Qt::CaseInsensitive ) )
-      candidates << relativePath;
-  }
+  WorkspaceScanOptions options;
+  options.maxResults = maxResults;
+  options.query = query;
+  // Callers still run on the interface thread: never walk a huge tree for long.
+  options.timeBudgetMs = 3000;
+  const WorkspaceScanResult result = scanWorkspace( mWorkspaceRoot, options );
+  candidates.reserve( result.files.size() );
+  for ( const WorkspaceFile &file : result.files )
+    candidates << file.relativePath;
 
   candidates.sort( Qt::CaseInsensitive );
   return candidates;

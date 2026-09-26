@@ -9,12 +9,18 @@
 
 #include "ai/index/qgsailayerchunker.h"
 #include "ai/index/qgsaiworkspaceindex.h"
+#include "qgsfeature.h"
+#include "qgsgeometry.h"
+#include "qgspointxy.h"
 #include "qgsrasterlayer.h"
+#include "qgssettings.h"
 #include "qgstest.h"
+#include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
 
 #include <QByteArray>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QString>
 
 using namespace Qt::StringLiterals;
@@ -34,6 +40,9 @@ class TestQgsAiLayerChunker : public QObject
     void vectorHeaderSkipsFeatureCountScan();
     void officeSpreadsheetVectorLayerSkipsFeatureSampling();
     void rasterMetadataSkipsBandStatistics();
+    void preparedLayerChunksAfterLayerIsGone();
+    void remoteLayersAreIndexedFromMetadata();
+    void chunksFitATokenBudget();
 };
 
 void TestQgsAiLayerChunker::initTestCase()
@@ -89,6 +98,11 @@ void TestQgsAiLayerChunker::chunkTextStaysWithinTargetSize()
 
 void TestQgsAiLayerChunker::wktBlobIsRecoverable()
 {
+  // WKT is only collected when the user lets geometries reach the model context.
+  QgsSettings settings;
+  settings.setValue( u"strata/privacy/include_layer_wkt_in_model_context"_s, true );
+  const auto restore = qScopeGuard( [&settings]() { settings.remove( u"strata/privacy/include_layer_wkt_in_model_context"_s ); } );
+
   const QString shpPath = QStringLiteral( TEST_DATA_DIR ) + u"/points.shp"_s;
   auto layer = std::make_unique<QgsVectorLayer>( shpPath, u"points"_s, u"ogr"_s );
   QVERIFY( layer->isValid() );
@@ -154,5 +168,63 @@ void TestQgsAiLayerChunker::rasterMetadataSkipsBandStatistics()
   QVERIFY( chunks.first().text.contains( u"band statistics skipped during fast layer snapshot"_s ) );
 }
 
+void TestQgsAiLayerChunker::preparedLayerChunksAfterLayerIsGone()
+{
+  // prepare() runs on the interface thread; chunk() may run after the layer is gone.
+  auto layer = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326&field=name:string"_s, u"prepared"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeature feature( layer->fields() );
+  feature.setAttribute( 0, u"parco giochi"_s );
+  feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 11, 45 ) ) );
+  QVERIFY( layer->dataProvider()->addFeature( feature ) );
+
+  const QgsAiPreparedLayer prepared = QgsAiLayerChunker::prepare( layer.get() );
+  QVERIFY( prepared.metadataText.isEmpty() );
+  QVERIFY( prepared.source );
+  layer.reset();
+
+  const QList<QgsAiWorkspaceIndex::Chunk> chunks = QgsAiLayerChunker::chunk( prepared );
+  QCOMPARE( chunks.size(), 1 );
+  QVERIFY2( chunks.first().text.contains( u"parco giochi"_s ), chunks.first().text.toUtf8().constData() );
+  // No WKT unless the privacy setting allows it.
+  QVERIFY( chunks.first().wktBlob.isEmpty() );
+}
+
+void TestQgsAiLayerChunker::remoteLayersAreIndexedFromMetadata()
+{
+  auto layer = std::make_unique<QgsVectorLayer>( u"/vsicurl/https://example.invalid/data.gpkg"_s, u"remote"_s, u"ogr"_s );
+  QVERIFY( QgsAiLayerChunker::isRemoteLayer( layer.get() ) );
+  const QgsAiPreparedLayer prepared = QgsAiLayerChunker::prepare( layer.get() );
+  QVERIFY( !prepared.source );
+  QVERIFY( prepared.metadataText.contains( u"remote layer"_s ) );
+  const QList<QgsAiWorkspaceIndex::Chunk> chunks = QgsAiLayerChunker::chunk( prepared );
+  QCOMPARE( chunks.size(), 1 );
+
+  auto local = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326"_s, u"local"_s, u"memory"_s );
+  QVERIFY( !QgsAiLayerChunker::isRemoteLayer( local.get() ) );
+}
+
 QGSTEST_MAIN( TestQgsAiLayerChunker )
+void TestQgsAiLayerChunker::chunksFitATokenBudget()
+{
+  auto layer = std::make_unique<QgsVectorLayer>( u"Point?crs=EPSG:4326&field=name:string&field=value:double"_s, u"points"_s, u"memory"_s );
+  QgsFeatureList features;
+  for ( int i = 0; i < 120; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, u"feature %1"_s.arg( i ) );
+    feature.setAttribute( 1, 1234.5678 * i );
+    feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( 9 + i * 0.001, 45 + i * 0.001 ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+
+  // One token per character keeps the arithmetic visible.
+  const QgsAiWorkspaceIndex::TokenCounter perCharacter = []( const QString &text ) { return static_cast<int>( text.size() ); };
+  const QList<QgsAiWorkspaceIndex::Chunk> chunks = QgsAiLayerChunker::chunk( QgsAiLayerChunker::prepare( layer.get() ), nullptr, perCharacter, 600 );
+  QVERIFY( chunks.size() > 3 );
+  for ( const QgsAiWorkspaceIndex::Chunk &chunk : chunks )
+    QVERIFY2( chunk.text.size() <= 600, QString::number( chunk.text.size() ).toUtf8().constData() );
+}
+
 #include "testqgsailayerchunker.moc"

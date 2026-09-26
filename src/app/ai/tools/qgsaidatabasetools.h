@@ -86,6 +86,8 @@ class APP_EXPORT QgsAiDatabaseSqlTool : public QgsAiTool
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
     bool requiresApproval() const override { return !mReadOnly; }
+    //! Database writes have no rollback in Strata.
+    bool canBeUndone() const override { return mReadOnly; }
     QgsAiToolRiskLevel riskLevel() const override { return mReadOnly ? QgsAiToolRiskLevel::Low : QgsAiToolRiskLevel::High; }
 
   private:
@@ -106,6 +108,8 @@ class APP_EXPORT QgsAiExportLayerToPostgisTool : public QgsAiTool
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
     bool requiresApproval() const override { return true; }
+    //! Writing (or replacing) a database table has no rollback in Strata.
+    bool canBeUndone() const override { return false; }
     QgsAiToolRiskLevel riskLevel() const override { return QgsAiToolRiskLevel::High; }
 
   private:

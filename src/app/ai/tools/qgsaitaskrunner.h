@@ -26,6 +26,7 @@
 #include <QList>
 #include <QMetaObject>
 #include <QString>
+#include <QStringList>
 
 class QgsFeedback;
 class QgsMapLayer;
@@ -58,6 +59,13 @@ class APP_EXPORT QgsAiBackgroundTask : public QgsTask
     //! Called by qgsAiRunTaskWithEventLoop() right before queueing the task.
     void armUserCancel() { mUserCancelArmed = true; }
 
+    /**
+     * TRUE when the task owns everything its worker touches, so Stop may stop waiting for a worker
+     * stuck in a call it cannot interrupt (opening a huge file, a slow server): the tool returns
+     * at once and the worker ends on its own.
+     */
+    virtual bool canBeAbandoned() const { return false; }
+
   protected:
     std::shared_ptr<QgsFeedback> mFeedback;
 
@@ -79,6 +87,9 @@ class APP_EXPORT QgsAiFunctionTask : public QgsAiBackgroundTask
 {
   public:
     QgsAiFunctionTask( const QString &description, QgsAiBackgroundWork work, std::shared_ptr<QgsFeedback> feedback = nullptr );
+
+    //! The work captures its state by value (see QgsAiBackgroundWork).
+    bool canBeAbandoned() const override { return true; }
 
   protected:
     bool run() override;
@@ -177,6 +188,42 @@ APP_EXPORT void qgsAiCancelActiveBackgroundTool();
  */
 APP_EXPORT bool qgsAiWaitForActiveTasks( int timeoutMs );
 
+//! Outcome of qgsAiApplyInSlices().
+enum class QgsAiSliceResult
+{
+  Completed,
+  Canceled, //!< Stop was pressed; the changes applied so far stay for the caller to undo.
+  Failed,   //!< An item could not be applied.
+};
+
+/**
+ * Applies \a count changes on the interface thread, calling \a apply for each index, in slices of
+ * about \a sliceMs milliseconds with the event loop turning in between: the window stays
+ * responsive, progress reaches the chat and Stop ends the work between two slices. Returns why
+ * it ended; \a failedIndex receives the index \a apply refused.
+ */
+APP_EXPORT QgsAiSliceResult qgsAiApplyInSlices( const QString &label, int count, const std::function<bool( int index )> &apply, int *failedIndex = nullptr, int sliceMs = 50 );
+
+//! Outcome of qgsAiRunProcess().
+struct APP_EXPORT QgsAiProcessResult
+{
+    bool started = false;
+    bool canceled = false;
+    bool timedOut = false;
+    int exitCode = -1;
+    QString standardOutput;
+    QString standardError;
+    //! Why the process could not start.
+    QString error;
+};
+
+/**
+ * Runs \a program with \a arguments and waits for it with an event loop: the interface stays
+ * responsive, Stop kills the process within a moment, and so does \a timeoutMs. \a unsetVariables
+ * are removed from the environment the process inherits. \a label names the work for Stop.
+ */
+APP_EXPORT QgsAiProcessResult qgsAiRunProcess( const QString &label, const QString &program, const QStringList &arguments, int timeoutMs, const QStringList &unsetVariables = QStringList() );
+
 /**
  * Quits the nested event loops of the background waits in progress, like QCoreApplication::exit()
  * does when Strata quits, but without stopping later event loops. For tests only.
@@ -185,6 +232,40 @@ APP_EXPORT void qgsAiQuitBackgroundWaitLoopsForTesting();
 
 //! Logs a per-phase timing line under the "AI/Perf" message log tag.
 APP_EXPORT void qgsAiLogPerf( const QString &tool, const QString &phase, qint64 elapsedMs );
+
+/**
+ * Marks a unit of AI work on the calling thread for performance diagnostics.
+ *
+ * On destruction it logs the elapsed time with qgsAiLogPerf(), when it reaches \a minLogMs (use it
+ * for frequent calls that are usually instant). On the GUI thread it also tells the stall monitor
+ * which AI work was running, so a stall report can name it.
+ */
+class APP_EXPORT QgsAiPerfScope
+{
+  public:
+    QgsAiPerfScope( const QString &tool, const QString &phase, int minLogMs = 0 );
+    ~QgsAiPerfScope();
+
+    QgsAiPerfScope( const QgsAiPerfScope & ) = delete;
+    QgsAiPerfScope &operator=( const QgsAiPerfScope & ) = delete;
+
+    //! Milliseconds since the scope started.
+    qint64 elapsedMs() const;
+
+  private:
+    QString mTool;
+    QString mPhase;
+    int mMinLogMs = 0;
+    qint64 mStartMs = 0;
+    qint64 mRecordId = -1;
+};
+
+/**
+ * Logs GUI-thread stalls longer than \a thresholdMs as "gui_stall" lines under "AI/Perf", naming
+ * the QgsAiPerfScope work that overlapped each stall. Call on the GUI thread; a threshold of 0 or
+ * less stops the monitor. Off by default: Strata enables it when STRATA_AI_GUI_STALL_MS is set.
+ */
+APP_EXPORT void qgsAiSetGuiStallMonitorThreshold( int thresholdMs );
 
 //! True if \a layer's provider reads through a shared transaction connection, which must stay on the GUI thread.
 APP_EXPORT bool qgsAiProviderUsesTransaction( const QgsVectorLayer *layer );

@@ -22,8 +22,11 @@
 
 #include "ai/index/qgsaicloudindexclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingscheduler.h"
+#include "ai/index/qgsaiindexingthrottle.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "qgsaiaccountwidget.h"
 #include "qgsaiagentsessionmanager.h"
 #include "qgsaichatdockwidget.h"
@@ -43,6 +46,7 @@
 #include "qgsapplication.h"
 #include "qgscollapsiblegroupbox.h"
 #include "qgsfeature.h"
+#include "qgsfeedback.h"
 #include "qgsgeometry.h"
 #include "qgsnetworkaccessmanager.h"
 #include "qgsproject.h"
@@ -78,6 +82,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QLocale>
 #include <QMessageBox>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -109,14 +114,19 @@ namespace
   class ManualWorkspaceIndexTask final : public QgsTask
   {
     public:
-      ManualWorkspaceIndexTask( QgsAiWorkspaceIndex *index, const QString &workspaceRoot, const QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> &snapshot )
+      ManualWorkspaceIndexTask( QgsAiWorkspaceIndex *index, const QString &workspaceRoot )
         : QgsTask( QObject::tr( "Rebuild AI workspace index" ), QgsTask::CanCancel | QgsTask::CancelWithoutPrompt )
         , mIndex( index )
         , mWorkspaceRoot( workspaceRoot )
-        , mSnapshot( snapshot )
       {}
 
       QString errorMessage() const { return mErrorMessage; }
+
+      void cancel() override
+      {
+        mFeedback.cancel();
+        QgsTask::cancel();
+      }
 
     protected:
       bool run() override
@@ -138,8 +148,12 @@ namespace
           Qt::DirectConnection
         );
 
+        // The folder walk runs here too: a large or network workspace never holds the dialog.
         QString error;
-        const bool ok = mIndex->reindex( mSnapshot, mWorkspaceRoot, &error );
+        QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
+        bool ok = QgsAiWorkspaceIndex::scanWorkspaceFileSnapshot( mWorkspaceRoot, QgsAiIndexingScheduler::maxFiles(), snapshot, &error, &mFeedback );
+        if ( ok )
+          ok = mIndex->reindex( snapshot, mWorkspaceRoot, &error, &mFeedback );
         disconnect( conn );
         mIndex->closeDatabaseConnectionForCurrentThread();
         if ( !ok )
@@ -150,7 +164,7 @@ namespace
     private:
       QPointer<QgsAiWorkspaceIndex> mIndex;
       QString mWorkspaceRoot;
-      QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> mSnapshot;
+      QgsFeedback mFeedback;
       QString mErrorMessage;
   };
 
@@ -455,6 +469,7 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
   , mModelRouter( modelRouter )
   , mLayerIndexCoordinator( layerIndexCoordinator )
 {
+  QgsAiPerfScope perf( u"settings"_s, u"dialog_open"_s, 100 );
   setWindowTitle( tr( "AI Settings" ) );
   setObjectName( u"aiSettingsDialog"_s );
 
@@ -619,6 +634,7 @@ void QgsAiSettingsDialog::accept()
   QgsAiCredentialDialog::save( this, credentials, [this]( bool saved ) {
     mSavingSecrets = false;
     mStack->setEnabled( true );
+    QgsAiPerfScope perf( u"settings"_s, u"dialog_accept"_s, 100 );
     if ( !saved || !applySettings() )
       return;
     if ( mRequestedProvider )
@@ -1610,7 +1626,9 @@ void QgsAiSettingsDialog::setSkillDocumentInEditor( const QgsAiMarkdownDocument 
 
   for ( const QgsAiFrontmatterProperty &property : document.properties )
   {
-    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
+    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0
+         || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0
+         || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
       continue;
     addSkillPropertyRow( property.key, property.values, property.isList, false );
   }
@@ -2472,6 +2490,43 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
     settingRow( tr( "Enable layer indexing" ), tr( "Layer attributes and bounding boxes are embedded with the selected indexing provider and indexed so the assistant can ground its answers on actual layer data. Reindexes on layer add/remove/edit." ), mEnableLayerIndexing, page )
   );
 
+  // How gently indexing runs, and what it reads.
+  mIndexingSpeed = new QComboBox( page );
+  mIndexingSpeed->setObjectName( u"aiIndexingSpeedComboBox"_s );
+  mIndexingSpeed->addItem( tr( "Low (one core, long pauses)" ), u"low"_s );
+  mIndexingSpeed->addItem( tr( "Normal (two cores, short pauses)" ), u"normal"_s );
+  mIndexingSpeed->addItem( tr( "High (up to four cores)" ), u"high"_s );
+  const int speedIndex = mIndexingSpeed->findData( indexSettings.value( QgsAiIndexingThrottle::speedSettingsKey(), u"normal"_s ).toString() );
+  mIndexingSpeed->setCurrentIndex( speedIndex >= 0 ? speedIndex : 1 );
+  contentLayout->addWidget(
+    settingRow( tr( "Indexing speed" ), tr( "Background indexing leaves the rest of the computer to you; a higher speed finishes sooner but uses more of the processor." ), mIndexingSpeed, page )
+  );
+
+  mPauseIndexingOnBattery = new QCheckBox( page );
+  mPauseIndexingOnBattery->setObjectName( u"aiPauseIndexingOnBatteryCheckBox"_s );
+  mPauseIndexingOnBattery->setChecked( indexSettings.value( QgsAiIndexingThrottle::pauseOnBatterySettingsKey(), true ).toBool() );
+  contentLayout->addWidget( settingRow( tr( "Pause indexing on battery" ), tr( "Background indexing waits for mains power." ), mPauseIndexingOnBattery, page ) );
+
+  mIndexRemoteLayers = new QCheckBox( page );
+  mIndexRemoteLayers->setObjectName( u"aiIndexRemoteLayersCheckBox"_s );
+  mIndexRemoteLayers->setChecked( indexSettings.value( u"strata/index/include_remote_layers"_s, false ).toBool() );
+  contentLayout->addWidget(
+    settingRow( tr( "Read features of remote layers" ), tr( "PostGIS, WFS and other services are indexed from their metadata unless this is on: reading their features means network traffic at every indexing." ), mIndexRemoteLayers, page )
+  );
+
+  mExcludedIndexFolders = new QLineEdit( indexSettings.value( u"strata/index/excluded_folders"_s ).toStringList().join( ", "_L1 ), page );
+  mExcludedIndexFolders->setObjectName( u"aiExcludedIndexFoldersLineEdit"_s );
+  mExcludedIndexFolders->setPlaceholderText( tr( "e.g. archive, old_*, tiles" ) );
+  contentLayout->addWidget(
+    settingRow( tr( "Folders not to index" ), tr( "Folder names, with * as wildcard, left out at any depth. Version control, build, cache and virtual environment folders are always left out." ), mExcludedIndexFolders, page )
+  );
+
+  mMaxIndexedFiles = new QSpinBox( page );
+  mMaxIndexedFiles->setObjectName( u"aiMaxIndexedFilesSpinBox"_s );
+  mMaxIndexedFiles->setRange( 10, 20000 );
+  mMaxIndexedFiles->setValue( QgsAiIndexingScheduler::maxFiles() );
+  contentLayout->addWidget( settingRow( tr( "Workspace files indexed at most" ), QString(), mMaxIndexedFiles, page ) );
+
   mIndexStatusLabel = new QLabel( page );
   mIndexStatusLabel->setObjectName( u"aiIndexStatusLabel"_s );
   refreshIndexStatusLabel();
@@ -2580,6 +2635,30 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
   mRebuildLayerIndexButton->setEnabled( mSessionManager && mSessionManager->workspaceIndex() );
   contentLayout->addWidget( settingRow( tr( "Layer index" ), QString(), mRebuildLayerIndexButton, page ) );
 
+  mClearIndexButton = new QPushButton( tr( "Clear index" ), page );
+  mClearIndexButton->setObjectName( u"aiClearIndexButton"_s );
+  mClearIndexButton->setEnabled( mSessionManager && mSessionManager->workspaceIndex() );
+  mIndexSizeLabel = new QLabel( page );
+  mIndexSizeLabel->setObjectName( u"aiIndexSizeLabel"_s );
+  const auto refreshIndexSize = [this]() {
+    const qint64 bytes = mSessionManager && mSessionManager->workspaceIndex() ? mSessionManager->workspaceIndex()->databaseSizeBytes() : 0;
+    mIndexSizeLabel->setText( tr( "Index of this workspace on disk: %1" ).arg( QLocale().formattedDataSize( bytes ) ) );
+  };
+  refreshIndexSize();
+  contentLayout->addWidget( mIndexSizeLabel );
+  contentLayout->addWidget( settingRow( tr( "Index of this workspace" ), tr( "Deletes what was indexed; it is built again as you work." ), mClearIndexButton, page ) );
+  connect( mClearIndexButton, &QPushButton::clicked, this, [this, refreshIndexSize]() {
+    if ( !mSessionManager || !mSessionManager->workspaceIndex() )
+      return;
+    if ( QMessageBox::
+           question( this, tr( "Clear index" ), tr( "Delete the index of this workspace? The assistant finds files and layers again once they are indexed anew." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No )
+         != QMessageBox::Yes )
+      return;
+    mSessionManager->workspaceIndex()->clear();
+    refreshIndexSize();
+    refreshIndexStatusLabel();
+  } );
+
   connect( mRebuildWorkspaceIndexButton, &QPushButton::clicked, this, [this]() {
     if ( !mSessionManager || !mSessionManager->workspaceIndex() )
       return;
@@ -2591,11 +2670,10 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
       return;
 
     QString err;
-    QString workspaceRoot;
-    QList<QgsAiWorkspaceIndex::WorkspaceFileSnapshot> snapshot;
-    if ( !mSessionManager->workspaceIndex()->createWorkspaceFileSnapshot( QgsAiWorkspaceIndex::DEFAULT_MAX_FILES, workspaceRoot, snapshot, &err ) )
+    const QString workspaceRoot = mSessionManager->workspaceIndex()->workspaceRoot();
+    if ( workspaceRoot.isEmpty() )
     {
-      QMessageBox::warning( this, tr( "Workspace reindex failed" ), err.isEmpty() ? tr( "Unknown error." ) : err );
+      QMessageBox::warning( this, tr( "Workspace reindex failed" ), tr( "AI workspace root is unset. Save the QGIS project or configure the AI workspace root." ) );
       return;
     }
 
@@ -2603,7 +2681,7 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
     if ( !taskManager )
     {
       QApplication::setOverrideCursor( Qt::WaitCursor );
-      const bool ok = mSessionManager->workspaceIndex()->reindex( snapshot, workspaceRoot, &err );
+      const bool ok = mSessionManager->workspaceIndex()->reindex( QgsAiIndexingScheduler::maxFiles(), &err );
       QApplication::restoreOverrideCursor();
       if ( !ok )
       {
@@ -2617,7 +2695,7 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
     }
 
     mRebuildWorkspaceIndexButton->setEnabled( false );
-    ManualWorkspaceIndexTask *task = new ManualWorkspaceIndexTask( mSessionManager->workspaceIndex(), workspaceRoot, snapshot );
+    ManualWorkspaceIndexTask *task = new ManualWorkspaceIndexTask( mSessionManager->workspaceIndex(), workspaceRoot );
     connect( task, &QgsTask::taskCompleted, this, [this]() {
       mRebuildWorkspaceIndexButton->setEnabled( mSessionManager && mSessionManager->workspaceIndex() );
       refreshIndexStatusLabel();
@@ -2797,7 +2875,12 @@ QWidget *QgsAiSettingsDialog::buildOnboardingPage()
   createDemoProjectButton->setObjectName( u"aiCreateDemoProjectButton"_s );
 
   contentLayout->addWidget( settingRow( tr( "Demo project" ), tr( "Creates a small in-memory sample project to try the assistant." ), createDemoProjectButton, page ) );
-  contentLayout->addWidget( settingRow( tr( "Release dry-run" ), tr( "Stores only a local readiness manifest checksum." ), releaseDryRunButton, page ) );
+  // A check for whoever prepares a release, not for users.
+  const bool developerMode = productSettings.value( u"strata/developer_mode"_s, false ).toBool() || qEnvironmentVariableIsSet( "STRATA_DEVELOPER" );
+  QWidget *releaseDryRunRow = settingRow( tr( "Release dry-run" ), tr( "Stores only a local readiness manifest checksum." ), releaseDryRunButton, page );
+  releaseDryRunRow->setVisible( developerMode );
+  mReleaseDryRunStatus->setVisible( developerMode );
+  contentLayout->addWidget( releaseDryRunRow );
   contentLayout->addWidget( mReleaseDryRunStatus );
 
   refreshOnboardingStatus();
@@ -2963,8 +3046,17 @@ void QgsAiSettingsDialog::refreshIndexStatusLabel()
 {
   if ( mSessionManager && mSessionManager->workspaceIndex() )
   {
-    mSessionManager->workspaceIndex()->ensureLoaded();
-    const auto status = mSessionManager->workspaceIndex()->status();
+    QgsAiWorkspaceIndex *index = mSessionManager->workspaceIndex();
+    // Opening the settings never waits on the index: it loads in the background and the
+    // label refreshes once it is ready.
+    const auto status = index->status();
+    if ( status.loading )
+    {
+      mIndexStatusLabel->setText( tr( "Indexed: loading…" ) );
+      connect( index, &QgsAiWorkspaceIndex::loaded, this, &QgsAiSettingsDialog::refreshIndexStatusLabel, Qt::SingleShotConnection );
+      index->requestLoad();
+      return;
+    }
     mIndexStatusLabel->setText( tr( "Indexed: %1 file chunks, %2 layer chunks (last sync: %3)" )
                                   .arg( status.fileChunkCount )
                                   .arg( status.layerChunkCount )
@@ -3149,6 +3241,37 @@ bool QgsAiSettingsDialog::applySettings()
     if ( !mTrustRootForCheckbox.isEmpty() )
       QgsAiWorkspaceTrust::setState( mTrustRootForCheckbox, mTrustWorkspace->isChecked() ? QgsAiWorkspaceTrust::State::Trusted : QgsAiWorkspaceTrust::State::Untrusted );
 
+    // Workspace content goes to a remote embedding service only with the user's consent, asked
+    // once per service. Declining keeps indexing on this computer.
+    const QString embeddingProviderId = mEmbeddingProvider->currentData().toString();
+    if ( QgsAiEmbeddingProviderRegistry::isRemoteProviderId( embeddingProviderId ) && !QgsAiEmbeddingProviderRegistry::remoteEmbeddingConsented( embeddingProviderId ) )
+    {
+      const QString service = QgsAiEmbeddingProviderRegistry::displayNameForProviderId( embeddingProviderId );
+      const bool agreed = QMessageBox::question(
+                            this,
+                            tr( "Send workspace content to %1?" ).arg( service ),
+                            tr(
+                              "Indexing with %1 sends to that service:\n"
+                              "• the text of the files in the AI workspace (up to 500 files: notes, tables, JSON, SQL, project files);\n"
+                              "• sampled attribute values and bounding boxes of the project layers;\n"
+                              "• your chat questions, to search the index.\n\n"
+                              "The index itself stays on this computer. The local model sends nothing.\n\n"
+                              "Send workspace content to %1?"
+                            )
+                              .arg( service ),
+                            QMessageBox::Yes | QMessageBox::No,
+                            QMessageBox::No
+                          )
+                          == QMessageBox::Yes;
+      QgsAiEmbeddingProviderRegistry::setRemoteEmbeddingConsent( embeddingProviderId, agreed );
+      if ( !agreed )
+      {
+        const int local = mEmbeddingProvider->findData( QgsAiE5EmbeddingProvider::staticProviderId() );
+        if ( local >= 0 )
+          mEmbeddingProvider->setCurrentIndex( local );
+      }
+    }
+
     QgsAiEmbeddingProviderRegistry::setConfiguredProviderId( mEmbeddingProvider->currentData().toString() );
     if ( QgsAiEmbeddingProviderRegistry::isRemoteProviderId( mEmbeddingProvider->currentData().toString() ) )
     {
@@ -3160,6 +3283,17 @@ bool QgsAiSettingsDialog::applySettings()
         settings.setValue( embeddingModelKey, embeddingModelValue );
     }
     settings.setValue( u"strata/index/automatic"_s, mAutomaticIndexing->isChecked() );
+    settings.setValue( QgsAiIndexingThrottle::speedSettingsKey(), mIndexingSpeed->currentData().toString() );
+    settings.setValue( QgsAiIndexingThrottle::pauseOnBatterySettingsKey(), mPauseIndexingOnBattery->isChecked() );
+    settings.setValue( u"strata/index/include_remote_layers"_s, mIndexRemoteLayers->isChecked() );
+    QStringList excludedFolders;
+    for ( const QString &folder : mExcludedIndexFolders->text().split( ',' ) )
+    {
+      if ( !folder.trimmed().isEmpty() )
+        excludedFolders << folder.trimmed();
+    }
+    settings.setValue( u"strata/index/excluded_folders"_s, excludedFolders );
+    settings.setValue( u"strata/index/max_files"_s, mMaxIndexedFiles->value() );
     settings.setValue( u"strata/index/cloud_context_opt_in"_s, mCloudContextOptIn->isChecked() );
     settings.setValue( u"strata/privacy/metadata_only_ack"_s, mPrivacyMetadataOnly->isChecked() );
     settings.setValue( u"strata/telemetry/opt_in"_s, mTelemetryOptIn->isChecked() );
@@ -3202,40 +3336,13 @@ bool QgsAiSettingsDialog::applySettings()
       mEnableLayerIndexing->setChecked( false );
     }
 
-    // Gate first-time layer indexing so users explicitly acknowledge the local
-    // background work and local cache before it starts.
-    if ( layerIndexingChoice && QgsAiChatDockWidget::requiresLayerIndexingConsent() )
-    {
-      const auto choice = QMessageBox::question(
-        this,
-        tr( "Enable layer indexing" ),
-        QgsAiEmbeddingProviderRegistry::isRemoteProviderId( mEmbeddingProvider->currentData().toString() )
-          ? tr( "Enabling layer indexing means Strata will send sampled layer attributes and bounding boxes to the selected remote embedding provider and store the resulting index locally.\n\nProceed?" )
-          : tr( "Enabling layer indexing means Strata will process sampled layer attributes and bounding boxes on this computer and store the resulting index locally.\n\nProceed?" ),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No
-      );
-      if ( choice != QMessageBox::Yes )
-      {
-        layerIndexingChoice = false;
-        mEnableLayerIndexing->setChecked( false );
-      }
-      else
-      {
-        QgsAiChatDockWidget::recordLayerIndexingConsent();
-      }
-    }
-
     QgsSettings layerSettings;
     layerSettings.setValue( u"strata/index/enable_layer_indexing"_s, layerIndexingChoice );
     layerSettings.remove( u"geoai/index/enable_layer_indexing"_s );
     layerSettings.remove( u"qgis_ai/index/enable_layer_indexing"_s );
+    // Enabling schedules every layer by itself; keeping it on must not re-embed them all.
     if ( mLayerIndexCoordinator )
-    {
       mLayerIndexCoordinator->setEnabled( layerIndexingChoice && canUseEmbeddings );
-      if ( layerIndexingChoice && canUseEmbeddings )
-        mLayerIndexCoordinator->scheduleAllLayers();
-    }
   }
 
   if ( !errorMessages.isEmpty() )

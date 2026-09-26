@@ -51,6 +51,9 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
+  //! At most this many changed feature ids go back in a result, for "Show on map".
+  constexpr qsizetype CHANGED_IDS_SAMPLE = 200;
+
   enum class EditingRollbackType
   {
     RestoreGeometry,
@@ -981,21 +984,38 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
     }
   }
 
+  // Values are written a slice at a time: a large layer never freezes the window, and Stop
+  // undoes what was written so far, leaving the layer as it was.
   QHash<QgsFeatureId, QVariant> oldFieldValues;
   phaseTimer.restart();
-  for ( const PendingValue &pending : std::as_const( pendingValues ) )
+  int failedIndex = -1;
+  const QgsAiSliceResult applied = qgsAiApplyInSlices(
+    u"Writing calculated values"_s,
+    static_cast<int>( pendingValues.size() ),
+    [&]( int index ) {
+      if ( layerGuard.isNull() )
+        return false;
+      const PendingValue &pending = pendingValues.at( index );
+      if ( !layer->changeAttributeValue( pending.featureId, targetFieldIndex, pending.newValue, pending.oldValue, true ) )
+        return false;
+      oldFieldValues.insert( pending.featureId, pending.oldValue );
+      return true;
+    },
+    &failedIndex
+  );
+  qgsAiLogPerf( u"calculate_field"_s, u"apply"_s, phaseTimer.elapsed() );
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while the values were written."_s );
+  if ( applied != QgsAiSliceResult::Completed )
   {
-    if ( !layer->changeAttributeValue( pending.featureId, targetFieldIndex, pending.newValue, pending.oldValue, true ) )
-    {
-      layer->destroyEditCommand();
-      if ( startedEditing )
-        layer->rollBack();
-      return QgsAiToolResult::error( u"Could not write calculated value for feature_id %1."_s.arg( pending.featureId ) );
-    }
-    oldFieldValues.insert( pending.featureId, pending.oldValue );
+    layer->destroyEditCommand();
+    if ( startedEditing )
+      layer->rollBack();
+    if ( applied == QgsAiSliceResult::Canceled )
+      return QgsAiToolResult::canceledResult( u"Field calculation was stopped; the layer is unchanged."_s );
+    return QgsAiToolResult::error( u"Could not write calculated value for feature_id %1."_s.arg( pendingValues.at( failedIndex ).featureId ) );
   }
   layer->endEditCommand();
-  qgsAiLogPerf( u"calculate_field"_s, u"apply"_s, phaseTimer.elapsed() );
 
   phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
@@ -1012,17 +1032,25 @@ QgsAiToolResult QgsAiCalculateFieldTool::execute( const QJsonObject &args )
   const QString token = storeEditingRollback( rollback );
 
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Calculated field values from QGIS expression."_s );
+  diff.insert( u"summary"_s, u"Calculated %1 for %2 features of %3."_s.arg( fieldName ).arg( pendingValues.size() ).arg( layer->name() ) );
   diff.insert( u"layer_id"_s, layerId );
   diff.insert( u"field_name"_s, fieldName );
   diff.insert( u"expression"_s, expressionText );
   diff.insert( u"updated_feature_count"_s, pendingValues.size() );
   diff.insert( u"created_field"_s, createField );
 
+  // Which features changed, for "Show on map" in the chat (a sample on large layers).
+  QJsonArray changedIds;
+  for ( int i = 0; i < std::min<qsizetype>( pendingValues.size(), CHANGED_IDS_SAMPLE ); ++i )
+    changedIds.append( static_cast<qint64>( pendingValues.at( i ).featureId ) );
+
   QJsonObject output;
   output.insert( u"layer_id"_s, layerId );
   output.insert( u"field_name"_s, fieldName );
   output.insert( u"updated_feature_count"_s, pendingValues.size() );
+  output.insert( u"changed_feature_ids"_s, changedIds );
+  if ( pendingValues.size() > CHANGED_IDS_SAMPLE )
+    output.insert( u"changed_feature_ids_truncated"_s, true );
   output.insert( u"created_field"_s, createField );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );

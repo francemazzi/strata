@@ -18,8 +18,10 @@
 
 #include "qgis_app.h"
 #include "qgsaiagentsessionmanager.h"
+#include "qgsaigissuggestionengine.h"
 #include "qgsdockwidget.h"
 
+#include <QElapsedTimer>
 #include <QList>
 #include <QPointer>
 
@@ -38,10 +40,9 @@ class QTimer;
 class QToolButton;
 class QVBoxLayout;
 
-struct QgsAiGisSuggestion;
-
 class QgsAiChatPromptEdit;
 class QgsAiDiscoveryController;
+class QgsAiIndexingActivity;
 class QgsAiLayerIndexCoordinator;
 class QgsAiModelRouter;
 class QgsAiPlanClient;
@@ -57,23 +58,24 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
     void setDiscoveryController( QgsAiDiscoveryController *controller );
     void setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *coordinator );
+    //! Shows what background indexing is doing in the chat header, with pause and resume.
+    void setIndexingActivity( QgsAiIndexingActivity *activity );
+
+    //! Puts the cursor in the message box, ready to type (the keyboard shortcut of the chat).
+    void focusPrompt();
+
+    //! Messages typed while the assistant works, sent in order when it finishes.
+    int queuedMessageCount() const { return static_cast<int>( mQueuedMessages.size() ); }
 
   signals:
     void embeddingProviderSettingsChanged();
+    //! "Show on map" on a tool card: zoom to and flash these features of the layer, or the whole layer when none.
+    void showOnMapRequested( const QString &layerId, const QList<qint64> &featureIds );
 
   public slots:
     void rebuildHistoryMenu();
-
-  public:
-    /**
-     * Returns true when the user has not yet consented to layer indexing
-     * (i.e. attributes + bounding boxes being processed for retrieval).
-     * Callers must surface a confirmation dialog before flipping the toggle on.
-     */
-    static bool requiresLayerIndexingConsent();
-
-    //! Persists the user's explicit acceptance so the consent dialog never re-appears.
-    static void recordLayerIndexingConsent();
+    //! The map changed (view, active layer, selection): updates the map context pill shortly after.
+    void scheduleMapContextRefresh();
 
   protected:
     bool eventFilter( QObject *watched, QEvent *event ) override;
@@ -104,6 +106,37 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void ensureWorkspaceTrustDecision();
     void appendTranscriptMessage( const QString &role, const QString &content );
     void appendTranscriptMessage( const QgsAiChatMessage &message );
+    //! Undo button or "cannot be undone" note under a tool result card.
+    QWidget *createToolResultActionsWidget( const QgsAiChatMessage &message );
+    //! Shows "Undo this turn" on the user messages whose turn has changes that can be undone.
+    void refreshUndoTurnButtons();
+    void undoToolFromChat( const QString &toolMessageId );
+    //! Copy on assistant messages; Copy, Edit and Retry on user messages.
+    QHBoxLayout *createMessageActionsRow( const QgsAiChatMessage &message, QWidget *card );
+    void editAndResendFromChat( const QString &messageId, const QString &text );
+    //! Sends a prepared message now (after the workspace trust question when still undecided).
+    void dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles );
+    void sendNextQueuedMessage();
+    void refreshQueueBar();
+    void refreshMapContextPill();
+    //! Suggested first prompts for the open project while the chat is empty.
+    void refreshEmptyState();
+    //! Prompts that work on the open project (its health checks first, then its layers).
+    static QStringList suggestedPrompts( QgsProject *project );
+    void retryFromChat();
+    //! TRUE when the transcript is scrolled to (or near) its end.
+    bool isTranscriptAtBottom() const;
+    void renderStreamingText();
+    void undoTurnFromChat( const QString &messageId );
+    //! The card of the tool running now: what it does, for how long, and Stop.
+    void showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args );
+    void updateLiveToolProgress( const QString &callId, double percent, const QString &label );
+    void closeLiveToolCard( const QString &callId );
+    //! The question "may this tool run?" as a card in the chat, with Accept and Reject.
+    void showToolApprovalCard( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel );
+    void answerToolApproval( bool approved );
+    //! One line describing a tool call for the user ("calculate_field · Parcels · AREA").
+    static QString toolCallSummary( const QString &toolName, const QVariantMap &args );
     QString renderToolMessageMarkdown( const QgsAiChatMessage &message ) const;
     static QString renderMarkdown( const QString &md );
     QWidget *createMessageWidget(
@@ -162,6 +195,8 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     void maybeShowWelcomeBanner();
     void sendGisSuggestionToChat( const QgsAiGisSuggestion &suggestion );
     void dismissGisSuggestion( const QString &suggestionId );
+    void showGisSuggestions( const QList<QgsAiGisSuggestion> &suggestions );
+    void refreshIndexingIndicator();
 
     struct AttachedFile
     {
@@ -177,6 +212,10 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QPointer<QgsAiPlanClient> mPlanClient;
     QPointer<QgsAiReviewPatchEngine> mReviewEngine;
     QPointer<QgsAiLayerIndexCoordinator> mLayerIndexCoordinator;
+    QPointer<QgsAiIndexingActivity> mIndexingActivity;
+    QFrame *mIndexingIndicator = nullptr;
+    QToolButton *mIndexingStatusButton = nullptr;
+    QToolButton *mIndexingPauseButton = nullptr;
 
     QgsScrollArea *mTranscriptScrollArea = nullptr;
     QWidget *mTranscriptContainer = nullptr;
@@ -201,6 +240,9 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QWidget *mGisCardBody = nullptr;
     QVBoxLayout *mGisCardBodyLayout = nullptr;
     QTimer *mGisCardRefreshTimer = nullptr;
+    QPointer<QgsAiGisSuggestionTask> mGisSuggestionTask;
+    bool mGisSuggestionRefreshPending = false;
+    QList<QgsAiGisSuggestion> mGisSuggestions;
 
     QFrame *mErrorBanner = nullptr;
     QLabel *mErrorTitleLabel = nullptr;
@@ -219,7 +261,32 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
 
     bool mStreamingInProgress = false;
     QTextEdit *mStreamingTextEdit = nullptr;
+    //! Raw text streamed so far, rendered as markdown every 80 ms.
+    QString mStreamingText;
+    QTimer *mStreamingRenderTimer = nullptr;
     bool mRequestRunning = false;
+
+    struct QueuedMessage
+    {
+        QString text;
+        QList<QgsAiChatContextFile> contextFiles;
+    };
+    QList<QueuedMessage> mQueuedMessages;
+    QPointer<QFrame> mEmptyState;
+    QPointer<QFrame> mApprovalCard;
+    QString mApprovalCallId;
+    QToolButton *mMapContextPill = nullptr;
+    QTimer *mMapContextTimer = nullptr;
+    QWidget *mQueueBar = nullptr;
+    QLabel *mQueueLabel = nullptr;
+
+    QPointer<QFrame> mLiveToolCard;
+    QLabel *mLiveToolElapsed = nullptr;
+    QLabel *mLiveToolProgress = nullptr;
+    QTimer *mLiveToolTimer = nullptr;
+    QElapsedTimer mLiveToolClock;
+    QString mLiveToolCallId;
+    QList<QPointer<QPushButton>> mUndoTurnButtons;
 };
 
 #endif // QGSAICHATDOCKWIDGET_H

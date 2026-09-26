@@ -25,6 +25,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QEventLoop>
+#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPointer>
@@ -51,7 +52,16 @@ namespace QgsAiCredentialStoreInternal
   bool loaded = false;
   bool loading = false;
   QList<std::function<void()>> waiters;
-  const QStringList keys = { u"ai/provider/openai/apiKey"_s, u"ai/provider/openrouter/apiKey"_s, u"ai/provider/claude/apiKey"_s, u"ai/provider/claude/login/refreshToken"_s, u"ai/provider/claude/login/accessToken"_s, u"ai/provider/claude/login/expiresAt"_s, u"ai/provider/codex/oauth/refreshToken"_s, u"ai/provider/plan/token"_s };
+  const QStringList keys = {
+    u"ai/provider/openai/apiKey"_s,
+    u"ai/provider/openrouter/apiKey"_s,
+    u"ai/provider/claude/apiKey"_s,
+    u"ai/provider/claude/login/refreshToken"_s,
+    u"ai/provider/claude/login/accessToken"_s,
+    u"ai/provider/claude/login/expiresAt"_s,
+    u"ai/provider/codex/oauth/refreshToken"_s,
+    u"ai/provider/plan/token"_s
+  };
   QString presenceKey( const QString &key )
   {
     return key + u"_inKeychain"_s;
@@ -75,6 +85,29 @@ namespace QgsAiCredentialStoreInternal
     if ( qEnvironmentVariable( "QGIS_CONTINUOUS_INTEGRATION_RUN" ) == "true"_L1 )
     {
       QTimer::singleShot( 0, qApp, [callback]() { callback( {} ); } );
+      return;
+    }
+    // Scripted runs (scripts/ai/run_scenarios.py) keep secrets for the session instead of
+    // reading or writing the system keychain.
+    if ( qEnvironmentVariableIsSet( "STRATA_AI_NO_KEYCHAIN" ) )
+    {
+      static QHash<QString, QString> sessionSecrets;
+      Store::BackendResult result;
+      if ( operation == Store::Operation::Read )
+      {
+        result.notFound = !sessionSecrets.contains( key );
+        result.ok = !result.notFound;
+        result.value = sessionSecrets.value( key );
+      }
+      else
+      {
+        if ( operation == Store::Operation::Write )
+          sessionSecrets.insert( key, value );
+        else
+          sessionSecrets.remove( key );
+        result.ok = true;
+      }
+      QTimer::singleShot( 0, qApp, [callback, result]() { callback( result ); } );
       return;
     }
     QKeychain::Job *job = nullptr;

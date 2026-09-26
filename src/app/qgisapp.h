@@ -174,6 +174,7 @@ class QgsAiChatHistoryStore;
 class QgsAiChatDockWidget;
 class QgsAiEmbeddingProvider;
 class QgsAiFileContextProvider;
+class QgsAiIndexingActivity;
 class QgsAiIndexingScheduler;
 class QgsAiLayerIndexCoordinator;
 class QgsAiMessageLogBuffer;
@@ -2819,10 +2820,12 @@ class APP_EXPORT QgisApp : public QMainWindow, private Ui::MainWindow
     std::unique_ptr<QgsAiModelRouter> mAiModelRouter;
     std::unique_ptr<QgsAiFileContextProvider> mAiFileContextProvider;
     std::unique_ptr<QgsAiReviewPatchEngine> mAiReviewPatchEngine;
-    std::unique_ptr<QgsAiEmbeddingProvider> mAiEmbeddingProvider;
+    //! Shared with the index tasks using it, so a provider change never frees it under them.
+    std::shared_ptr<QgsAiEmbeddingProvider> mAiEmbeddingProvider;
     std::unique_ptr<QgsAiWorkspaceIndex> mAiWorkspaceIndex;
     std::unique_ptr<QgsAiIndexingScheduler> mAiIndexingScheduler;
     std::unique_ptr<QgsAiLayerIndexCoordinator> mAiLayerIndexCoordinator;
+    std::unique_ptr<QgsAiIndexingActivity> mAiIndexingActivity;
     std::unique_ptr<QgsAiMessageLogBuffer> mAiMessageLogBuffer;
     std::unique_ptr<QgsAiToolRegistry> mAiToolRegistry;
     std::unique_ptr<QgsAiAgentSessionManager> mAiSessionManager;

@@ -194,6 +194,9 @@ namespace
     return true;
   }
 
+  //! At most this many changed feature ids go back in a result, for "Show on map".
+  constexpr qsizetype BATCH_CHANGED_IDS_SAMPLE = 200;
+
   QJsonArray featureIdsJson( const QgsFeatureIds &ids )
   {
     QList<QgsFeatureId> values = ids.values();
@@ -481,22 +484,37 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   if ( startedEditing && !layer->startEditing() )
     return QgsAiToolResult::error( u"Cannot start editing session for layer: %1"_s.arg( layer->name() ) );
 
+  // Written a slice at a time: a large layer never freezes the window, and Stop undoes what was
+  // written so far, leaving the layer as it was.
   QHash<QgsFeatureId, QVariant> oldValues;
   layer->beginEditCommand( u"AI batch attribute update"_s );
   phaseTimer.restart();
-  for ( const PendingUpdate &pending : std::as_const( pendingUpdates ) )
+  int failedIndex = -1;
+  const QgsAiSliceResult applied = qgsAiApplyInSlices(
+    u"Updating attributes"_s,
+    static_cast<int>( pendingUpdates.size() ),
+    [&]( int index ) {
+      if ( layerGuard.isNull() )
+        return false;
+      const PendingUpdate &pending = pendingUpdates.at( index );
+      oldValues.insert( pending.featureId, pending.oldValue );
+      return layer->changeAttributeValue( pending.featureId, fieldIndex, convertedValue, pending.oldValue, true );
+    },
+    &failedIndex
+  );
+  qgsAiLogPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
+  if ( layerGuard.isNull() )
+    return QgsAiToolResult::error( u"Layer was removed while the values were written."_s );
+  if ( applied != QgsAiSliceResult::Completed )
   {
-    oldValues.insert( pending.featureId, pending.oldValue );
-    if ( !layer->changeAttributeValue( pending.featureId, fieldIndex, convertedValue, pending.oldValue, true ) )
-    {
-      layer->destroyEditCommand();
-      if ( startedEditing )
-        layer->rollBack();
-      return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( pending.featureId ) );
-    }
+    layer->destroyEditCommand();
+    if ( startedEditing )
+      layer->rollBack();
+    if ( applied == QgsAiSliceResult::Canceled )
+      return QgsAiToolResult::canceledResult( u"Batch attribute update was stopped; the layer is unchanged."_s );
+    return QgsAiToolResult::error( u"Could not update feature_id %1."_s.arg( pendingUpdates.at( failedIndex ).featureId ) );
   }
   layer->endEditCommand();
-  qgsAiLogPerf( u"batch_update_attributes"_s, u"apply"_s, phaseTimer.elapsed() );
 
   phaseTimer.restart();
   if ( startedEditing && !layer->commitChanges() )
@@ -510,16 +528,24 @@ QgsAiToolResult QgsAiBatchUpdateAttributesTool::execute( const QJsonObject &args
   const QString token = storeRollback( rollback );
 
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Batch-updated feature attributes."_s );
+  diff.insert( u"summary"_s, u"Updated %1 for %2 features of %3."_s.arg( fieldName ).arg( pendingUpdates.size() ).arg( layer->name() ) );
   diff.insert( u"layer_id"_s, layer->id() );
   diff.insert( u"field_name"_s, fieldName );
   diff.insert( u"updated_feature_count"_s, pendingUpdates.size() );
   diff.insert( u"filter_expression"_s, filterExpression );
 
+  // Which features changed, for "Show on map" in the chat (a sample on large layers).
+  QJsonArray changedIds;
+  for ( int i = 0; i < std::min<qsizetype>( pendingUpdates.size(), BATCH_CHANGED_IDS_SAMPLE ); ++i )
+    changedIds.append( static_cast<qint64>( pendingUpdates.at( i ).featureId ) );
+
   QJsonObject output;
   output.insert( u"layer_id"_s, layer->id() );
   output.insert( u"field_name"_s, fieldName );
   output.insert( u"updated_feature_count"_s, pendingUpdates.size() );
+  output.insert( u"changed_feature_ids"_s, changedIds );
+  if ( pendingUpdates.size() > BATCH_CHANGED_IDS_SAMPLE )
+    output.insert( u"changed_feature_ids_truncated"_s, true );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, attributeTableRollbackJson( token, u"restore_batch_attribute_values"_s ) );

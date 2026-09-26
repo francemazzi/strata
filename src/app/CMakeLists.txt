@@ -316,7 +316,10 @@ if (ENABLE_AI_ASSISTANT)
     ai/index/qgsaiembeddingclient.cpp
     ai/index/qgsaiembeddingprovider.cpp
     ai/index/qgsaicloudindexclient.cpp
+    ai/index/qgsaifilesummarizer.cpp
+    ai/index/qgsaiindexingactivity.cpp
     ai/index/qgsaiindexingscheduler.cpp
+    ai/index/qgsaiindexingthrottle.cpp
     ai/index/qgsailayerchunker.cpp
     ai/index/qgsailayerindexcoordinator.cpp
     ai/index/qgsaiworkspaceindex.cpp
@@ -775,6 +778,10 @@ endif()
 
 if (APPLE)
   target_link_libraries(qgis_app PUBLIC ${APP_SERVICES_LIBRARY})
+  if (ENABLE_AI_ASSISTANT)
+    # AI indexing pauses on battery power (IOPSCopyPowerSourcesInfo)
+    target_link_libraries(qgis_app PRIVATE "-framework IOKit" "-framework CoreFoundation")
+  endif()
 endif()
 
 if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)

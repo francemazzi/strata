@@ -34,7 +34,12 @@ class APP_EXPORT QgsAiWebSearchToolBase : public QgsAiTool
     QString availabilityReason() const override;
 
   protected:
-    QgsAiToolResult postSearch( const QString &path, const QJsonObject &body, int timeoutMs = 20000 ) const;
+    /**
+     * Posts \a body to the Strata Plan API. With an \a idempotencyKey, the gateway runs the request
+     * once per key. \a outcomeUnknown, when given, tells whether the gateway may have run the request
+     * although no answer arrived (Stop, timeout, a dropped connection or a request still running).
+     */
+    QgsAiToolResult postSearch( const QString &path, const QJsonObject &body, int timeoutMs = 20000, const QString &idempotencyKey = QString(), bool *outcomeUnknown = nullptr ) const;
 
     QgsAiModelRouter *mRouter = nullptr;
 };

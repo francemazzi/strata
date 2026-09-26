@@ -5,15 +5,22 @@
   copyright            : (C) 2026
 ***************************************************************************/
 
+#include <memory>
+
 #include "ai/qgsaigissuggestionengine.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgsfeature.h"
+#include "qgsgeometry.h"
 #include "qgsproject.h"
 #include "qgssettings.h"
+#include "qgstaskmanager.h"
 #include "qgstest.h"
+#include "qgsvectordataprovider.h"
 #include "qgsvectorlayer.h"
 
 #include <QCryptographicHash>
 #include <QString>
+#include <QThread>
 
 using namespace Qt::StringLiterals;
 
@@ -30,8 +37,12 @@ class TestQgsAiGisSuggestionEngine : public QObject
     void formatHealthBlockCapsAndFullVariant();
     void promptBlockRespectsGlobalToggle();
     void settingsKeysAreStable();
+    void snapshotDefersTheGeometrySampleToAnyThread();
+    void promptBlockUsesRememberedGeometrySamples();
+    void taskSamplesGeometriesInTheBackground();
 
   private:
+    static QgsVectorLayer *addLayerWithInvalidPolygon();
     static QList<QgsAiGisSuggestion> idsToSuggestions( int count );
     static bool containsId( const QList<QgsAiGisSuggestion> &suggestions, const QString &idPrefix, QgsAiGisSuggestion *match = nullptr );
 };
@@ -44,6 +55,18 @@ void TestQgsAiGisSuggestionEngine::init()
 void TestQgsAiGisSuggestionEngine::cleanup()
 {
   QgsProject::instance()->clear();
+  QgsAiGisSuggestionEngine::rememberGeometrySamples( QgsAiGisProjectSnapshot() );
+}
+
+QgsVectorLayer *TestQgsAiGisSuggestionEngine::addLayerWithInvalidPolygon()
+{
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:3857&field=name:string"_s, u"Bow ties"_s, u"memory"_s );
+  QgsFeature feature( layer->fields() );
+  feature.setAttribute( 0, u"self-intersecting"_s );
+  feature.setGeometry( QgsGeometry::fromWkt( u"POLYGON((0 0, 10 10, 10 0, 0 10, 0 0))"_s ) );
+  layer->dataProvider()->addFeature( feature );
+  QgsProject::instance()->addMapLayer( layer );
+  return layer;
 }
 
 QList<QgsAiGisSuggestion> TestQgsAiGisSuggestionEngine::idsToSuggestions( int count )
@@ -171,6 +194,62 @@ void TestQgsAiGisSuggestionEngine::settingsKeysAreStable()
   const QString unsavedHash = QString::fromLatin1( QCryptographicHash::hash( QByteArrayLiteral( "unsaved" ), QCryptographicHash::Sha1 ).toHex() );
   QCOMPARE( QgsAiGisSuggestionEngine::projectEnabledSettingsKey( QString() ), u"strata/gis_tab/project_enabled/%1"_s.arg( unsavedHash ) );
   QCOMPARE( QgsAiGisSuggestionEngine::dismissedSettingsKey( QString() ), u"strata/gis_tab/dismissed/%1"_s.arg( unsavedHash ) );
+}
+
+void TestQgsAiGisSuggestionEngine::snapshotDefersTheGeometrySampleToAnyThread()
+{
+  QgsVectorLayer *layer = addLayerWithInvalidPolygon();
+
+  QgsAiGisProjectSnapshot snapshot = QgsAiGisSuggestionEngine::snapshotProject( QgsProject::instance(), true );
+  QCOMPARE( snapshot.layers.size(), 1 );
+  QVERIFY( snapshot.layers.first().source );
+  QVERIFY( !snapshot.layers.first().geometrySampled );
+
+  // The layer is gone before the sample is taken: the snapshot still owns what it needs.
+  QgsProject::instance()->removeMapLayer( layer );
+
+  QList<QgsAiGisSuggestion> suggestions;
+  std::unique_ptr<QThread> worker( QThread::create( [&snapshot, &suggestions]() { suggestions = QgsAiGisSuggestionEngine::evaluate( snapshot ); } ) );
+  worker->start();
+  QVERIFY( worker->wait( 10000 ) );
+
+  QVERIFY( containsId( suggestions, u"invalid-geometry:"_s ) );
+  QVERIFY( !snapshot.layers.first().source );
+  QVERIFY( snapshot.layers.first().geometrySampled );
+  QCOMPARE( snapshot.layers.first().sampledFeatures, 1 );
+}
+
+void TestQgsAiGisSuggestionEngine::promptBlockUsesRememberedGeometrySamples()
+{
+  addLayerWithInvalidPolygon();
+
+  // The prompt reads no features: without a completed check it knows nothing about geometries.
+  QVERIFY( !QgsAiGisSuggestionEngine::promptHealthBlockForProject( QgsProject::instance() ).contains( u"Invalid geometry detected"_s ) );
+  QVERIFY( !containsId( QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject::instance() ), u"invalid-geometry:"_s ) );
+
+  QgsAiGisProjectSnapshot snapshot = QgsAiGisSuggestionEngine::snapshotProject( QgsProject::instance(), true );
+  QgsAiGisSuggestionEngine::evaluate( snapshot );
+  QgsAiGisSuggestionEngine::rememberGeometrySamples( snapshot );
+
+  QVERIFY( QgsAiGisSuggestionEngine::promptHealthBlockForProject( QgsProject::instance() ).contains( u"Invalid geometry detected"_s ) );
+  QVERIFY( containsId( QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject::instance() ), u"invalid-geometry:"_s ) );
+}
+
+void TestQgsAiGisSuggestionEngine::taskSamplesGeometriesInTheBackground()
+{
+  addLayerWithInvalidPolygon();
+
+  QgsAiGisSuggestionTask *task = new QgsAiGisSuggestionTask( QgsAiGisSuggestionEngine::snapshotProject( QgsProject::instance(), true ) );
+  QVERIFY( task->flags() & QgsTask::Hidden );
+  bool completed = false;
+  QList<QgsAiGisSuggestion> suggestions;
+  connect( task, &QgsTask::taskCompleted, this, [&completed, &suggestions, task]() {
+    completed = true;
+    suggestions = task->suggestions();
+  } );
+  QgsApplication::taskManager()->addTask( task );
+  QTRY_VERIFY_WITH_TIMEOUT( completed, 10000 );
+  QVERIFY( containsId( suggestions, u"invalid-geometry:"_s ) );
 }
 
 QGSTEST_MAIN( TestQgsAiGisSuggestionEngine )

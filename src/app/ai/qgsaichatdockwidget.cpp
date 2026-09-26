@@ -25,8 +25,10 @@
 
 #include "ai/index/qgsaicloudindexclient.h"
 #include "ai/index/qgsaiembeddingprovider.h"
+#include "ai/index/qgsaiindexingactivity.h"
 #include "ai/index/qgsailayerindexcoordinator.h"
 #include "ai/index/qgsaiworkspaceindex.h"
+#include "ai/tools/qgsaitaskrunner.h"
 #include "layers/qgsbatchedlayeraddcontroller.h"
 #include "qgisapp.h"
 #include "qgsaichatpromptedit.h"
@@ -53,12 +55,14 @@
 #include "qgsmessagebaritem.h"
 #include "qgsnetworkaccessmanager.h"
 #include "qgspdfrenderer.h"
+#include "qgsmaplayer.h"
 #include "qgsproject.h"
 #include "qgsrasterlayer.h"
 #include "qgsscrollarea.h"
 #include "qgssettings.h"
 #include "qgstaskmanager.h"
 #include "qgsvectordataprovider.h"
+#include "qgslayertree.h"
 #include "qgsvectorlayer.h"
 #include "qgswkbtypes.h"
 
@@ -67,6 +71,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QClipboard>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QColor>
@@ -116,6 +121,7 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QSet>
+#include <QShortcut>
 #include <QSize>
 #include <QSizePolicy>
 #include <QStandardItemModel>
@@ -144,12 +150,12 @@ namespace
   QString attachmentStateLabel( const QString &state )
   {
     if ( state == "sent"_L1 )
-      return QObject::tr( "inviato" );
+      return QObject::tr( "sent" );
     if ( state == "omitted"_L1 )
-      return QObject::tr( "omesso" );
+      return QObject::tr( "left out" );
     if ( state == "added"_L1 )
-      return QObject::tr( "aggiunto a KB" );
-    return QObject::tr( "richiede consenso" );
+      return QObject::tr( "added to the knowledge base" );
+    return QObject::tr( "needs consent" );
   }
 
   QString cappedFileText( const QString &path, qint64 maxBytes )
@@ -656,7 +662,12 @@ namespace
       visible += content.mid( lastEnd, match.capturedStart() - lastEnd );
 
       const QString language = match.captured( 1 ).trimmed();
-      if ( language != "qgis_ai_questions"_L1 )
+      if ( language == "strata_result"_L1 )
+      {
+        // The whole tool result, closed by default under the readable summary.
+        result.technicalSections << TechnicalSection { QObject::tr( "Result details" ), match.captured( 2 ), u"json"_s };
+      }
+      else if ( language != "qgis_ai_questions"_L1 )
       {
         TechnicalSection section;
         section.language = language;
@@ -776,6 +787,30 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   topBar->addStretch( 1 );
   layout->addLayout( topBar );
 
+  // Background indexing, visible whenever it runs, waits, is paused or cannot run.
+  mIndexingIndicator = new QFrame( container );
+  mIndexingIndicator->setObjectName( u"aiIndexingIndicator"_s );
+  QHBoxLayout *indicatorLayout = new QHBoxLayout( mIndexingIndicator );
+  indicatorLayout->setContentsMargins( 4, 0, 4, 0 );
+  indicatorLayout->setSpacing( 4 );
+  mIndexingStatusButton = new QToolButton( mIndexingIndicator );
+  mIndexingStatusButton->setObjectName( u"aiIndexingStatusButton"_s );
+  mIndexingStatusButton->setAutoRaise( true );
+  mIndexingStatusButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
+  mIndexingStatusButton->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Preferred );
+  indicatorLayout->addWidget( mIndexingStatusButton, 1 );
+  mIndexingPauseButton = new QToolButton( mIndexingIndicator );
+  mIndexingPauseButton->setObjectName( u"aiIndexingPauseButton"_s );
+  mIndexingPauseButton->setAutoRaise( true );
+  indicatorLayout->addWidget( mIndexingPauseButton );
+  mIndexingIndicator->setVisible( false );
+  layout->addWidget( mIndexingIndicator );
+  connect( mIndexingStatusButton, &QToolButton::clicked, this, [this]() { openProviderSettingsSection( u"indexing"_s ); } );
+  connect( mIndexingPauseButton, &QToolButton::clicked, this, [this]() {
+    if ( mIndexingActivity )
+      mIndexingActivity->setPaused( !mIndexingActivity->isPaused() );
+  } );
+
   mTranscriptScrollArea = new QgsScrollArea( container );
   mTranscriptScrollArea->setObjectName( u"aiTranscriptScrollArea"_s );
   mTranscriptScrollArea->setWidgetResizable( true );
@@ -842,6 +877,11 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mErrorActionButton = new QPushButton( mErrorBanner );
   mErrorActionButton->setObjectName( u"aiRequestErrorAction"_s );
   errorActions->addWidget( mErrorActionButton );
+  QPushButton *retryButton = new QPushButton( tr( "Retry" ), mErrorBanner );
+  retryButton->setObjectName( u"aiRequestErrorRetry"_s );
+  retryButton->setToolTip( tr( "Send the last message again." ) );
+  connect( retryButton, &QPushButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
+  errorActions->addWidget( retryButton );
   errorActions->addStretch( 1 );
   QPushButton *dismissErrorButton = new QPushButton( tr( "Dismiss" ), mErrorBanner );
   dismissErrorButton->setObjectName( u"aiRequestErrorDismiss"_s );
@@ -900,6 +940,46 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mFileContextChipLayout->addStretch( 1 );
   mFileContextChipRow->setVisible( false );
   layout->addWidget( mFileContextChipRow );
+
+  // What the model gets about the map with the next message; a click leaves it out.
+  mMapContextPill = new QToolButton( container );
+  mMapContextPill->setObjectName( u"aiMapContextPill"_s );
+  mMapContextPill->setCheckable( true );
+  mMapContextPill->setChecked( true );
+  mMapContextPill->setAutoRaise( true );
+  mMapContextPill->setToolButtonStyle( Qt::ToolButtonTextOnly );
+  mMapContextPill->setStyleSheet(
+    u"QToolButton#aiMapContextPill { color: palette(window-text); background: palette(alternate-base); border: 0; border-radius: 9px; padding: 2px 8px; } "
+    "QToolButton#aiMapContextPill:!checked { color: palette(mid); background: transparent; text-decoration: line-through; }"_s
+  );
+  mMapContextPill->setVisible( false );
+  connect( mMapContextPill, &QToolButton::toggled, this, [this]( bool included ) {
+    if ( mSessionManager )
+      mSessionManager->setMapContextIncluded( included );
+    refreshMapContextPill();
+  } );
+  layout->addWidget( mMapContextPill, 0, Qt::AlignLeft );
+
+  // Messages typed while the assistant works wait here and leave when it finishes.
+  mQueueBar = new QWidget( container );
+  mQueueBar->setObjectName( u"aiQueueBar"_s );
+  QHBoxLayout *queueLayout = new QHBoxLayout( mQueueBar );
+  queueLayout->setContentsMargins( 0, 0, 0, 0 );
+  mQueueLabel = new QLabel( mQueueBar );
+  mQueueLabel->setObjectName( u"aiQueueLabel"_s );
+  mQueueLabel->setStyleSheet( u"color: palette(mid);"_s );
+  queueLayout->addWidget( mQueueLabel, 1 );
+  QToolButton *cancelQueue = new QToolButton( mQueueBar );
+  cancelQueue->setObjectName( u"aiQueueCancelButton"_s );
+  cancelQueue->setText( tr( "Cancel" ) );
+  cancelQueue->setAutoRaise( true );
+  connect( cancelQueue, &QToolButton::clicked, this, [this]() {
+    mQueuedMessages.clear();
+    refreshQueueBar();
+  } );
+  queueLayout->addWidget( cancelQueue );
+  mQueueBar->setVisible( false );
+  layout->addWidget( mQueueBar );
 
   mInputTextEdit = new QgsAiChatPromptEdit( container );
   mInputTextEdit->setObjectName( u"aiPromptInput"_s );
@@ -1071,6 +1151,24 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
     connect( mSessionManager, &QgsAiAgentSessionManager::requestStateChanged, this, &QgsAiChatDockWidget::updateRuntimeState );
     connect( mSessionManager, &QgsAiAgentSessionManager::requestRunningChanged, this, &QgsAiChatDockWidget::setRequestRunning );
     connect( mSessionManager, &QgsAiAgentSessionManager::historyReplaced, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolStarted, this, &QgsAiChatDockWidget::showLiveToolCard );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolProgress, this, &QgsAiChatDockWidget::updateLiveToolProgress );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolFinished, this, [this]( const QString &callId, bool, qint64 ) { closeLiveToolCard( callId ); } );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolCallsUndone, this, &QgsAiChatDockWidget::reloadTranscriptFromHistory );
+    connect( mSessionManager, &QgsAiAgentSessionManager::toolApprovalRequested, this, &QgsAiChatDockWidget::showToolApprovalCard );
+    // The suggested prompts follow the layers of the open project, once a burst of changes
+    // (a project with 100 layers opening) is over, and only while the chat is visible.
+    QTimer *emptyStateTimer = new QTimer( this );
+    emptyStateTimer->setSingleShot( true );
+    emptyStateTimer->setInterval( 300 );
+    connect( emptyStateTimer, &QTimer::timeout, this, [this]() {
+      if ( isVisible() )
+        refreshEmptyState();
+    } );
+    const auto scheduleEmptyState = [emptyStateTimer]() { emptyStateTimer->start(); };
+    connect( QgsProject::instance(), &QgsProject::layersAdded, this, scheduleEmptyState );
+    connect( QgsProject::instance(), &QgsProject::layersRemoved, this, scheduleEmptyState );
+    connect( QgsProject::instance(), &QgsProject::cleared, this, scheduleEmptyState );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionUsageChanged, this, &QgsAiChatDockWidget::updateSessionUsage );
     connect( mSessionManager, &QgsAiAgentSessionManager::sessionListChanged, this, &QgsAiChatDockWidget::rebuildHistoryMenu );
   }
@@ -1113,8 +1211,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   } );
 
   // Suggestions are recomputed when the project changes shape; the debounce
-  // matters because the collector samples features (up to 200 per vector layer)
-  // and layer batches would otherwise stall the UI.
+  // groups layer batches into one check, which samples features (up to 200 per
+  // vector layer) on a worker thread.
   mGisCardRefreshTimer = new QTimer( this );
   mGisCardRefreshTimer->setSingleShot( true );
   mGisCardRefreshTimer->setInterval( 1500 );
@@ -1474,9 +1572,365 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
   if ( !messageWidget || !mTranscriptLayout )
     return;
 
+  if ( QVBoxLayout *cardLayout = qobject_cast<QVBoxLayout *>( messageWidget->layout() ) )
+  {
+    if ( message.role == QgsAiChatRole::Tool )
+    {
+      if ( QWidget *actions = createToolResultActionsWidget( message ) )
+        cardLayout->addWidget( actions );
+    }
+    else if ( message.role == QgsAiChatRole::Assistant && !message.content.trimmed().isEmpty() && message.metadata.value( u"ui_kind"_s ).toString() != "undo_note"_L1 )
+    {
+      cardLayout->addLayout( createMessageActionsRow( message, messageWidget ) );
+    }
+    if ( message.role == QgsAiChatRole::User )
+    {
+      QHBoxLayout *row = createMessageActionsRow( message, messageWidget );
+      // Shown once the turn has changes that can be undone (refreshUndoTurnButtons).
+      QPushButton *undoTurn = new QPushButton( tr( "Undo this turn" ), messageWidget );
+      undoTurn->setObjectName( u"aiUndoTurnButton"_s );
+      undoTurn->setToolTip( tr( "Undo every change the assistant made in answer to this message." ) );
+      undoTurn->setProperty( "message_id", message.id );
+      undoTurn->setVisible( false );
+      undoTurn->setStyleSheet( u"QPushButton#aiUndoTurnButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
+      const QString messageId = message.id;
+      connect( undoTurn, &QPushButton::clicked, this, [this, messageId]() { undoTurnFromChat( messageId ); } );
+      row->addWidget( undoTurn );
+      cardLayout->addLayout( row );
+      mUndoTurnButtons << undoTurn;
+    }
+  }
+
+  const bool follow = message.role == QgsAiChatRole::User || isTranscriptAtBottom();
+  if ( mEmptyState )
+  {
+    mTranscriptLayout->removeWidget( mEmptyState );
+    mEmptyState->deleteLater();
+    mEmptyState = nullptr;
+  }
   const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
   mTranscriptLayout->insertWidget( insertIndex, messageWidget );
+  if ( message.role == QgsAiChatRole::Tool )
+    refreshUndoTurnButtons();
+  // Someone reading higher up is not pulled down; their own message always shows.
+  if ( follow )
+    scrollTranscriptToBottom();
+}
+
+QHBoxLayout *QgsAiChatDockWidget::createMessageActionsRow( const QgsAiChatMessage &message, QWidget *card )
+{
+  QHBoxLayout *row = new QHBoxLayout();
+  row->setContentsMargins( 0, 0, 0, 0 );
+  const QString buttonStyle = u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s;
+  const auto addAction = [&]( const QString &objectName, const QString &text, const QString &tip ) {
+    QToolButton *button = new QToolButton( card );
+    button->setObjectName( objectName );
+    button->setText( text );
+    button->setToolTip( tip );
+    button->setAutoRaise( true );
+    button->setStyleSheet( buttonStyle );
+    row->addWidget( button );
+    return button;
+  };
+  const QString messageId = message.id;
+  const QString text = message.content;
+  QToolButton *copy = addAction( u"aiCopyMessageButton"_s, tr( "Copy" ), tr( "Copy the message text." ) );
+  connect( copy, &QToolButton::clicked, this, [text]() { QApplication::clipboard()->setText( text ); } );
+  if ( message.role == QgsAiChatRole::User )
+  {
+    QToolButton *editButton = addAction( u"aiEditMessageButton"_s, tr( "Edit" ), tr( "Change this message and send it again; what came after it is undone and dropped." ) );
+    connect( editButton, &QToolButton::clicked, this, [this, messageId, text]() {
+      bool ok = false;
+      const QString edited = QInputDialog::getMultiLineText( this, tr( "Edit message" ), tr( "Message" ), text, &ok );
+      if ( ok && !edited.trimmed().isEmpty() )
+        editAndResendFromChat( messageId, edited );
+    } );
+    QToolButton *retry = addAction( u"aiRetryMessageButton"_s, tr( "Retry" ), tr( "Send this message again; what came after it is undone and dropped." ) );
+    connect( retry, &QToolButton::clicked, this, [this, messageId, text]() { editAndResendFromChat( messageId, text ); } );
+  }
+  row->addStretch( 1 );
+  return row;
+}
+
+void QgsAiChatDockWidget::editAndResendFromChat( const QString &messageId, const QString &text )
+{
+  if ( !mSessionManager )
+    return;
+  QString error;
+  if ( !mSessionManager->editAndResend( messageId, text, &error ) )
+    QMessageBox::warning( this, tr( "Send again" ), error );
+}
+
+void QgsAiChatDockWidget::retryFromChat()
+{
+  if ( !mSessionManager )
+    return;
+  hideRequestError();
+  QString error;
+  if ( !mSessionManager->retryLastTurn( &error ) )
+    QMessageBox::warning( this, tr( "Retry" ), error );
+}
+
+bool QgsAiChatDockWidget::isTranscriptAtBottom() const
+{
+  const QScrollBar *bar = mTranscriptScrollArea ? mTranscriptScrollArea->verticalScrollBar() : nullptr;
+  return !bar || bar->value() >= bar->maximum() - 48;
+}
+
+QWidget *QgsAiChatDockWidget::createToolResultActionsWidget( const QgsAiChatMessage &message )
+{
+  const QJsonObject output = QJsonDocument::fromJson( message.content.toUtf8() ).object();
+  const bool undone = message.metadata.value( u"undo_status"_s ).toString() == "undone"_L1;
+  const bool undoable = QgsAiAgentSessionManager::toolMessageCanBeUndone( message );
+  const bool declaredPermanent = output.value( u"diff"_s ).toObject().contains( u"rollback_supported"_s ) && !output.value( u"diff"_s ).toObject().value( u"rollback_supported"_s ).toBool();
+  // The features the tool changed or added, still in the project and not undone.
+  const QString layerId = output.value( u"layer_id"_s ).toString();
+  QList<qint64> featureIds;
+  for ( const QString &key : { u"changed_feature_ids"_s, u"selected_feature_ids"_s } )
+  {
+    for ( const QJsonValue &id : output.value( key ).toArray() )
+      featureIds << id.toInteger();
+  }
+  if ( output.contains( u"feature_id"_s ) )
+    featureIds << output.value( u"feature_id"_s ).toInteger();
+  const bool showable = !undone && !layerId.isEmpty() && QgsProject::instance()->mapLayer( layerId );
+  if ( !undone && !undoable && !declaredPermanent && !showable )
+    return nullptr;
+
+  QWidget *row = new QWidget( mTranscriptContainer );
+  QHBoxLayout *layout = new QHBoxLayout( row );
+  layout->setContentsMargins( 0, 0, 0, 0 );
+  if ( showable )
+  {
+    QPushButton *show = new QPushButton( tr( "Show on map" ), row );
+    show->setObjectName( u"aiShowOnMapButton"_s );
+    show->setToolTip( featureIds.isEmpty() ? tr( "Zoom to the layer." ) : tr( "Zoom to the features that changed and flash them." ) );
+    show->setStyleSheet( u"QPushButton#aiShowOnMapButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
+    connect( show, &QPushButton::clicked, this, [this, layerId, featureIds]() { emit showOnMapRequested( layerId, featureIds ); } );
+    layout->addWidget( show );
+  }
+  if ( undone )
+  {
+    QLabel *label = new QLabel( tr( "Undone" ), row );
+    label->setObjectName( u"aiToolUndoneLabel"_s );
+    label->setStyleSheet( u"color: palette(mid); font-style: italic;"_s );
+    layout->addWidget( label );
+  }
+  else if ( undoable )
+  {
+    QPushButton *undo = new QPushButton( tr( "Undo" ), row );
+    undo->setObjectName( u"aiUndoToolButton"_s );
+    undo->setToolTip( tr( "Undo this change without asking the assistant." ) );
+    undo->setEnabled( !mRequestRunning );
+    undo->setStyleSheet(
+      u"QPushButton#aiUndoToolButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; } QPushButton#aiUndoToolButton:disabled { color: palette(mid); }"_s
+    );
+    const QString messageId = message.id;
+    connect( undo, &QPushButton::clicked, this, [this, messageId]() { undoToolFromChat( messageId ); } );
+    layout->addWidget( undo );
+  }
+  else
+  {
+    QLabel *label = new QLabel( tr( "Cannot be undone from Strata" ), row );
+    label->setObjectName( u"aiToolPermanentLabel"_s );
+    label->setStyleSheet( u"color: palette(mid);"_s );
+    layout->addWidget( label );
+  }
+  layout->addStretch( 1 );
+  return row;
+}
+
+void QgsAiChatDockWidget::refreshUndoTurnButtons()
+{
+  for ( const QPointer<QPushButton> &button : std::as_const( mUndoTurnButtons ) )
+  {
+    if ( !button || !mSessionManager )
+      continue;
+    button->setVisible( !mRequestRunning && !mSessionManager->undoableToolCallsInTurn( button->property( "message_id" ).toString() ).isEmpty() );
+  }
+}
+
+void QgsAiChatDockWidget::undoToolFromChat( const QString &toolMessageId )
+{
+  if ( !mSessionManager )
+    return;
+  QString error;
+  if ( !mSessionManager->undoToolCall( toolMessageId, &error ) )
+    QMessageBox::warning( this, tr( "Undo" ), error );
+}
+
+void QgsAiChatDockWidget::undoTurnFromChat( const QString &messageId )
+{
+  if ( !mSessionManager )
+    return;
+  QStringList failures;
+  mSessionManager->undoTurn( messageId, &failures );
+  if ( !failures.isEmpty() )
+    QMessageBox::warning( this, tr( "Undo this turn" ), tr( "Some changes could not be undone:\n%1" ).arg( failures.join( '\n' ) ) );
+}
+
+QString QgsAiChatDockWidget::toolCallSummary( const QString &toolName, const QVariantMap &args )
+{
+  QStringList parts { toolName };
+  const QString layerId = args.value( u"layer_id"_s ).toString();
+  if ( !layerId.isEmpty() )
+  {
+    const QgsMapLayer *layer = QgsProject::instance()->mapLayer( layerId );
+    parts << ( layer ? layer->name() : layerId );
+  }
+  const auto shortened = []( const QString &text ) { return text.size() > 60 ? text.left( 57 ) + u"…"_s : text; };
+  if ( args.contains( u"field_name"_s ) )
+    parts << args.value( u"field_name"_s ).toString() + ( args.contains( u"expression"_s ) ? u" = "_s + shortened( args.value( u"expression"_s ).toString() ) : QString() );
+  for ( const QString &key : { u"algorithm_id"_s, u"query"_s, u"sql"_s, u"name"_s } )
+  {
+    if ( args.contains( key ) )
+      parts << shortened( args.value( key ).toString().simplified() );
+  }
+  if ( args.contains( u"path"_s ) )
+    parts << QFileInfo( args.value( u"path"_s ).toString() ).fileName();
+  return parts.join( u" · "_s );
+}
+
+void QgsAiChatDockWidget::showLiveToolCard( const QString &callId, const QString &toolName, const QVariantMap &args )
+{
+  closeLiveToolCard( mLiveToolCallId );
+  if ( !mTranscriptLayout )
+    return;
+  mLiveToolCallId = callId;
+  mLiveToolClock.start();
+
+  mLiveToolCard = new QFrame( mTranscriptContainer );
+  mLiveToolCard->setObjectName( u"aiLiveToolCard"_s );
+  applyTranscriptWidthPolicy( mLiveToolCard );
+  mLiveToolCard->setStyleSheet( u"QFrame#aiLiveToolCard { background: palette(alternate-base); border-radius: 6px; }"_s );
+  QVBoxLayout *layout = new QVBoxLayout( mLiveToolCard );
+  layout->setContentsMargins( 8, 6, 8, 6 );
+  layout->setSpacing( 2 );
+  QHBoxLayout *header = new QHBoxLayout();
+  QLabel *title = new QLabel( toolCallSummary( toolName, args ), mLiveToolCard );
+  title->setObjectName( u"aiLiveToolTitle"_s );
+  title->setWordWrap( true );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  header->addWidget( title, 1 );
+  mLiveToolElapsed = new QLabel( tr( "Running…" ), mLiveToolCard );
+  mLiveToolElapsed->setObjectName( u"aiLiveToolElapsed"_s );
+  header->addWidget( mLiveToolElapsed );
+  QToolButton *stop = new QToolButton( mLiveToolCard );
+  stop->setObjectName( u"aiLiveToolStopButton"_s );
+  stop->setText( tr( "Stop" ) );
+  stop->setAutoRaise( true );
+  connect( stop, &QToolButton::clicked, this, &QgsAiChatDockWidget::cancelRunningRequest );
+  header->addWidget( stop );
+  layout->addLayout( header );
+  mLiveToolProgress = new QLabel( mLiveToolCard );
+  mLiveToolProgress->setObjectName( u"aiLiveToolProgress"_s );
+  mLiveToolProgress->setStyleSheet( u"color: palette(mid);"_s );
+  mLiveToolProgress->setVisible( false );
+  layout->addWidget( mLiveToolProgress );
+
+  const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
+  mTranscriptLayout->insertWidget( insertIndex, mLiveToolCard );
   scrollTranscriptToBottom();
+
+  if ( !mLiveToolTimer )
+  {
+    mLiveToolTimer = new QTimer( this );
+    mLiveToolTimer->setInterval( 200 );
+    connect( mLiveToolTimer, &QTimer::timeout, this, [this]() {
+      if ( mLiveToolCard && mLiveToolElapsed )
+        mLiveToolElapsed->setText( tr( "Running… %1 s" ).arg( mLiveToolClock.elapsed() / 1000.0, 0, 'f', 1 ) );
+    } );
+  }
+  mLiveToolTimer->start();
+}
+
+void QgsAiChatDockWidget::updateLiveToolProgress( const QString &callId, double percent, const QString &label )
+{
+  if ( callId != mLiveToolCallId || !mLiveToolProgress )
+    return;
+  mLiveToolProgress->setText( tr( "%1 · %2%" ).arg( label ).arg( static_cast<int>( percent ) ) );
+  mLiveToolProgress->setVisible( true );
+}
+
+void QgsAiChatDockWidget::showToolApprovalCard( const QString &callId, const QString &toolName, const QVariantMap &args, const QString &riskLevel )
+{
+  if ( !mTranscriptLayout )
+    return;
+  if ( mApprovalCard )
+    mApprovalCard->deleteLater();
+  mApprovalCallId = callId;
+  // A closed chat would leave the question unseen and the assistant waiting.
+  setUserVisible( true );
+
+  mApprovalCard = new QFrame( mTranscriptContainer );
+  mApprovalCard->setObjectName( u"aiApprovalCard"_s );
+  applyTranscriptWidthPolicy( mApprovalCard );
+  mApprovalCard->setStyleSheet( u"QFrame#aiApprovalCard { background: palette(alternate-base); border: 1px solid palette(highlight); border-radius: 6px; }"_s );
+  QVBoxLayout *layout = new QVBoxLayout( mApprovalCard );
+  layout->setContentsMargins( 10, 8, 10, 8 );
+  layout->setSpacing( 6 );
+  QLabel *title = new QLabel( tr( "Allow this change?" ), mApprovalCard );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  layout->addWidget( title );
+  QLabel *summary = new QLabel( toolCallSummary( toolName, args ), mApprovalCard );
+  summary->setObjectName( u"aiApprovalSummary"_s );
+  summary->setWordWrap( true );
+  layout->addWidget( summary );
+  QLabel *risk = new QLabel( tr( "Risk: %1" ).arg( riskLevel ), mApprovalCard );
+  risk->setStyleSheet( u"color: palette(mid);"_s );
+  layout->addWidget( risk );
+  layout->addWidget( createCollapsibleSection( tr( "Arguments" ), QString::fromUtf8( QJsonDocument( QJsonObject::fromVariantMap( args ) ).toJson( QJsonDocument::Indented ) ), u"json"_s, true ) );
+
+  QHBoxLayout *buttons = new QHBoxLayout();
+  QPushButton *accept = new QPushButton( tr( "Accept" ), mApprovalCard );
+  accept->setObjectName( u"aiApproveToolButton"_s );
+  accept->setToolTip( tr( "Run the tool (Ctrl+Enter)" ) );
+  accept->setStyleSheet( u"QPushButton#aiApproveToolButton { background: palette(highlight); color: palette(highlighted-text); border: 0; border-radius: 6px; padding: 4px 12px; font-weight: 600; }"_s );
+  QPushButton *reject = new QPushButton( tr( "Reject" ), mApprovalCard );
+  reject->setObjectName( u"aiRejectToolButton"_s );
+  reject->setStyleSheet( u"QPushButton#aiRejectToolButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 4px 12px; }"_s );
+  connect( accept, &QPushButton::clicked, this, [this]() { answerToolApproval( true ); } );
+  connect( reject, &QPushButton::clicked, this, [this]() { answerToolApproval( false ); } );
+  QShortcut *acceptShortcut = new QShortcut( QKeySequence( Qt::CTRL | Qt::Key_Return ), this );
+  acceptShortcut->setContext( Qt::WidgetWithChildrenShortcut );
+  connect( acceptShortcut, &QShortcut::activated, this, [this]() { answerToolApproval( true ); } );
+  connect( mApprovalCard, &QObject::destroyed, acceptShortcut, &QObject::deleteLater );
+  buttons->addWidget( accept );
+  buttons->addWidget( reject );
+  buttons->addStretch( 1 );
+  layout->addLayout( buttons );
+
+  const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
+  mTranscriptLayout->insertWidget( insertIndex, mApprovalCard );
+  scrollTranscriptToBottom();
+  accept->setFocus();
+}
+
+void QgsAiChatDockWidget::answerToolApproval( bool approved )
+{
+  if ( !mApprovalCard || mApprovalCallId.isEmpty() )
+    return;
+  const QString callId = mApprovalCallId;
+  mApprovalCallId.clear();
+  mTranscriptLayout->removeWidget( mApprovalCard );
+  mApprovalCard->deleteLater();
+  mApprovalCard = nullptr;
+  if ( mSessionManager )
+    mSessionManager->resolveToolApproval( callId, approved );
+}
+
+void QgsAiChatDockWidget::closeLiveToolCard( const QString &callId )
+{
+  if ( callId != mLiveToolCallId )
+    return;
+  if ( mLiveToolTimer )
+    mLiveToolTimer->stop();
+  if ( mLiveToolCard )
+    mLiveToolCard->deleteLater();
+  mLiveToolCard = nullptr;
+  mLiveToolElapsed = nullptr;
+  mLiveToolProgress = nullptr;
+  mLiveToolCallId.clear();
 }
 
 QWidget *QgsAiChatDockWidget::createMessageWidget( const QString &role, const QString &content, const QVariantMap &metadata, const QString &messageId, QgsAiChatRole messageRole )
@@ -1617,7 +2071,19 @@ QWidget *QgsAiChatDockWidget::createCollapsibleSection( const QString &title, co
     "QToolButton#aiTechnicalToggle { color: palette(window-text); background: transparent; border: 0; border-radius: 6px; padding: 3px 6px; text-align: left; } "
     "QToolButton#aiTechnicalToggle:hover { background: palette(alternate-base); }"
   ) );
-  layout->addWidget( toggle );
+  QHBoxLayout *header = new QHBoxLayout();
+  header->setContentsMargins( 0, 0, 0, 0 );
+  header->addWidget( toggle );
+  header->addStretch( 1 );
+  // Copy without opening the section first.
+  QToolButton *copy = new QToolButton( section );
+  copy->setObjectName( u"aiCopyCodeButton"_s );
+  copy->setText( tr( "Copy" ) );
+  copy->setAutoRaise( true );
+  copy->setStyleSheet( u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s );
+  connect( copy, &QToolButton::clicked, section, [content]() { QApplication::clipboard()->setText( content ); } );
+  header->addWidget( copy );
+  layout->addLayout( header );
 
   QTextEdit *details = new QTextEdit( section );
   details->setObjectName( u"aiTechnicalContent"_s );
@@ -2211,7 +2677,11 @@ QString QgsAiChatDockWidget::renderToolMessageMarkdown( const QgsAiChatMessage &
   const QVariantMap args = message.metadata.value( u"tool_args"_s ).toMap();
   const QString status = output.value( u"status"_s ).toString( isError ? u"error"_s : u"ok"_s );
 
-  QString md = u"**%1** - `%2`\n"_s.arg( toolName.isEmpty() ? u"tool"_s : toolName, status );
+  QString md = u"**%1** - `%2`"_s.arg( toolName.isEmpty() ? u"tool"_s : toolName, status );
+  const qint64 elapsedMs = message.metadata.value( u"elapsed_ms"_s, -1 ).toLongLong();
+  if ( elapsedMs >= 0 )
+    md += elapsedMs < 1000 ? tr( " · %1 ms" ).arg( elapsedMs ) : tr( " · %1 s" ).arg( elapsedMs / 1000.0, 0, 'f', 1 );
+  md += "\n"_L1;
 
   if ( toolName == "run_python"_L1 )
   {
@@ -2351,16 +2821,22 @@ QString QgsAiChatDockWidget::renderToolMessageMarkdown( const QgsAiChatMessage &
     return md.trimmed();
   }
 
+  // What changed, in the tool's own words, before the details.
+  const QString summary = output.value( u"diff"_s ).toObject().value( u"summary"_s ).toString().trimmed();
+  if ( !summary.isEmpty() )
+    md += u"\n%1\n"_s.arg( summary );
+  static const QSet<QString> technicalKeys { u"status"_s, u"rollback_token"_s, u"rollback"_s, u"verification"_s, u"diff"_s };
   int shown = 0;
   for ( auto it = output.constBegin(); it != output.constEnd() && shown < 6; ++it )
   {
-    if ( it.value().isObject() || it.value().isArray() )
+    if ( it.value().isObject() || it.value().isArray() || technicalKeys.contains( it.key() ) )
       continue;
     md += u"\n- %1: `%2`"_s.arg( it.key(), truncateForTranscript( scalarForTranscript( it.value() ), 160 ) );
     ++shown;
   }
-  if ( shown == 0 )
+  if ( shown == 0 && summary.isEmpty() )
     md += "\nResult received."_L1;
+  md += u"\n\n```strata_result\n%1\n```"_s.arg( truncateForTranscript( QString::fromUtf8( QJsonDocument( output ).toJson( QJsonDocument::Indented ) ).trimmed(), 20000 ) );
   return md.trimmed();
 }
 
@@ -2378,6 +2854,7 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
   hideRequestError();
   closeStreamingAssistantMessage();
   clearTranscriptWidgets();
+  mUndoTurnButtons.clear();
   if ( !mSessionManager )
     return;
   const QList<QgsAiChatMessage> history = mSessionManager->history();
@@ -2387,6 +2864,96 @@ void QgsAiChatDockWidget::reloadTranscriptFromHistory()
       continue;
     appendTranscriptMessage( m );
   }
+  refreshUndoTurnButtons();
+  refreshEmptyState();
+}
+
+QStringList QgsAiChatDockWidget::suggestedPrompts( QgsProject *project )
+{
+  QStringList prompts;
+  if ( project )
+  {
+    // What the project health checks would fix first.
+    const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( project );
+    for ( const QgsAiGisSuggestion &suggestion : suggestions )
+    {
+      if ( prompts.size() >= 2 )
+        break;
+      if ( !suggestion.actionPrompt.trimmed().isEmpty() )
+        prompts << suggestion.actionPrompt.trimmed();
+    }
+    const QgsVectorLayer *vector = nullptr;
+    for ( QgsMapLayer *layer : project->layerTreeRoot()->checkedLayers() )
+    {
+      vector = qobject_cast<QgsVectorLayer *>( layer );
+      if ( vector )
+        break;
+    }
+    if ( vector )
+    {
+      prompts << tr( "Describe the layers of this project and what they contain." );
+      if ( vector->geometryType() != Qgis::GeometryType::Null && vector->geometryType() != Qgis::GeometryType::Unknown )
+        prompts << tr( "Buffer %1 by 100 m and add the result to the map." ).arg( vector->name() );
+      prompts << tr( "Summarize the attributes of %1." ).arg( vector->name() );
+    }
+  }
+  if ( prompts.size() < 3 )
+  {
+    prompts << tr( "Find open data for my area and add it to the map." );
+    prompts << tr( "Open a GeoPackage from my workspace and summarize its layers." );
+    prompts << tr( "Create a print layout of the current map view." );
+  }
+  prompts.removeDuplicates();
+  return prompts.mid( 0, 4 );
+}
+
+void QgsAiChatDockWidget::refreshEmptyState()
+{
+  const bool empty = !mSessionManager || mSessionManager->history().isEmpty();
+  if ( !empty || !mTranscriptLayout )
+  {
+    if ( mEmptyState )
+    {
+      mTranscriptLayout->removeWidget( mEmptyState );
+      mEmptyState->deleteLater();
+      mEmptyState = nullptr;
+    }
+    return;
+  }
+  if ( mEmptyState )
+  {
+    mTranscriptLayout->removeWidget( mEmptyState );
+    mEmptyState->deleteLater();
+  }
+  mEmptyState = new QFrame( mTranscriptContainer );
+  mEmptyState->setObjectName( u"aiEmptyState"_s );
+  applyTranscriptWidthPolicy( mEmptyState );
+  QVBoxLayout *layout = new QVBoxLayout( mEmptyState );
+  layout->setContentsMargins( 8, 12, 8, 8 );
+  layout->setSpacing( 6 );
+  QLabel *title = new QLabel( tr( "What should we do?" ), mEmptyState );
+  title->setStyleSheet( u"font-weight: 600;"_s );
+  layout->addWidget( title );
+  QLabel *hint = new QLabel( tr( "The assistant works on the open project. Changes can be undone from the chat." ), mEmptyState );
+  hint->setWordWrap( true );
+  hint->setStyleSheet( u"color: palette(mid);"_s );
+  layout->addWidget( hint );
+  for ( const QString &prompt : suggestedPrompts( QgsProject::instance() ) )
+  {
+    QPushButton *button = new QPushButton( prompt, mEmptyState );
+    button->setObjectName( u"aiSuggestedPrompt"_s );
+    button->setStyleSheet(
+      u"QPushButton#aiSuggestedPrompt { text-align: left; background: palette(alternate-base); border: 0; border-radius: 6px; padding: 6px 8px; } QPushButton#aiSuggestedPrompt:hover { background: palette(button); }"_s
+    );
+    connect( button, &QPushButton::clicked, this, [this, prompt]() {
+      if ( !mInputTextEdit )
+        return;
+      mInputTextEdit->setPlainText( prompt );
+      sendMessage();
+    } );
+    layout->addWidget( button );
+  }
+  mTranscriptLayout->insertWidget( 0, mEmptyState );
 }
 
 void QgsAiChatDockWidget::rebuildHistoryMenu()
@@ -2545,7 +3112,7 @@ void QgsAiChatDockWidget::appendStreamChunk( const QString &chunk )
     mStreamingTextEdit = new QTextEdit( card );
     mStreamingTextEdit->setObjectName( u"aiStreamingTextEdit"_s );
     mStreamingTextEdit->setReadOnly( true );
-    mStreamingTextEdit->setAcceptRichText( false );
+    mStreamingTextEdit->setAcceptRichText( true );
     mStreamingTextEdit->setFrameShape( QFrame::NoFrame );
     mStreamingTextEdit->setMinimumHeight( 48 );
     applyTranscriptTextEditWrapping( mStreamingTextEdit );
@@ -2554,15 +3121,36 @@ void QgsAiChatDockWidget::appendStreamChunk( const QString &chunk )
     const int insertIndex = std::max( 0, mTranscriptLayout->count() - 1 );
     mTranscriptLayout->insertWidget( insertIndex, card );
     mStreamingInProgress = true;
+    mStreamingText.clear();
   }
-  if ( mStreamingTextEdit )
+  mStreamingText += chunk;
+  // Rendered as markdown at most every 80 ms: a long answer is not parsed again for each token.
+  if ( !mStreamingRenderTimer )
   {
-    QTextCursor cursor = mStreamingTextEdit->textCursor();
-    cursor.movePosition( QTextCursor::End );
-    cursor.insertText( chunk );
-    mStreamingTextEdit->setTextCursor( cursor );
+    mStreamingRenderTimer = new QTimer( this );
+    mStreamingRenderTimer->setSingleShot( true );
+    mStreamingRenderTimer->setInterval( 80 );
+    connect( mStreamingRenderTimer, &QTimer::timeout, this, &QgsAiChatDockWidget::renderStreamingText );
   }
-  scrollTranscriptToBottom();
+  // The first words show at once; what follows is gathered until the timer fires.
+  if ( !mStreamingRenderTimer->isActive() )
+  {
+    renderStreamingText();
+    mStreamingRenderTimer->start();
+  }
+}
+
+void QgsAiChatDockWidget::renderStreamingText()
+{
+  if ( !mStreamingTextEdit )
+    return;
+  const bool follow = isTranscriptAtBottom();
+  mStreamingTextEdit->setHtml( renderMarkdown( mStreamingText ) );
+  // Tall enough for the text: the transcript scrolls, not the message.
+  mStreamingTextEdit->document()->setTextWidth( mStreamingTextEdit->viewport()->width() );
+  mStreamingTextEdit->setMinimumHeight( std::max( 48, static_cast<int>( mStreamingTextEdit->document()->size().height() ) + 8 ) );
+  if ( follow )
+    scrollTranscriptToBottom();
 }
 
 void QgsAiChatDockWidget::closeStreamingAssistantMessage()
@@ -2580,6 +3168,9 @@ void QgsAiChatDockWidget::closeStreamingAssistantMessage()
   }
   mStreamingInProgress = false;
   mStreamingTextEdit = nullptr;
+  mStreamingText.clear();
+  if ( mStreamingRenderTimer )
+    mStreamingRenderTimer->stop();
 }
 
 void QgsAiChatDockWidget::updateRuntimeState( const QString &state, const QString &detail )
@@ -2665,13 +3256,34 @@ void QgsAiChatDockWidget::updateSessionUsage( const QgsAiUsage &total )
 void QgsAiChatDockWidget::setRequestRunning( bool running )
 {
   mRequestRunning = running;
+  // Undo waits for the assistant to finish.
+  const QList<QPushButton *> undoButtons = findChildren<QPushButton *>( u"aiUndoToolButton"_s );
+  for ( QPushButton *undo : undoButtons )
+    undo->setEnabled( !running );
+  if ( !running )
+  {
+    closeLiveToolCard( mLiveToolCallId );
+    // Stopped while waiting for an answer: the question is gone.
+    if ( mApprovalCard )
+    {
+      mApprovalCard->deleteLater();
+      mApprovalCard = nullptr;
+      mApprovalCallId.clear();
+    }
+  }
+  refreshUndoTurnButtons();
   if ( mSendButton )
   {
     mSendButton->setText( running ? u"◼"_s : u"↑"_s );
     mSendButton->setToolTip( running ? tr( "Stop" ) : tr( "Send (Enter)" ) );
   }
+  // The message box stays open: what is typed now is queued (sendMessage()).
   if ( mInputTextEdit )
-    mInputTextEdit->setEnabled( !running );
+    mInputTextEdit->setPlaceholderText(
+      running ? tr( "Type your next message; it is sent when the assistant finishes." ) : tr( "Ask a question, tag project files with @, or send /patch…  (Shift+Enter for newline)" )
+    );
+  if ( !running && !mQueuedMessages.isEmpty() )
+    QTimer::singleShot( 0, this, &QgsAiChatDockWidget::sendNextQueuedMessage );
   if ( mCancelButton )
     mCancelButton->setEnabled( running );
   // Tools pump the event loop: keep mode and model fixed until the turn ends, so approvals and
@@ -2718,6 +3330,9 @@ void QgsAiChatDockWidget::onModeSelected( QAction *action )
   if ( !action )
     return;
   setModeLabel( action->text() );
+  // Only a mode the user picks is the one to start with next time, not one a plan switches to.
+  if ( mSessionManager )
+    mSessionManager->rememberActiveAgent();
 }
 
 void QgsAiChatDockWidget::onModelSelected( QAction *action )
@@ -2775,10 +3390,6 @@ void QgsAiChatDockWidget::sendMessage()
   if ( input.isEmpty() && contextFiles.isEmpty() )
     return;
 
-  // First AI interaction with an undecided workspace: ask for the trust decision.
-  // Never blocks sending — untrusted just restricts rules/skills and risky tools.
-  ensureWorkspaceTrustDecision();
-
   mInputTextEdit->clear();
   hideMentionPopup();
   for ( AttachedFile &file : mAttachedFiles )
@@ -2796,10 +3407,83 @@ void QgsAiChatDockWidget::sendMessage()
   if ( gisMentionRe.match( input ).hasMatch() )
   {
     // Explicit user request: attach the full block regardless of toggles or dismissals.
-    const QString gisBlock = QgsAiGisSuggestionEngine::formatHealthBlock( QgsAiGisSuggestionEngine::suggestionsForProject( QgsProject::instance() ), true );
+    const QString gisBlock = QgsAiGisSuggestionEngine::formatHealthBlock( QgsAiGisSuggestionEngine::suggestionsWithoutReadingFeatures( QgsProject::instance() ), true );
     outgoing += u"\n\n"_s + ( gisBlock.isEmpty() ? tr( "(No GIS suggestions for the current project right now.)" ) : gisBlock );
   }
-  mSessionManager->sendUserMessage( outgoing, contextFiles );
+  // The assistant is still working: the message waits for the end of the turn.
+  if ( mRequestRunning )
+  {
+    mQueuedMessages.append( { outgoing, contextFiles } );
+    refreshQueueBar();
+    return;
+  }
+  dispatchMessage( outgoing, contextFiles );
+}
+
+void QgsAiChatDockWidget::dispatchMessage( const QString &text, const QList<QgsAiChatContextFile> &contextFiles )
+{
+  if ( !mSessionManager )
+    return;
+  // First AI interaction with an undecided workspace: ask for the trust decision.
+  // Never blocks sending — untrusted just restricts rules/skills and risky tools.
+  ensureWorkspaceTrustDecision();
+  mSessionManager->sendUserMessage( text, contextFiles );
+}
+
+void QgsAiChatDockWidget::sendNextQueuedMessage()
+{
+  if ( mRequestRunning || mQueuedMessages.isEmpty() )
+    return;
+  const QueuedMessage next = mQueuedMessages.takeFirst();
+  refreshQueueBar();
+  dispatchMessage( next.text, next.contextFiles );
+}
+
+void QgsAiChatDockWidget::refreshQueueBar()
+{
+  if ( !mQueueBar || !mQueueLabel )
+    return;
+  mQueueBar->setVisible( !mQueuedMessages.isEmpty() );
+  if ( mQueuedMessages.isEmpty() )
+    return;
+  QString first = mQueuedMessages.constFirst().text.simplified();
+  if ( first.size() > 50 )
+    first = first.left( 47 ) + u"…"_s;
+  mQueueLabel->setText( mQueuedMessages.size() == 1 ? tr( "Queued: %1" ).arg( first ) : tr( "Queued: %1 (+%2 more)" ).arg( first ).arg( mQueuedMessages.size() - 1 ) );
+}
+
+void QgsAiChatDockWidget::scheduleMapContextRefresh()
+{
+  if ( !mMapContextTimer )
+  {
+    mMapContextTimer = new QTimer( this );
+    mMapContextTimer->setSingleShot( true );
+    mMapContextTimer->setInterval( 200 );
+    connect( mMapContextTimer, &QTimer::timeout, this, &QgsAiChatDockWidget::refreshMapContextPill );
+  }
+  mMapContextTimer->start();
+}
+
+void QgsAiChatDockWidget::refreshMapContextPill()
+{
+  if ( !mMapContextPill || !mSessionManager )
+    return;
+  const QString summary = mSessionManager->mapContextSummary();
+  mMapContextPill->setVisible( !summary.isEmpty() );
+  mMapContextPill->setText( summary );
+  mMapContextPill->setToolTip(
+    mSessionManager->isMapContextIncluded() ? tr( "Sent with your message: the map view, the active layer and its selection. Click to leave it out." )
+                                            : tr( "Not sent with your message. Click to send the map view, the active layer and its selection again." )
+  );
+}
+
+void QgsAiChatDockWidget::focusPrompt()
+{
+  if ( !mInputTextEdit )
+    return;
+  raise();
+  mInputTextEdit->setFocus( Qt::ShortcutFocusReason );
+  mInputTextEdit->moveCursor( QTextCursor::End );
 }
 
 void QgsAiChatDockWidget::cancelRunningRequest()
@@ -3227,7 +3911,7 @@ void QgsAiChatDockWidget::dismissGisSuggestion( const QString &suggestionId )
     dismissed << suggestionId;
     settings.setValue( key, dismissed );
   }
-  refreshGisSuggestionCard();
+  showGisSuggestions( mGisSuggestions );
 }
 
 void QgsAiChatDockWidget::refreshGisSuggestionCard()
@@ -3235,14 +3919,67 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
   if ( !mGisCardContainer || !mGisCardBodyLayout )
     return;
 
-  // Strata: the suggestion engine samples features from every layer on the main thread;
-  // while a batched layer import is running, retry later instead of competing with it
+  // Strata: while a batched layer import is running, retry later instead of competing with it
   if ( QgsBatchedLayerAddController::instance()->isActive() )
   {
     if ( mGisCardRefreshTimer )
       mGisCardRefreshTimer->start( 5000 );
     return;
   }
+
+  QgsProject *project = QgsProject::instance();
+  if ( !QgsAiGisSuggestionEngine::suggestionsEnabledForProject( project ) )
+  {
+    showGisSuggestions( {} );
+    return;
+  }
+
+  // Geometries are sampled on a worker thread; the card changes when the check ends.
+  // A refresh asked for meanwhile runs after it, because the project has changed since.
+  if ( mGisSuggestionTask )
+  {
+    mGisSuggestionRefreshPending = true;
+    return;
+  }
+
+  QgsAiPerfScope perf( u"chat"_s, u"gis_suggestions_snapshot"_s, 50 );
+  QgsAiGisProjectSnapshot snapshot = QgsAiGisSuggestionEngine::snapshotProject( project, true );
+  QgsTaskManager *manager = QgsApplication::taskManager();
+  if ( !manager )
+  {
+    const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::evaluate( snapshot );
+    QgsAiGisSuggestionEngine::rememberGeometrySamples( snapshot );
+    showGisSuggestions( suggestions );
+    return;
+  }
+
+  QgsAiGisSuggestionTask *task = new QgsAiGisSuggestionTask( std::move( snapshot ) );
+  mGisSuggestionTask = task;
+  const auto finish = [this, task]( bool completed ) {
+    if ( mGisSuggestionTask == task )
+      mGisSuggestionTask = nullptr;
+    if ( completed )
+      QgsAiGisSuggestionEngine::rememberGeometrySamples( task->snapshot() );
+    if ( mGisSuggestionRefreshPending )
+    {
+      mGisSuggestionRefreshPending = false;
+      refreshGisSuggestionCard();
+    }
+    else if ( completed )
+    {
+      showGisSuggestions( task->suggestions() );
+    }
+  };
+  connect( task, &QgsTask::taskCompleted, this, [finish]() { finish( true ); } );
+  connect( task, &QgsTask::taskTerminated, this, [finish]() { finish( false ); } );
+  manager->addTask( task );
+}
+
+void QgsAiChatDockWidget::showGisSuggestions( const QList<QgsAiGisSuggestion> &suggestions )
+{
+  mGisSuggestions = suggestions;
+  if ( !mGisCardContainer || !mGisCardBodyLayout )
+    return;
 
   while ( QLayoutItem *item = mGisCardBodyLayout->takeAt( 0 ) )
   {
@@ -3251,19 +3988,12 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
     delete item;
   }
 
-  QgsProject *project = QgsProject::instance();
-  if ( !QgsAiGisSuggestionEngine::suggestionsEnabledForProject( project ) )
-  {
-    mGisCardContainer->setVisible( false );
-    return;
-  }
-
+  const QgsProject *project = QgsProject::instance();
   const QString projectFile = project ? project->fileName() : QString();
   const QStringList dismissed = QgsSettings().value( QgsAiGisSuggestionEngine::dismissedSettingsKey( projectFile ) ).toStringList();
 
   // Low-risk findings stay model-side context only; the card surfaces what deserves attention.
   QList<QgsAiGisSuggestion> visible;
-  const QList<QgsAiGisSuggestion> suggestions = QgsAiGisSuggestionEngine::suggestionsForProject( project );
   for ( const QgsAiGisSuggestion &suggestion : suggestions )
   {
     if ( suggestion.risk == "low"_L1 || dismissed.contains( suggestion.id ) )
@@ -3439,6 +4169,8 @@ void QgsAiChatDockWidget::showEvent( QShowEvent *event )
 {
   QgsDockWidget::showEvent( event );
   maybeShowWelcomeBanner();
+  refreshEmptyState();
+  refreshMapContextPill();
 }
 
 void QgsAiChatDockWidget::maybeShowWelcomeBanner()
@@ -3489,18 +4221,36 @@ void QgsAiChatDockWidget::setLayerIndexCoordinator( QgsAiLayerIndexCoordinator *
   mLayerIndexCoordinator = coordinator;
 }
 
-bool QgsAiChatDockWidget::requiresLayerIndexingConsent()
+void QgsAiChatDockWidget::setIndexingActivity( QgsAiIndexingActivity *activity )
 {
-  QgsSettings settings;
-  return !settingValueWithLegacy( settings, u"strata/index/layer_indexing_consented"_s, QStringList { u"geoai/index/layer_indexing_consented"_s, u"qgis_ai/index/layer_indexing_consented"_s }, false ).toBool();
+  if ( mIndexingActivity )
+    disconnect( mIndexingActivity, nullptr, this, nullptr );
+  mIndexingActivity = activity;
+  if ( mIndexingActivity )
+    connect( mIndexingActivity, &QgsAiIndexingActivity::changed, this, &QgsAiChatDockWidget::refreshIndexingIndicator );
+  refreshIndexingIndicator();
 }
 
-void QgsAiChatDockWidget::recordLayerIndexingConsent()
+void QgsAiChatDockWidget::refreshIndexingIndicator()
 {
-  QgsSettings settings;
-  settings.setValue( u"strata/index/layer_indexing_consented"_s, true );
-  settings.remove( u"geoai/index/layer_indexing_consented"_s );
-  settings.remove( u"qgis_ai/index/layer_indexing_consented"_s );
+  const QgsAiPerfScope perf( u"chat"_s, u"indexing_indicator"_s, 20 );
+  if ( !mIndexingIndicator )
+    return;
+  if ( !mIndexingActivity )
+  {
+    mIndexingIndicator->setVisible( false );
+    return;
+  }
+  const QgsAiIndexingActivity::State state = mIndexingActivity->state();
+  const QString summary = QgsAiIndexingActivity::summaryText( state );
+  mIndexingIndicator->setVisible( !summary.isEmpty() );
+  if ( summary.isEmpty() )
+    return;
+  mIndexingStatusButton->setText( summary );
+  mIndexingStatusButton->setToolTip( QgsAiIndexingActivity::detailText( state ) );
+  mIndexingPauseButton->setVisible( state.active || state.paused );
+  mIndexingPauseButton->setText( state.paused ? tr( "Resume" ) : tr( "Pause" ) );
+  mIndexingPauseButton->setToolTip( state.paused ? tr( "Resume indexing" ) : tr( "Pause indexing until you resume it" ) );
 }
 
 void QgsAiChatDockWidget::setDiscoveryController( QgsAiDiscoveryController *controller )

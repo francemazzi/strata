@@ -33,6 +33,8 @@ class TestQgsAiChatHistoryStore : public QObject
     void initTestCase();
     void persistsSessionsWhenWorkspaceConfigured();
     void updatesMessageMetadata();
+    void persistsToolCallReplyWithoutText();
+    void removesMessages();
     void workspaceRootChangeLoadsSeparateHistory();
     void projectScopesWithSameWorkspaceUseSeparateHistory();
     void emptyProjectScopeDoesNotUseWorkspaceHistory();
@@ -98,6 +100,54 @@ void TestQgsAiChatHistoryStore::persistsSessionsWhenWorkspaceConfigured()
 
   const QString dbPath = expectedDbPath( QDir( tempDir.path() ).absolutePath() );
   QVERIFY( QFileInfo::exists( dbPath ) );
+}
+
+void TestQgsAiChatHistoryStore::persistsToolCallReplyWithoutText()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiChatHistoryStore store( &contextProvider );
+  const QString sessionId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+  QVERIFY( store.createSession( sessionId, u"Tools"_s, u"agent"_s ) );
+
+  // Providers send content: null next to tool calls; the reply must still be kept.
+  QgsAiChatMessage reply;
+  reply.id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+  reply.role = QgsAiChatRole::Assistant;
+  reply.metadata.insert( u"tool_calls"_s, QVariantList { QVariantMap { { u"id"_s, u"call_1"_s }, { u"name"_s, u"list_project_layers"_s } } } );
+  QVERIFY( reply.content.isNull() );
+  QVERIFY( store.appendMessage( sessionId, reply, 0 ) );
+
+  const QList<QgsAiChatMessage> messages = store.loadMessages( sessionId );
+  QCOMPARE( messages.size(), 1 );
+  QVERIFY( messages.first().content.isEmpty() );
+  QVERIFY( messages.first().metadata.contains( u"tool_calls"_s ) );
+}
+
+void TestQgsAiChatHistoryStore::removesMessages()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiChatHistoryStore store( &contextProvider );
+  const QString sessionId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+  QVERIFY( store.createSession( sessionId, u"Retry"_s, u"agent"_s ) );
+  QStringList ids;
+  for ( int i = 0; i < 3; ++i )
+  {
+    QgsAiChatMessage message;
+    message.id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    message.role = i % 2 ? QgsAiChatRole::Assistant : QgsAiChatRole::User;
+    message.content = u"message %1"_s.arg( i );
+    QVERIFY( store.appendMessage( sessionId, message, i ) );
+    ids << message.id;
+  }
+  // An answer asked again leaves the history.
+  QVERIFY( store.removeMessages( sessionId, { ids.at( 1 ), ids.at( 2 ) } ) );
+  const QList<QgsAiChatMessage> messages = store.loadMessages( sessionId );
+  QCOMPARE( messages.size(), 1 );
+  QCOMPARE( messages.first().content, u"message 0"_s );
 }
 
 void TestQgsAiChatHistoryStore::updatesMessageMetadata()
