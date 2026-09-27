@@ -1,8 +1,9 @@
-# Strata 1.6.0 (draft)
+# Strata 1.6.0
 
-Draft notes for the AI optimization roadmap (`feat/ai-ottimizzazione-indicizzazione-ux`).
-Numbers come from `scripts/ai/run_scenarios.py` on the development machine unless noted;
-the Windows reference machine measurements are still to be done.
+Tag `strata-v1.6.0`. Packages are produced by the signed release pipeline for
+Windows, macOS and Linux. Numbers below come from `scripts/ai/run_scenarios.py`
+on the development machine unless noted; the Windows reference machine
+measurements are still to be done.
 
 ## Changes
 
@@ -162,3 +163,11 @@ the Windows reference machine measurements are still to be done.
 - Approvals are asked in the chat instead of a modal box with raw JSON: a card says what
   the tool will do ("calculate_field · Parcels · AREA = $area"), its risk, and the
   arguments (closed), with Accept (Ctrl+Enter) and Reject; Stop counts as Reject.
+
+## Packages
+
+Built from the immutable `strata-v1.6.0` tag by `release-strata.yml`,
+`build-macos-qt6.yml`, `windows-qt6.yml`, `build-appimage.yml` and
+`sign-release-assets.yml`. The release remains a draft until the signed packages,
+platform receipts, SHA-256 checksums, Sigstore bundles and
+`windows-verification.json` all match the tagged source commit.
