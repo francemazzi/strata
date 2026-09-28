@@ -1749,7 +1749,7 @@ void QgsAiModelRouter::startRequestWatchdog( RequestContext &context, int transf
     if ( timedOutContext.attempt <= timedOutContext.maxRetries )
     {
       clearRequestTransport( timedOutContext );
-      QTimer::singleShot( 1000, this, [this, requestId]() {
+      QTimer::singleShot( 1000, Qt::PreciseTimer, this, [this, requestId]() {
         if ( !mRequests.contains( requestId ) ) return;
         auto &pending = mRequests[requestId];
         if ( !dispatchRequest( pending ) ) finishRequest( requestId, false, QString(), tr( "Unable to resume the timed-out request." ), 408, pending.attempt - 1, false, 0 );
@@ -2487,7 +2487,7 @@ void QgsAiModelRouter::onReplyFinished()
 
   if ( retriable )
   {
-    // Honor the server's Retry-After header (seconds form, clamped) when present;
+    // Honor the server's Retry-After header (seconds or HTTP date) when present;
     // otherwise back off linearly with the attempt count.
     int retryAfterSeconds = context->retryAfterSeconds;
     if ( retryAfterSeconds < 0 && reply->hasRawHeader( "Retry-After" ) )
@@ -2512,7 +2512,7 @@ void QgsAiModelRouter::onReplyFinished()
     clearRequestTransport( *context );
     QgsMessageLog::
       logMessage( u"Request id=%1 provider=%2 retrying in %3 ms (attempt %4 of %5)."_s.arg( requestId, providerName ).arg( backoffMs ).arg( context->attempt + 1 ).arg( context->maxRetries + 1 ), u"AI"_s, Qgis::MessageLevel::Info, false );
-    QTimer::singleShot( backoffMs, this, [this, requestId, httpStatus]() {
+    QTimer::singleShot( backoffMs, Qt::PreciseTimer, this, [this, requestId, httpStatus]() {
       // The request may have been canceled while waiting for the backoff.
       if ( !mRequests.contains( requestId ) )
         return;

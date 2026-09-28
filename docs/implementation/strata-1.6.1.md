@@ -10,13 +10,16 @@ Scope: core; change: code; reuse: candidate. Roadmap phases 0 (distribution), 1 
 - UI separates Resume, Hide notice and Restart this turn. Request-error messages are excluded
   from outgoing model context. Old remote_content_not_allowed histories can resume when complete.
 - SSE application codes and numeric statuses survive HTTP 200. Router retains bounded retries;
-  watchdog timeouts retry without replaying tools; long Retry-After intervals require manual resume.
+  watchdog timeouts retry without replaying tools; precise timers prevent early retries.
+  Long Retry-After intervals require manual resume.
 - Shared Updates settings page and version-check dialog: background check at most daily,
   asynchronous download/cancel, signed manifest, SHA-256/length/platform checks, explicit install.
 - Native helper stages Windows installer/portable, macOS bundle and Linux AppImage updates.
   It verifies the manifest/package again, waits for application exit, keeps backups and checks
   startup acknowledgement. Immediate replacement/startup failures restore the previous bundle.
+  Linux replaces the AppImage atomically; macOS atomically exchanges the two bundles.
   A still-running app without acknowledgement is not killed or replaced underneath the user.
+- Windows runs its helper from a private runtime copy to avoid locking installed DLLs/files.
 - Linux holds a separate AppImage runtime open while the updater runs. Portable staging overlays
   the new package on a copy of the installation so local profile/project files are retained.
 - Release pipeline signs update-manifest.json with a dedicated RSA-3072 key and seals it together
@@ -49,6 +52,8 @@ version without publishing it as Latest. Windows acceptance remains a separate e
   public traffic remains on `strata-be-00044-cfp`.
 - Backend CI cannot start: account billing/spending restriction, not a test failure.
 - Native end-to-end updater acceptance on installed release packages is still pending.
+- Windows portable still needs crash/power-loss recovery hardening between its two directory
+  renames; keeping a backup alone does not satisfy that acceptance gate. Do not publish yet.
 - No immutable 1.6.1 release tag or stable publication until CI and acceptance gates pass.
 
 ## Recovery and compatibility

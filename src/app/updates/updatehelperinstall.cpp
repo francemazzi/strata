@@ -11,6 +11,9 @@
 #include <QThread>
 #include <QTemporaryDir>
 #include <QUuid>
+#ifndef Q_OS_WIN
+#include <stdio.h>
+#endif
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <shellapi.h>
@@ -151,12 +154,42 @@ bool UpdateHelper::install( const QJsonObject &job, const QString &jobPath, QStr
     if ( !QgsUpdateManifest::select( manifest, job.value( u"currentVersion"_s ).toString(), platform, QSysInfo::buildCpuArchitecture(), selected, error ) || !QgsUpdateManifest::verifyFile( stage, selected, error ) )
       return false;
   }
-  if ( !move( target, backup ) )
+  bool replacedAtomically = false;
+#ifdef Q_OS_LINUX
+  // The application path must always exist, even if power is lost during replacement.
+  if ( platform == "linux"_L1 )
+  {
+    if ( !QFile::copy( target, backup ) || ::rename( QFile::encodeName( stage ).constData(), QFile::encodeName( target ).constData() ) != 0 )
+    {
+      *error = u"Cannot atomically replace the AppImage. Previous application retained."_s;
+      return false;
+    }
+    replacedAtomically = true;
+  }
+#elif defined( Q_OS_MACOS )
+  if ( platform == "macos"_L1 )
+  {
+    if ( ::renamex_np( QFile::encodeName( stage ).constData(), QFile::encodeName( target ).constData(), RENAME_SWAP ) != 0 )
+    {
+      *error = u"Cannot atomically exchange the application bundles."_s;
+      return false;
+    }
+    // After the atomic exchange the previous application resides at stage.
+    if ( !move( stage, backup ) )
+    {
+      ::renamex_np( QFile::encodeName( stage ).constData(), QFile::encodeName( target ).constData(), RENAME_SWAP );
+      *error = u"Cannot retain the application backup. Update cancelled."_s;
+      return false;
+    }
+    replacedAtomically = true;
+  }
+#endif
+  if ( !replacedAtomically && !move( target, backup ) )
   {
     *error = u"Cannot move the current application. No update was installed."_s;
     return false;
   }
-  if ( !move( stage, target ) )
+  if ( !replacedAtomically && !move( stage, target ) )
   {
     move( backup, target );
     *error = u"Cannot install update; previous version restored."_s;

@@ -2111,6 +2111,9 @@ void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
   QgsAiFileContextProvider contextProvider( tempDir.path() );
   QgsAiReviewPatchEngine reviewEngine;
   QgsAiAgentSessionManager manager( &router, &contextProvider, &reviewEngine );
+  QgsAiChatHistoryStore store( &contextProvider );
+  manager.setHistoryStore( &store );
+  manager.setProjectChatHistoryScopeKey( QgsAiAgentSessionManager::chatHistoryScopeKeyForProjectFile( tempDir.filePath( u"resume.qgz"_s ) ) );
   manager.setToolRegistry( &registry );
   manager.setActiveAgent( u"editor"_s );
 
@@ -2127,6 +2130,11 @@ void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
   QVERIFY( !historyContains( manager.history(), u"Here is what I ran"_s ) );
   const int toolCount = std::count_if( manager.history().cbegin(), manager.history().cend(), []( const QgsAiChatMessage &m ) { return m.role == QgsAiChatRole::Tool; } );
   server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Recovered\"},\"finish_reason\":\"stop\"}]}" ) );
+  const QString sessionId = manager.activeSessionId();
+  QVERIFY( !sessionId.isEmpty() );
+  manager.startNewSession();
+  manager.loadSession( sessionId );
+  QCOMPARE( manager.history().last().metadata.value( u"recovery"_s ).toMap(), last.metadata.value( u"recovery"_s ).toMap() );
   QString resumeError;
   QVERIFY2( manager.resumeLastInterruptedTurn( &resumeError ), qPrintable( resumeError ) );
   QVERIFY( !manager.resumeLastInterruptedTurn( &resumeError ) );

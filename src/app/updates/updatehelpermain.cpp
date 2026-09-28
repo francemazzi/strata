@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QJsonDocument>
 #include <QLockFile>
 #include <QSaveFile>
@@ -44,6 +45,25 @@ int main( int argc, char **argv )
     || !QgsUpdateManifest::verifyFile( job.value( u"package"_s ).toString(), package, &error )
   )
     return fail( error );
+#ifdef Q_OS_WIN
+  // Run from a private copy: Windows cannot replace loaded executables or DLLs.
+  // Copying is performed by the helper, never on the application's UI thread.
+  const QString target = QFileInfo( job.value( u"target"_s ).toString() ).canonicalFilePath();
+  const QString runtime = QFileInfo( path ).absolutePath() + u"/helper-runtime"_s;
+  const QString relocated = runtime + u"/bin/strata-update-helper.exe"_s;
+  if ( QDir::cleanPath( QCoreApplication::applicationFilePath() ).compare( QDir::cleanPath( relocated ), Qt::CaseInsensitive ) != 0 )
+  {
+    const QString installed = QFileInfo( QCoreApplication::applicationDirPath() + u"/.."_s ).canonicalFilePath();
+    if ( target.isEmpty() || target.compare( installed, Qt::CaseInsensitive ) != 0 )
+      return fail( u"The update target is not this helper's installation."_s );
+    if ( QFileInfo::exists( runtime ) || !UpdateHelper::copyTree( target, runtime, &error ) )
+      return fail( error.isEmpty() ? u"A helper runtime already exists; prepare a new update."_s : error );
+    lock.unlock();
+    if ( !QProcess::startDetached( relocated, { path }, QFileInfo( relocated ).absolutePath() ) )
+      return fail( u"Cannot start the isolated update helper."_s );
+    return 0;
+  }
+#endif
   const qint64 pid = job.value( u"parentPid"_s ).toInteger();
   if ( pid <= 1 || pid == QCoreApplication::applicationPid() )
     return fail( u"Invalid parent process."_s );

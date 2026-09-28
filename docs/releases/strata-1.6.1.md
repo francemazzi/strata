@@ -2,6 +2,8 @@
 
 Candidate release. Publication requires the platform, Windows and updater acceptance gates.
 
+- Replace the Strata mark across macOS, Windows, Linux, assistant, splash screen and documentation (already on master).
+- Report Claude OAuth success only after token exchange and secure credential storage complete; retain typed, actionable OAuth errors and branded callback pages (already on master).
 - Fix managed chats stopping after successful web reads with remote_content_not_allowed.
 - Resume interrupted AI responses while preserving completed tools and project changes.
 - Separate hiding an error from restarting a turn; improve temporary-error and SSE handling.
@@ -14,3 +16,8 @@ The integrated updater is available from 1.6.1 onward for official Windows, macO
 
 Backend compatibility and candidate evidence are recorded in the backend 1.6.1 gateway notes.
 Native installation acceptance remains pending; this document is not a publication receipt.
+
+Existing OAuth verification remains part of this release: `test_app_aiclaudeoauthclient`,
+`test_app_aiclaudeoauthhelpers`, `test_app_aiclaudeconnectwidget`, `test_app_aimodelrouter`,
+and `test_app_aisecretstore`. Live Anthropic login and final signed package acceptance
+remain release gates, in addition to the new updater acceptance.
