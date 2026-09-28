@@ -354,5 +354,8 @@ jobs:
           xcrun notarytool history --apple-id "$MACOS_APPLE_ID" \
             --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" \
             --output-format json > "$RECEIPT"
+          xcrun notarytool store-credentials strata-release-local \
+            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_APPLE_TEAM_ID" \
+            --password "$MACOS_APPLE_APP_PASSWORD" > /dev/null
           echo "Apple signing identity and notarization credentials verified on the local runner." >> "$GITHUB_STEP_SUMMARY"
-          echo "No secrets exported; no release published." >> "$GITHUB_STEP_SUMMARY"
+          echo "Notarization credentials stored in the local Keychain; no plaintext export or release publication." >> "$GITHUB_STEP_SUMMARY"
