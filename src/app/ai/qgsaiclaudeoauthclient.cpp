@@ -15,6 +15,7 @@
 
 #include "qgsaiclaudeoauthclient.h"
 
+#include "qgsaioauthcallbackpage.h"
 #include "qgsaisecretstore.h"
 #include "qgsnetworkaccessmanager.h"
 
@@ -46,6 +47,13 @@ namespace
 
   QString tokenEndpointOverride;
 
+  struct TokenRequestResult
+  {
+      QJsonObject payload;
+      QgsAiClaudeOAuthError error;
+      bool ok() const { return !payload.isEmpty(); }
+  };
+
   QString base64Url( const QByteArray &bytes )
   {
     return QString::fromLatin1( bytes.toBase64( QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals ) );
@@ -70,15 +78,12 @@ namespace
     return false;
   }
 
-  QJsonObject postClaudeTokenRequest( const QUrl &url, const QJsonObject &payload, int timeoutMs, int &httpStatus, QString *errorMessage )
+  TokenRequestResult postClaudeTokenRequest( const QUrl &url, const QJsonObject &payload, int timeoutMs )
   {
-    httpStatus = 0;
     QgsNetworkAccessManager *nam = QgsNetworkAccessManager::instance();
     if ( !nam )
     {
-      if ( errorMessage )
-        *errorMessage = u"Network manager is not available."_s;
-      return {};
+      return { {}, QgsAiClaudeOAuthErrorParser::fromTokenReply( 0, {}, {}, false, QObject::tr( "Network manager is not available." ) ) };
     }
 
     QNetworkRequest request( url );
@@ -88,11 +93,7 @@ namespace
 
     QNetworkReply *reply = nam->post( request, QJsonDocument( payload ).toJson( QJsonDocument::Compact ) );
     if ( !reply )
-    {
-      if ( errorMessage )
-        *errorMessage = u"Unable to start the Claude token request."_s;
-      return {};
-    }
+      return { {}, QgsAiClaudeOAuthErrorParser::fromTokenReply( 0, {}, {}, false, QObject::tr( "Unable to start the Claude token request." ) ) };
 
     QEventLoop loop;
     QTimer timer;
@@ -102,48 +103,50 @@ namespace
     timer.start( timeoutMs );
     loop.exec();
 
-    if ( timer.isActive() )
+    const bool timedOut = !timer.isActive();
+    if ( !timedOut )
       timer.stop();
     else
       reply->abort();
 
-    httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
+    const int httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
     const QByteArray body = reply->readAll();
+    const QByteArray retryAfter = reply->rawHeader( "Retry-After" );
     const QNetworkReply::NetworkError networkError = reply->error();
+    const QString networkDetail = reply->errorString();
     reply->deleteLater();
 
     const QJsonDocument doc = QJsonDocument::fromJson( body );
     const QJsonObject object = doc.isObject() ? doc.object() : QJsonObject();
     if ( networkError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300 )
+      return { {}, QgsAiClaudeOAuthErrorParser::fromTokenReply( httpStatus, body, retryAfter, timedOut, networkDetail ) };
+    if ( object.isEmpty() )
     {
-      if ( errorMessage )
-      {
-        QString detail = object.value( u"error_description"_s ).toString();
-        if ( detail.isEmpty() )
-          detail = object.value( u"error"_s ).toString();
-        if ( detail.isEmpty() )
-          detail = QString::fromUtf8( body.left( 300 ) );
-        if ( detail.isEmpty() )
-          detail = u"Claude token request failed."_s;
-        *errorMessage = u"Claude token request failed (HTTP %1): %2"_s.arg( httpStatus ).arg( detail );
-      }
-      return {};
+      QgsAiClaudeOAuthError error;
+      error.category = QgsAiClaudeOAuthError::Category::InvalidResponse;
+      error.userMessage = QObject::tr( "Claude returned an empty connection response. Try again from Strata." );
+      error.technicalDetail = QObject::tr( "The token endpoint returned HTTP %1 without credentials." ).arg( httpStatus );
+      return { {}, error };
     }
-    return object;
+    return { object, {} };
   }
 
-  void respondHtml( QTcpSocket *socket, int status, const QByteArray &body )
+  void respondHtml( QTcpSocket *socket, int status, QgsAiOAuthCallbackPage::State state, const QString &title, const QString &message, const QString &detail = QString() )
   {
-    const QByteArray header = QByteArrayLiteral( "HTTP/1.1 " ) + QByteArray::number( status ) + QByteArrayLiteral( " \r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: " ) + QByteArray::number( body.size() ) + QByteArrayLiteral( "\r\n\r\n" );
-    socket->write( header );
-    socket->write( body );
+    socket->write( QgsAiOAuthCallbackPage::httpResponse( status, QgsAiOAuthCallbackPage::render( state, title, message, detail ) ) );
     socket->disconnectFromHost();
+  }
+
+  QString errorText( const QgsAiClaudeOAuthError &error )
+  {
+    return error.technicalDetail.isEmpty() ? error.userMessage : u"%1 (%2)"_s.arg( error.userMessage, error.technicalDetail );
   }
 } // namespace
 
 QgsAiClaudeOAuthClient::QgsAiClaudeOAuthClient( QObject *parent )
   : QObject( parent )
 {
+  qRegisterMetaType<QgsAiClaudeOAuthError>();
 }
 
 QString QgsAiClaudeOAuthClient::authorizeUrl( const QString &redirectUri, const QString &state, const QString &codeChallenge )
@@ -197,8 +200,13 @@ bool QgsAiClaudeOAuthClient::start( QString *errorMessage )
 
   mTimeout = new QTimer( this );
   mTimeout->setSingleShot( true );
-  connect( mTimeout, &QTimer::timeout, this, [this]() { fail( tr( "Claude login timed out. Try Connect Claude again." ) ); } );
-  mTimeout->start( 5 * 60 * 1000 );
+  connect( mTimeout, &QTimer::timeout, this, [this]() {
+    QgsAiClaudeOAuthError error;
+    error.category = QgsAiClaudeOAuthError::Category::Timeout;
+    error.userMessage = tr( "Claude login timed out. Try Connect Claude again." );
+    fail( error );
+  } );
+  mTimeout->start( mLoginTimeoutMs );
   return true;
 }
 
@@ -234,12 +242,12 @@ QString QgsAiClaudeOAuthClient::redirectUri() const
   return mRedirectUri;
 }
 
-void QgsAiClaudeOAuthClient::fail( const QString &errorMessage )
+void QgsAiClaudeOAuthClient::fail( const QgsAiClaudeOAuthError &error )
 {
   if ( mFinished && !mServer )
     return;
   cancel();
-  emit loginFailed( errorMessage );
+  emit loginFailed( error );
 }
 
 void QgsAiClaudeOAuthClient::handlePendingConnection()
@@ -262,8 +270,11 @@ void QgsAiClaudeOAuthClient::handlePendingConnection()
     const QList<QByteArray> parts = requestLine.split( ' ' );
     if ( parts.size() < 2 || parts.at( 0 ) != "GET" )
     {
-      respondHtml( socket, 400, QByteArrayLiteral( "<p>Claude login failed.</p>" ) );
-      fail( tr( "Claude login received an unexpected response." ) );
+      QgsAiClaudeOAuthError error;
+      error.category = QgsAiClaudeOAuthError::Category::InvalidRequest;
+      error.userMessage = tr( "Claude login received an unexpected response. Try again from Strata." );
+      respondHtml( socket, 400, QgsAiOAuthCallbackPage::State::Error, tr( "Connection not completed" ), error.userMessage );
+      fail( error );
       return;
     }
 
@@ -271,26 +282,41 @@ void QgsAiClaudeOAuthClient::handlePendingConnection()
     const QUrlQuery query( url );
     if ( query.queryItemValue( u"state"_s ) != mState )
     {
-      respondHtml( socket, 400, QByteArrayLiteral( "<p>Claude login was rejected.</p>" ) );
-      fail( tr( "Claude login state did not match. Try Connect Claude again." ) );
+      QgsAiClaudeOAuthError error;
+      error.category = QgsAiClaudeOAuthError::Category::StateMismatch;
+      error.userMessage = tr( "Claude login could not be verified. Try Connect Claude again." );
+      respondHtml( socket, 400, QgsAiOAuthCallbackPage::State::Error, tr( "Connection not verified" ), error.userMessage );
+      fail( error );
       return;
     }
     const QString code = query.queryItemValue( u"code"_s );
     if ( code.isEmpty() )
     {
-      const QString detail = query.queryItemValue( u"error_description"_s, QUrl::FullyDecoded );
-      respondHtml( socket, 400, QByteArrayLiteral( "<p>Claude login was not approved.</p>" ) );
-      fail( detail.isEmpty() ? tr( "Claude login was not approved." ) : detail );
-      return;
-    }
-
-    respondHtml( socket, 200, QByteArrayLiteral( "<p>Claude is connected. You can close this window and return to Strata.</p>" ) );
-    QString error;
-    if ( !exchangeCode( code, &error ) )
-    {
+      QgsAiClaudeOAuthError error;
+      error.category = QgsAiClaudeOAuthError::Category::AuthorizationDenied;
+      error.userMessage = tr( "Claude login was not approved. No connection was saved." );
+      error.technicalDetail = QgsAiClaudeOAuthErrorParser::safeDetail( query.queryItemValue( u"error_description"_s, QUrl::FullyDecoded ) );
+      respondHtml( socket, 400, QgsAiOAuthCallbackPage::State::Error, tr( "Connection cancelled" ), error.userMessage, error.technicalDetail );
       fail( error );
       return;
     }
+
+    QgsAiClaudeOAuthError error;
+    if ( !exchangeCode( code, &error ) )
+    {
+      const bool limited = error.category == QgsAiClaudeOAuthError::Category::RateLimited;
+      respondHtml(
+        socket,
+        limited ? 429 : 502,
+        limited ? QgsAiOAuthCallbackPage::State::RateLimited : QgsAiOAuthCallbackPage::State::Error,
+        limited ? tr( "Try again later" ) : tr( "Connection not completed" ),
+        error.userMessage,
+        error.technicalDetail
+      );
+      fail( error );
+      return;
+    }
+    respondHtml( socket, 200, QgsAiOAuthCallbackPage::State::Success, tr( "Claude is connected" ), tr( "Your Claude subscription is ready to use in Strata." ) );
     cancel();
     emit loginSucceeded();
   };
@@ -300,7 +326,7 @@ void QgsAiClaudeOAuthClient::handlePendingConnection()
     readCallback();
 }
 
-bool QgsAiClaudeOAuthClient::exchangeCode( const QString &code, QString *errorMessage )
+bool QgsAiClaudeOAuthClient::exchangeCode( const QString &code, QgsAiClaudeOAuthError *error )
 {
   QJsonObject payload;
   payload.insert( u"grant_type"_s, u"authorization_code"_s );
@@ -310,25 +336,45 @@ bool QgsAiClaudeOAuthClient::exchangeCode( const QString &code, QString *errorMe
   payload.insert( u"code_verifier"_s, QString::fromLatin1( mVerifier ) );
   payload.insert( u"state"_s, mState );
 
-  int httpStatus = 0;
-  const QJsonObject tokenObject = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
-  if ( tokenObject.isEmpty() )
+  const TokenRequestResult result = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000 );
+  if ( !result.ok() )
+  {
+    if ( error )
+      *error = result.error;
     return false;
+  }
 
+  const QJsonObject tokenObject = result.payload;
   const QString accessToken = tokenObject.value( u"access_token"_s ).toString();
   const QString refreshToken = tokenObject.value( u"refresh_token"_s ).toString();
   if ( accessToken.isEmpty() || refreshToken.isEmpty() )
   {
-    if ( errorMessage )
-      *errorMessage = u"Claude token response did not include an access token and a refresh token."_s;
+    if ( error )
+    {
+      error->category = QgsAiClaudeOAuthError::Category::InvalidResponse;
+      error->userMessage = tr( "Claude returned an incomplete connection response. Try again from Strata." );
+      error->technicalDetail = tr( "The token response did not include both required credentials." );
+    }
     return false;
   }
 
   const qint64 expiresIn = static_cast<qint64>( tokenObject.value( u"expires_in"_s ).toDouble( 3600 ) );
   const QString expiresAt = QString::number( QDateTime::currentMSecsSinceEpoch() + expiresIn * 1000 );
-  return storeLoginSecret( accessTokenSettingKey(), accessToken, errorMessage )
-         && storeLoginSecret( refreshTokenSettingKey(), refreshToken, errorMessage )
-         && storeLoginSecret( expiresAtSettingKey(), expiresAt, errorMessage );
+  QString storageError;
+  const bool stored = storeLoginSecret( accessTokenSettingKey(), accessToken, &storageError )
+                      && storeLoginSecret( expiresAtSettingKey(), expiresAt, &storageError )
+                      && storeLoginSecret( refreshTokenSettingKey(), refreshToken, &storageError );
+  if ( stored )
+    return true;
+
+  clearLogin();
+  if ( error )
+  {
+    error->category = QgsAiClaudeOAuthError::Category::CredentialStorage;
+    error->userMessage = tr( "Claude approved the connection, but Strata could not save it securely." );
+    error->technicalDetail = QgsAiClaudeOAuthErrorParser::safeDetail( storageError );
+  }
+  return false;
 }
 
 bool QgsAiClaudeOAuthClient::refreshAccessToken( AccessToken &token, QString *errorMessage )
@@ -355,11 +401,15 @@ bool QgsAiClaudeOAuthClient::refreshAccessToken( AccessToken &token, QString *er
   payload.insert( u"client_id"_s, QString::fromUtf8( CLAUDE_CLIENT_ID ) );
   payload.insert( u"scope"_s, QString::fromUtf8( CLAUDE_SCOPE ) );
 
-  int httpStatus = 0;
-  const QJsonObject object = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000, httpStatus, errorMessage );
-  if ( object.isEmpty() )
+  const TokenRequestResult result = postClaudeTokenRequest( QUrl( tokenEndpoint() ), payload, 30000 );
+  if ( !result.ok() )
+  {
+    if ( errorMessage )
+      *errorMessage = errorText( result.error );
     return false;
+  }
 
+  const QJsonObject object = result.payload;
   token.token = object.value( u"access_token"_s ).toString();
   if ( token.token.isEmpty() )
   {

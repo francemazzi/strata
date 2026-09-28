@@ -14,6 +14,7 @@
  ***************************************************************************/
 
 #include "ai/qgsaiclaudeconnectwidget.h"
+#include "ai/qgsaiclaudeoauthclient.h"
 #include "ai/qgsaimodelrouter.h"
 #include "qgsaisecretstoretestutils.h"
 #include "qgstest.h"
@@ -54,6 +55,46 @@ class TestQgsAiClaudeConnectWidget : public QObject
       widget.findChild<QPushButton *>( u"aiClaudeUseButton"_s )->click();
       QCOMPARE( cloud.count(), 1 );
       QCOMPARE( use.count(), 1 );
+    }
+
+    void rateLimitShowsRetryState()
+    {
+      QgsAiClaudeOAuthClient::clearLogin();
+      QgsAiModelRouter router;
+      QgsAiClaudeConnectWidget widget( &router );
+      auto *client = widget.findChild<QgsAiClaudeOAuthClient *>();
+      auto *title = widget.findChild<QLabel *>( u"aiClaudeLoginStatusTitle"_s );
+      auto *status = widget.findChild<QLabel *>( u"aiClaudeLoginStatus"_s );
+      auto *connectButton = widget.findChild<QPushButton *>( u"aiClaudeConnectButton"_s );
+      auto *logoutButton = widget.findChild<QPushButton *>( u"aiClaudeLogoutButton"_s );
+      QVERIFY( client && title && status && connectButton && logoutButton );
+
+      QgsAiClaudeOAuthError error;
+      error.category = QgsAiClaudeOAuthError::Category::RateLimited;
+      error.userMessage = u"Claude limited this login."_s;
+      error.technicalDetail = u"HTTP 429 · rate_limit_error"_s;
+      error.retryAfterSeconds = 21;
+      QVERIFY( QMetaObject::invokeMethod( client, "loginFailed", Qt::DirectConnection, Q_ARG( QgsAiClaudeOAuthError, error ) ) );
+      QCOMPARE( title->text(), u"Try again later"_s );
+      QVERIFY( status->text().contains( u"21"_s ) );
+      QCOMPARE( status->toolTip(), error.technicalDetail );
+      QCOMPARE( connectButton->text(), u"Try again"_s );
+      QVERIFY( connectButton->isEnabled() );
+      QVERIFY( !logoutButton->isEnabled() );
+      QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
+    }
+
+    void connectedStateDisablesReconnect()
+    {
+      QVERIFY( QgsAiSecretStore::writeSecret( QgsAiClaudeOAuthClient::refreshTokenSettingKey(), u"refresh"_s ) );
+      QgsAiModelRouter router;
+      QgsAiClaudeConnectWidget widget( &router );
+      auto *title = widget.findChild<QLabel *>( u"aiClaudeLoginStatusTitle"_s );
+      auto *connectButton = widget.findChild<QPushButton *>( u"aiClaudeConnectButton"_s );
+      auto *logoutButton = widget.findChild<QPushButton *>( u"aiClaudeLogoutButton"_s );
+      QCOMPARE( title->text(), u"Claude connected"_s );
+      QVERIFY( !connectButton->isEnabled() );
+      QVERIFY( logoutButton->isEnabled() );
     }
 };
 QGSTEST_MAIN( TestQgsAiClaudeConnectWidget )

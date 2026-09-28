@@ -106,6 +106,7 @@ if (ENABLE_AI_ASSISTANT)
   set(TESTS ${TESTS} testqgsairulesskillsstore.cpp)
   set(TESTS ${TESTS} testqgsaiclaudeconnectwidget.cpp)
   set(TESTS ${TESTS} testqgsaiclaudeoauthclient.cpp)
+  set(TESTS ${TESTS} testqgsaiclaudeoauthhelpers.cpp)
 endif()
 
 if (HAVE_GEOREFERENCER)

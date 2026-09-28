@@ -21,6 +21,7 @@
 
 #include <QComboBox>
 #include <QDesktopServices>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -39,48 +40,61 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   auto *layout = new QVBoxLayout( this );
   layout->setContentsMargins( 0, 0, 0, 0 );
 
-  mStatus = new QLabel( this );
+  mStatusFrame = new QFrame( this );
+  mStatusFrame->setObjectName( u"aiClaudeStatusCard"_s );
+  auto *statusLayout = new QVBoxLayout( mStatusFrame );
+  statusLayout->setContentsMargins( 12, 10, 12, 10 );
+  statusLayout->setSpacing( 3 );
+  mStatusTitle = new QLabel( mStatusFrame );
+  mStatusTitle->setObjectName( u"aiClaudeLoginStatusTitle"_s );
+  statusLayout->addWidget( mStatusTitle );
+  mStatus = new QLabel( mStatusFrame );
   mStatus->setWordWrap( true );
   mStatus->setObjectName( u"aiClaudeLoginStatus"_s );
-  layout->addWidget( mStatus );
+  statusLayout->addWidget( mStatus );
+  layout->addWidget( mStatusFrame );
 
   mLogin = new QgsAiClaudeOAuthClient( this );
-  auto *connectButton = new QPushButton( tr( "Connect Claude" ), this );
-  connectButton->setObjectName( u"aiClaudeConnectButton"_s );
-  auto *logoutButton = new QPushButton( tr( "Log out" ), this );
-  logoutButton->setObjectName( u"aiClaudeLogoutButton"_s );
+  mConnectButton = new QPushButton( tr( "Connect Claude" ), this );
+  mConnectButton->setObjectName( u"aiClaudeConnectButton"_s );
+  mLogoutButton = new QPushButton( tr( "Log out" ), this );
+  mLogoutButton->setObjectName( u"aiClaudeLogoutButton"_s );
   auto *buttons = new QWidget( this );
   auto *buttonRow = new QHBoxLayout( buttons );
   buttonRow->setContentsMargins( 0, 0, 0, 0 );
-  buttonRow->addWidget( connectButton );
-  buttonRow->addWidget( logoutButton );
+  buttonRow->addWidget( mConnectButton );
+  buttonRow->addWidget( mLogoutButton );
   layout->addWidget( buttons );
 
-  connect( connectButton, &QPushButton::clicked, this, [this]() {
-    QString error;
-    if ( !mLogin->start( &error ) )
-    {
-      mStatus->setText( error );
-      return;
-    }
-    mStatus->setText( tr( "Approve Claude in the browser, then return here." ) );
-    QDesktopServices::openUrl( QUrl( mLogin->currentAuthorizeUrl() ) );
-  } );
+  connect( mConnectButton, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::startLogin );
   connect( mLogin, &QgsAiClaudeOAuthClient::loginSucceeded, this, [this]() {
     QString error;
-    if ( mRouter )
-      mRouter->setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error );
-    refreshStatus();
+    if ( mRouter && !mRouter->setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error ) )
+    {
+      QgsAiClaudeOAuthClient::clearLogin();
+      setConnectionState( ConnectionState::Error, tr( "Claude connected, but Strata could not activate the subscription." ), error );
+      return;
+    }
+    setConnectionState( ConnectionState::Connected );
   } );
-  connect( mLogin, &QgsAiClaudeOAuthClient::loginFailed, this, [this]( const QString &error ) {
-    mStatus->setText( error );
+  connect( mLogin, &QgsAiClaudeOAuthClient::loginFailed, this, [this]( const QgsAiClaudeOAuthError &error ) {
+    QString message = error.userMessage;
+    if ( error.retryAfterSeconds > 0 )
+      message += tr( " Try again in about %1 seconds." ).arg( error.retryAfterSeconds );
+    setConnectionState( error.category == QgsAiClaudeOAuthError::Category::RateLimited ? ConnectionState::RateLimited : ConnectionState::Error, message, error.technicalDetail );
   } );
-  connect( logoutButton, &QPushButton::clicked, this, [this]() {
+  connect( mLogoutButton, &QPushButton::clicked, this, [this]() {
+    if ( mConnectionState == ConnectionState::Waiting )
+    {
+      mLogin->cancel();
+      setConnectionState( ConnectionState::Disconnected );
+      return;
+    }
     mLogin->cancel();
     QgsAiClaudeOAuthClient::clearLogin();
     if ( mRouter )
       mRouter->setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::ApiKey );
-    refreshStatus();
+    setConnectionState( ConnectionState::Disconnected );
   } );
 
   auto *cloud = new QPushButton( tr( "Sign in to Strata Cloud" ), this );
@@ -114,6 +128,23 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   refreshStatus();
 }
 
+void QgsAiClaudeConnectWidget::startLogin()
+{
+  QString error;
+  if ( !mLogin->start( &error ) )
+  {
+    setConnectionState( ConnectionState::Error, error );
+    return;
+  }
+
+  setConnectionState( ConnectionState::Waiting );
+  if ( QDesktopServices::openUrl( QUrl( mLogin->currentAuthorizeUrl() ) ) )
+    return;
+
+  mLogin->cancel();
+  setConnectionState( ConnectionState::Error, tr( "Strata could not open the browser. Check your default browser and try again." ) );
+}
+
 QString QgsAiClaudeConnectWidget::modelText() const
 {
   return mModelCombo->currentText().trimmed();
@@ -127,7 +158,57 @@ QString QgsAiClaudeConnectWidget::pendingApiKey() const
 void QgsAiClaudeConnectWidget::refreshStatus()
 {
   if ( QgsAiClaudeOAuthClient::hasRefreshToken() )
-    mStatus->setText( tr( "Signed in with a Claude subscription." ) );
+    setConnectionState( ConnectionState::Connected );
   else
-    mStatus->setText( tr( "Not signed in. Connect Claude opens the browser and finishes on this computer." ) );
+    setConnectionState( ConnectionState::Disconnected );
+}
+
+void QgsAiClaudeConnectWidget::setConnectionState( ConnectionState state, const QString &message, const QString &technicalDetail )
+{
+  mConnectionState = state;
+  QString title;
+  QString body = message;
+  QString color;
+  switch ( state )
+  {
+    case ConnectionState::Disconnected:
+      title = tr( "Claude not connected" );
+      body = tr( "Connect in the browser to use your Claude subscription in Strata." );
+      color = u"#718078"_s;
+      break;
+    case ConnectionState::Waiting:
+      title = tr( "Waiting for Claude" );
+      body = tr( "Approve the connection in the browser. Strata will update automatically." );
+      color = u"#2f78a0"_s;
+      break;
+    case ConnectionState::Connected:
+      title = tr( "Claude connected" );
+      body = tr( "Your Claude subscription is ready to use." );
+      color = u"#16835c"_s;
+      break;
+    case ConnectionState::RateLimited:
+      title = tr( "Try again later" );
+      color = u"#b16814"_s;
+      break;
+    case ConnectionState::Error:
+      title = tr( "Connection not completed" );
+      color = u"#b53c38"_s;
+      break;
+  }
+
+  mStatusTitle->setText( title );
+  mStatus->setText( body );
+  mStatus->setToolTip( technicalDetail );
+  mStatusFrame->setStyleSheet(
+    u"QFrame#aiClaudeStatusCard { background: palette(alternate-base); border-left: 4px solid %1; border-radius: 7px; } QLabel { background: transparent; border: 0; } QLabel#aiClaudeLoginStatusTitle { color: %1; font-weight: 700; }"_s
+      .arg( color )
+  );
+
+  const bool waiting = state == ConnectionState::Waiting;
+  const bool connected = state == ConnectionState::Connected;
+  const bool retry = state == ConnectionState::RateLimited || state == ConnectionState::Error;
+  mConnectButton->setEnabled( !waiting && !connected );
+  mConnectButton->setText( retry ? tr( "Try again" ) : tr( "Connect Claude" ) );
+  mLogoutButton->setEnabled( waiting || connected );
+  mLogoutButton->setText( waiting ? tr( "Cancel" ) : tr( "Log out" ) );
 }

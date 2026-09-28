@@ -1663,7 +1663,7 @@ QgisApp::QgisApp(
   mActionAiAssistant = new QAction( tr( "AI Assistant" ), this );
   mActionAiAssistant->setObjectName( u"mActionAiAssistant"_s );
   mActionAiAssistant->setCheckable( true );
-  mActionAiAssistant->setIcon( QIcon( u":/images/icons/strata-icon.svg"_s ) );
+  mActionAiAssistant->setIcon( QIcon( u":/images/icons/strata-icon-512x512.png"_s ) );
   mActionAiAssistant->setToolTip( tr( "Show or hide Strata AI Assistant" ) );
   connect( mActionAiAssistant, &QAction::toggled, mAiChatDock, &QgsDockWidget::setUserVisible );
   connect( mAiChatDock, &QgsDockWidget::visibilityChanged, mActionAiAssistant, &QAction::setChecked );
@@ -4707,7 +4707,7 @@ void QgisApp::setTheme( const QString &themeName )
     mActionShowPythonDialog->setIcon( QgsApplication::getThemeIcon( u"console/mIconRunConsole.svg"_s ) );
 #ifdef HAVE_AI_ASSISTANT
   if ( mActionAiAssistant )
-    mActionAiAssistant->setIcon( QIcon( u":/images/icons/strata-icon.svg"_s ) );
+    mActionAiAssistant->setIcon( QIcon( u":/images/icons/strata-icon-512x512.png"_s ) );
 #endif
   mActionCheckQgisVersion->setIcon( QgsApplication::getThemeIcon( u"/mIconSuccess.svg"_s ) );
   mActionOptions->setIcon( QgsApplication::getThemeIcon( u"/mActionOptions.svg"_s ) );

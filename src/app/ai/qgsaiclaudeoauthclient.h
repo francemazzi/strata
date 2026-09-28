@@ -17,6 +17,7 @@
 #define QGSAICLAUDEOAUTHCLIENT_H
 
 #include "qgis_app.h"
+#include "qgsaiclaudeoautherror.h"
 
 #include <QObject>
 #include <QString>
@@ -49,6 +50,8 @@ class APP_EXPORT QgsAiClaudeOAuthClient : public QObject
     void cancel();
     QString currentAuthorizeUrl() const;
     QString redirectUri() const;
+    //! Overrides the browser-login timeout for deterministic tests.
+    void setLoginTimeoutForTesting( int timeoutMs ) { mLoginTimeoutMs = timeoutMs; }
 
     static bool refreshAccessToken( AccessToken &token, QString *errorMessage = nullptr );
     static bool hasRefreshToken();
@@ -62,18 +65,19 @@ class APP_EXPORT QgsAiClaudeOAuthClient : public QObject
 
   signals:
     void loginSucceeded();
-    void loginFailed( const QString &errorMessage );
+    void loginFailed( const QgsAiClaudeOAuthError &error );
 
   private:
-    void fail( const QString &errorMessage );
+    void fail( const QgsAiClaudeOAuthError &error );
     void handlePendingConnection();
-    bool exchangeCode( const QString &code, QString *errorMessage );
+    bool exchangeCode( const QString &code, QgsAiClaudeOAuthError *error );
 
     QTcpServer *mServer = nullptr;
     QTimer *mTimeout = nullptr;
     QByteArray mVerifier;
     QString mState;
     QString mRedirectUri;
+    int mLoginTimeoutMs = 5 * 60 * 1000;
     bool mFinished = false;
 };
 

@@ -21,9 +21,11 @@
 
 class QgsAiClaudeOAuthClient;
 class QgsAiModelRouter;
+class QFrame;
 class QLabel;
 class QLineEdit;
 class QComboBox;
+class QPushButton;
 class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
 {
     Q_OBJECT
@@ -36,12 +38,28 @@ class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
     void useRequested();
 
   private:
+    enum class ConnectionState
+    {
+      Disconnected,
+      Waiting,
+      Connected,
+      RateLimited,
+      Error
+    };
+
+    void startLogin();
+    void setConnectionState( ConnectionState state, const QString &message = QString(), const QString &technicalDetail = QString() );
     void refreshStatus();
 
     QgsAiModelRouter *mRouter = nullptr;
     QgsAiClaudeOAuthClient *mLogin = nullptr;
+    QFrame *mStatusFrame = nullptr;
+    QLabel *mStatusTitle = nullptr;
     QLabel *mStatus = nullptr;
+    QPushButton *mConnectButton = nullptr;
+    QPushButton *mLogoutButton = nullptr;
     QLineEdit *mApiKeyEdit = nullptr;
     QComboBox *mModelCombo = nullptr;
+    ConnectionState mConnectionState = ConnectionState::Disconnected;
 };
 #endif

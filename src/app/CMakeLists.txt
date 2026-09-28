@@ -331,12 +331,14 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaichathistorystore.cpp
     ai/qgsaiclaudemigration.cpp
     ai/qgsaiclaudeconnectwidget.cpp
+    ai/qgsaiclaudeoautherror.cpp
     ai/qgsaiclaudeoauthclient.cpp
     ai/qgsaicodexoauthclient.cpp
     ai/qgsaifilecontextprovider.cpp
     ai/qgsaigissuggestionengine.cpp
     ai/qgsaimodelrouter.cpp
     ai/qgsaimodels.cpp
+    ai/qgsaioauthcallbackpage.cpp
     ai/qgsaiopenroutermodelcatalog.cpp
     ai/qgsaiplanclient.cpp
     ai/qgsaigallerycloudclient.cpp
