@@ -503,6 +503,8 @@ using namespace Qt::StringLiterals;
 #include "qgswelcomescreen.h"
 #include "qgsrecentprojectsmenueventfilter.h"
 #include "qgsversioninfo.h"
+#include "updates/qgsupdatewidget.h"
+#include "updates/qgsupdateservice.h"
 #include "qgslegendfilterbutton.h"
 #include "qgsvirtuallayerdefinition.h"
 #include "qgsvirtuallayerdefinitionutils.h"
@@ -6334,6 +6336,11 @@ void QgisApp::fileExit()
   QgsCanvasRefreshBlocker refreshBlocker;
   if ( canCreateNewProject() )
   {
+    if ( mInstallingStrataUpdate )
+    {
+      QString error;
+      if ( !QgsUpdateService::instance()->launchInstaller( &error ) ) { QMessageBox::warning( this, tr( "Update Strata" ), error ); return; }
+    }
 #ifdef HAVE_AI_ASSISTANT
     // Indexing reads the index and the project's layers: stop it for good and let a pass that
     // was running return (it stops within one embedding batch) before the layers are closed.
@@ -13088,11 +13095,31 @@ void QgisApp::loadPythonSupport()
 
 void QgisApp::checkQgisVersion()
 {
-  QgsVersionInfo *versionInfo = new QgsVersionInfo();
-  QApplication::setOverrideCursor( Qt::WaitCursor );
+  auto *dialog = new QDialog( this );
+  dialog->setAttribute( Qt::WA_DeleteOnClose );
+  dialog->setWindowTitle( tr( "Strata updates" ) );
+  auto *layout = new QVBoxLayout( dialog );
+  layout->addWidget( new QgsUpdateWidget( dialog ) );
+  dialog->resize( 600, 500 ); dialog->show();
+  QgsUpdateService::instance()->check();
+}
 
-  connect( versionInfo, &QgsVersionInfo::versionInfoAvailable, this, &QgisApp::versionReplyFinished );
-  versionInfo->checkVersion();
+void QgisApp::installStrataUpdate()
+{
+  if ( QgsApplication::taskManager()->countActiveTasks() > 0
+#ifdef HAVE_AI_ASSISTANT
+       || ( mAiSessionManager && mAiSessionManager->hasActiveRequest() ) || qgsAiHasActiveBackgroundTool()
+#endif
+     )
+  {
+    QMessageBox::information( this, tr( "Update Strata" ), tr( "Wait for active chat and processing tasks to finish, or stop them before installing." ) );
+    return;
+  }
+  QString error;
+  if ( !QgsUpdateService::instance()->prepareInstall( &error ) ) { QMessageBox::warning( this, tr( "Update Strata" ), error ); return; }
+  mInstallingStrataUpdate = true;
+  fileExit();
+  mInstallingStrataUpdate = false;
 }
 
 void QgisApp::versionReplyFinished()
@@ -17764,6 +17791,8 @@ void QgisApp::completeInitialization()
     openFile( path );
   }
 
+  QgsUpdateService::instance()->acknowledgeLaunch();
+  QTimer::singleShot( 10000, this, []() { QgsUpdateService::instance()->check( true ); } );
   emit initializationCompleted();
 }
 

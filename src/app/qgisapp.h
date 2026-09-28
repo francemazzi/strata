@@ -1945,6 +1945,14 @@ class APP_EXPORT QgisApp : public QMainWindow, private Ui::MainWindow
     void helpQgisHomePage();
     //! Check Strata version against GitHub releases
     void checkQgisVersion();
+
+  public slots:
+    void installStrataUpdate();
+
+  private:
+    bool mInstallingStrataUpdate = false;
+
+  private slots:
     //!Invoke the custom projection dialog
     void customProjection();
     //! configure shortcuts

@@ -78,6 +78,10 @@ set(QGIS_APP_SRCS
   qgstemplateprojectsmodel.cpp
   qgstemporalcontrollerdockwidget.cpp
   qgsversioninfo.cpp
+  updates/qgsupdatemanifest.cpp
+  updates/qgsupdateservice.cpp
+  updates/qgsupdateinstall.cpp
+  updates/qgsupdatewidget.cpp
   qgsrecentprojectsitemsmodel.cpp
   qgsrecentprojectsmenueventfilter.cpp
   qgsvectorlayerdigitizingproperties.cpp
@@ -325,6 +329,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/index/qgsaiworkspaceindex.cpp
     ai/qgsaiaccountwidget.cpp
     ai/qgsaiagentsessionmanager.cpp
+    ai/qgsaichatrecovery.cpp
     ai/qgsaiauditlog.cpp
     ai/qgsaichatdockwidget.cpp
     ai/qgsaichatpromptedit.cpp
@@ -857,4 +862,30 @@ install(TARGETS qgis
 
 if (ENABLE_AI_ASSISTANT)
   target_include_directories(qgis_app PRIVATE ${LIBZIP_INCLUDE_DIRS})
+endif()
+
+# The helper is a native executable, shipped with every official distribution.
+add_executable(strata-update-helper
+  updates/updatehelpermain.cpp updates/updatehelperfiles.cpp
+  updates/updatehelpernative.cpp updates/updatehelperinstall.cpp updates/qgsupdatemanifest.cpp)
+target_include_directories(strata-update-helper PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${QCA_INCLUDE_DIR} ${LIBZIP_INCLUDE_DIR})
+target_compile_definitions(strata-update-helper PRIVATE APP_STATIC_DEFINE)
+target_link_libraries(strata-update-helper PRIVATE ${QT_VERSION_BASE}::Core ${QCA_LIBRARY} ${LIBZIP_LIBRARY})
+set_target_properties(strata-update-helper PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+if(WIN32)
+  target_link_libraries(strata-update-helper PRIVATE wintrust crypt32 shell32)
+elseif(APPLE)
+  target_link_libraries(strata-update-helper PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
+add_dependencies(qgis strata-update-helper)
+install(TARGETS strata-update-helper RUNTIME DESTINATION ${QGIS_BIN_DIR})
+target_link_libraries(qgis_app PRIVATE ${QCA_LIBRARY})
+
+option(STRATA_ENABLE_UPDATE_TEST_FEED "Allow loopback update feeds in test builds only" OFF)
+if(STRATA_ENABLE_UPDATE_TEST_FEED)
+  if(NOT ENABLE_TESTS OR "$ENV{IS_STRATA_RELEASE}" STREQUAL "true")
+    message(FATAL_ERROR "Update test feeds are forbidden in release builds")
+  endif()
+  target_compile_definitions(qgis_app PRIVATE STRATA_ENABLE_UPDATE_TEST_FEED)
+  target_compile_definitions(strata-update-helper PRIVATE STRATA_ENABLE_UPDATE_TEST_FEED)
 endif()

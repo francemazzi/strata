@@ -2125,6 +2125,15 @@ void TestQgsAiAgentSessionManager::streamErrorAfterToolsIsRequestError()
   QCOMPARE( last.metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
   QVERIFY2( last.content.contains( u"Insufficient credits"_s ), qPrintable( last.content ) );
   QVERIFY( !historyContains( manager.history(), u"Here is what I ran"_s ) );
+  const int toolCount = std::count_if( manager.history().cbegin(), manager.history().cend(), []( const QgsAiChatMessage &m ) { return m.role == QgsAiChatRole::Tool; } );
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Recovered\"},\"finish_reason\":\"stop\"}]}" ) );
+  QString resumeError;
+  QVERIFY2( manager.resumeLastInterruptedTurn( &resumeError ), qPrintable( resumeError ) );
+  QVERIFY( !manager.resumeLastInterruptedTurn( &resumeError ) );
+  QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest(), 10000 );
+  QCOMPARE( server.requestCount, 3 );
+  QCOMPARE( std::count_if( manager.history().cbegin(), manager.history().cend(), []( const QgsAiChatMessage &m ) { return m.role == QgsAiChatRole::Tool; } ), toolCount );
+  QCOMPARE( manager.history().last().content, u"Recovered"_s );
 }
 
 void TestQgsAiAgentSessionManager::modeSwitchDuringToolKeepsRoundApproval()

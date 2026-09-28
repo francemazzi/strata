@@ -524,3 +524,13 @@ Anti-pattern da evitare: ricerca automatica all'avvio progetto (collide con loca
 
 - [ ] Sprint 13–14 — Pack PA/urbanistica + agricoltura; pack ambiente/utilities se capacità; pack validation e sample data
 - [ ] Sprint 15–16 — Admin policy dati, model allowlist, audit log enterprise, on-prem beta, team workspace, primo pilota enterprise/ente
+
+## Strata 1.6.1 — Fasi 0, 1 e 4: patch in validazione
+
+Implementazione: recupero del round AI senza replay degli strumenti; aggiornamenti firmati
+nelle impostazioni, helper nativo e gate di accettazione. Evidenze e limiti:
+`docs/implementation/strata-1.6.1.md`.
+
+- [ ] CI e accettazione dell'updater su Windows installato/portable, macOS e Linux AppImage.
+- [ ] Backend candidato promosso dopo risoluzione del blocco CI di fatturazione.
+- [ ] Tag immutabile e pubblicazione della 1.6.1 con tutte le ricevute verificate.

@@ -1,3 +1,4 @@
+import { validateUpdateAcceptance, supportsInAppUpdates } from './update-manifest.mjs';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -31,6 +32,9 @@ for (const platform of Object.keys(platformPatterns)) {
 validateWindowsReport(await readJson(join(directory, 'windows-verification.json')), platformAssets(readRelease(tag).assets, 'windows'), manifest.sourceSha);
 const acceptance = await readJson(acceptancePath);
 validateAcceptance(acceptance, manifest);
+if (supportsInAppUpdates(manifest.tag)) {
+  validateUpdateAcceptance(await readJson(join(directory, 'updater-acceptance.json')), manifest);
+}
 const expected = await Promise.all(sealedNames.map(async name => ({ name, sha256: await sha256(join(directory, name)) })));
 expected.push({ name: 'windows-acceptance.json', sha256: await sha256(acceptancePath) });
 await uploadFile(tag, acceptancePath);

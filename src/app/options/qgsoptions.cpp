@@ -17,6 +17,7 @@
  ***************************************************************************/
 
 #include "qgsoptions.h"
+#include "updates/qgsupdatewidget.h"
 
 #include "options/qgsadvancedoptions.h"
 #include "qgis.h"
@@ -1235,6 +1236,8 @@ QgsOptions::QgsOptions( QWidget *parent, Qt::WindowFlags fl, const QList<QgsOpti
 
   QList<QgsOptionsWidgetFactory *> factories = optionsFactories;
   // ensure advanced factory is always last
+  QgsUpdateOptionsFactory updateFactory;
+  factories << &updateFactory;
   QgsAdvancedSettingsOptionsFactory advancedFactory;
   factories << &advancedFactory;
   for ( QgsOptionsWidgetFactory *factory : std::as_const( factories ) )

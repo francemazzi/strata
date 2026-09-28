@@ -877,13 +877,13 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mErrorActionButton = new QPushButton( mErrorBanner );
   mErrorActionButton->setObjectName( u"aiRequestErrorAction"_s );
   errorActions->addWidget( mErrorActionButton );
-  QPushButton *retryButton = new QPushButton( tr( "Retry" ), mErrorBanner );
+  QPushButton *retryButton = new QPushButton( tr( "Resume" ), mErrorBanner );
   retryButton->setObjectName( u"aiRequestErrorRetry"_s );
-  retryButton->setToolTip( tr( "Send the last message again." ) );
+  retryButton->setToolTip( tr( "Resume the interrupted response without repeating completed tools." ) );
   connect( retryButton, &QPushButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
   errorActions->addWidget( retryButton );
   errorActions->addStretch( 1 );
-  QPushButton *dismissErrorButton = new QPushButton( tr( "Dismiss" ), mErrorBanner );
+  QPushButton *dismissErrorButton = new QPushButton( tr( "Hide notice" ), mErrorBanner );
   dismissErrorButton->setObjectName( u"aiRequestErrorDismiss"_s );
   errorActions->addWidget( dismissErrorButton );
   errorLayout->addLayout( errorActions );
@@ -1645,8 +1645,13 @@ QHBoxLayout *QgsAiChatDockWidget::createMessageActionsRow( const QgsAiChatMessag
       if ( ok && !edited.trimmed().isEmpty() )
         editAndResendFromChat( messageId, edited );
     } );
-    QToolButton *retry = addAction( u"aiRetryMessageButton"_s, tr( "Retry" ), tr( "Send this message again; what came after it is undone and dropped." ) );
+    QToolButton *retry = addAction( u"aiRetryMessageButton"_s, tr( "Restart this turn" ), tr( "Send this message again; what came after it is undone and dropped." ) );
     connect( retry, &QToolButton::clicked, this, [this, messageId, text]() { editAndResendFromChat( messageId, text ); } );
+  }
+  if ( message.metadata.value( u"ui_kind"_s ).toString() == "request_error"_L1 )
+  {
+    QToolButton *resume = addAction( u"aiResumeMessageButton"_s, tr( "Resume" ), tr( "Resume without repeating completed tools." ) );
+    connect( resume, &QToolButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
   }
   row->addStretch( 1 );
   return row;
@@ -1667,7 +1672,7 @@ void QgsAiChatDockWidget::retryFromChat()
     return;
   hideRequestError();
   QString error;
-  if ( !mSessionManager->retryLastTurn( &error ) )
+  if ( !mSessionManager->resumeLastInterruptedTurn( &error ) )
     QMessageBox::warning( this, tr( "Retry" ), error );
 }
 
@@ -3195,7 +3200,7 @@ void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
   else if ( kind == "policy"_L1 )
     mErrorTitleLabel->setText( tr( "Request blocked by policy" ) );
   else
-    mErrorTitleLabel->setText( tr( "AI request failed — %1" ).arg( provider ) );
+    mErrorTitleLabel->setText( tr( "Interrupted — %1" ).arg( provider ) );
 
   mErrorBodyLabel->setText( message.content );
   mErrorActionButton->setProperty( "error_provider", provider );
@@ -3208,6 +3213,7 @@ void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
     mErrorActionButton->setText( tr( "Open Plan Account" ) );
   else
     mErrorActionButton->setText( tr( "Open Provider Settings" ) );
+  mErrorActionButton->setVisible( kind == "authentication"_L1 || kind == "policy"_L1 );
   mErrorBanner->show();
 }
 

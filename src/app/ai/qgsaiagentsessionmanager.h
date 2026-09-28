@@ -174,6 +174,10 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
      */
     bool retryLastTurn( QString *error = nullptr );
 
+    //! Resumes a failed provider round without replaying completed tools.
+    bool resumeLastInterruptedTurn( QString *error = nullptr );
+    QVariantMap recoveryCheckpoint() const;
+
     /**
      * Replaces the user message \a messageId with \a text and sends it, dropping everything
      * after it. Changes made since are undone first, as for retryLastTurn().
