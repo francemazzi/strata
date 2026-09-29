@@ -1660,6 +1660,7 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   context.toolCalls.clear();
   context.streamItemIndexToToolCall.clear();
   context.midStreamError.clear();
+  context.midStreamStatus = 0;
   context.retryAfterSeconds = -1;
   context.usage = QgsAiUsage();
   context.responseModel.clear();
@@ -1745,6 +1746,16 @@ void QgsAiModelRouter::startRequestWatchdog( RequestContext &context, int transf
     const qint64 latencyMs = timedOutContext.startedAtMs > 0 ? std::max<qint64>( 0, QDateTime::currentMSecsSinceEpoch() - timedOutContext.startedAtMs ) : 0;
     QgsMessageLog::logMessage( u"Request id=%1 provider=%2 watchdog timed out after %3 seconds."_s.arg( requestId, providerName ).arg( watchdogSeconds ), u"AI"_s, Qgis::MessageLevel::Warning, false );
     const int retryCount = timedOutContext.attempt - 1;
+    if ( timedOutContext.attempt <= timedOutContext.maxRetries )
+    {
+      clearRequestTransport( timedOutContext );
+      QTimer::singleShot( 1000, Qt::PreciseTimer, this, [this, requestId]() {
+        if ( !mRequests.contains( requestId ) ) return;
+        auto &pending = mRequests[requestId];
+        if ( !dispatchRequest( pending ) ) finishRequest( requestId, false, QString(), tr( "Unable to resume the timed-out request." ), 408, pending.attempt - 1, false, 0 );
+      } );
+      return;
+    }
     finishRequest( requestId, false, QString(), u"Network request watchdog timed out after %1 seconds."_s.arg( watchdogSeconds ), 0, retryCount, false, latencyMs );
   } );
   context.watchdogTimer = timer;
@@ -2187,6 +2198,10 @@ void QgsAiModelRouter::onReplyReadyRead()
         QString message = errorObj.value( u"message"_s ).toString();
         if ( message.isEmpty() && errorObj.contains( u"code"_s ) )
           message = u"Provider returned error code %1."_s.arg( errorObj.value( u"code"_s ).toVariant().toString() );
+        const int status = errorObj.value( u"code"_s ).toInt();
+        if ( status >= 400 && status <= 599 ) context->midStreamStatus = status;
+        const QString applicationCode = errorObj.value( u"error_code"_s ).toString();
+        if ( !applicationCode.isEmpty() ) message += u" code=%1"_s.arg( applicationCode );
         if ( !message.isEmpty() )
           context->midStreamError = message;
         if ( errorObj.contains( u"retry_after"_s ) )
@@ -2348,7 +2363,7 @@ void QgsAiModelRouter::onReplyFinished()
 
   const QString requestId = context->requestId;
   const QString providerName = providerDisplayName( context->provider );
-  const int httpStatus = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
+  const int httpStatus = context->midStreamStatus > 0 ? context->midStreamStatus : reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
   const QNetworkReply::NetworkError networkError = reply->error();
   const qint64 latencyMs = std::max<qint64>( 0, QDateTime::currentMSecsSinceEpoch() - context->startedAtMs );
 
@@ -2472,7 +2487,7 @@ void QgsAiModelRouter::onReplyFinished()
 
   if ( retriable )
   {
-    // Honor the server's Retry-After header (seconds form, clamped) when present;
+    // Honor the server's Retry-After header (seconds or HTTP date) when present;
     // otherwise back off linearly with the attempt count.
     int retryAfterSeconds = context->retryAfterSeconds;
     if ( retryAfterSeconds < 0 && reply->hasRawHeader( "Retry-After" ) )
@@ -2481,13 +2496,23 @@ void QgsAiModelRouter::onReplyFinished()
       const int parsed = QString::fromLatin1( reply->rawHeader( "Retry-After" ) ).trimmed().toInt( &parsedOk );
       if ( parsedOk && parsed >= 0 )
         retryAfterSeconds = parsed;
+      else
+      {
+        const auto when = QDateTime::fromString( QString::fromLatin1( reply->rawHeader( "Retry-After" ) ), Qt::RFC2822Date );
+        if ( when.isValid() ) retryAfterSeconds = static_cast<int>( std::clamp<qint64>( QDateTime::currentDateTimeUtc().secsTo( when ), 0, 86400 ) );
+      }
     }
-    const int backoffMs = retryAfterSeconds >= 0 ? std::min( retryAfterSeconds, 30 ) * 1000 : ( emptyCompletion ? 2000 * context->attempt : 1000 * context->attempt );
+    if ( retryAfterSeconds > 30 )
+    {
+      finishRequest( requestId, false, QString(), tr( "The provider asked to wait %1 seconds before resuming." ).arg( retryAfterSeconds ), httpStatus, context->attempt - 1, false, latencyMs );
+      return;
+    }
+    const int backoffMs = retryAfterSeconds >= 0 ? retryAfterSeconds * 1000 : ( emptyCompletion ? 2000 * context->attempt : 1000 * context->attempt );
 
     clearRequestTransport( *context );
     QgsMessageLog::
       logMessage( u"Request id=%1 provider=%2 retrying in %3 ms (attempt %4 of %5)."_s.arg( requestId, providerName ).arg( backoffMs ).arg( context->attempt + 1 ).arg( context->maxRetries + 1 ), u"AI"_s, Qgis::MessageLevel::Info, false );
-    QTimer::singleShot( backoffMs, this, [this, requestId, httpStatus]() {
+    QTimer::singleShot( backoffMs, Qt::PreciseTimer, this, [this, requestId, httpStatus]() {
       // The request may have been canceled while waiting for the backoff.
       if ( !mRequests.contains( requestId ) )
         return;

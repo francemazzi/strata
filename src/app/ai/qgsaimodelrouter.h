@@ -250,6 +250,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         QNetworkReply *reply = nullptr;
         QTimer *watchdogTimer = nullptr;
         QString preDispatchError;
+        int midStreamStatus = 0;
         QString midStreamError; // error delivered inside the SSE stream over HTTP 200
         int retryAfterSeconds = -1;               // from Retry-After header or SSE error.retry_after
         QgsAiUsage usage;       // token/cost accounting harvested from the response

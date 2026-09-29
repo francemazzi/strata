@@ -40,5 +40,6 @@ jobs:
       - name: Seal complete draft without publishing
         env:
           GH_TOKEN: ${{ github.token }}
+          STRATA_UPDATE_PRIVATE_KEY: ${{ secrets.STRATA_UPDATE_PRIVATE_KEY }}
           RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
         run: node scripts/ci/seal-release.mjs "$RELEASE_TAG"

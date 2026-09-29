@@ -12,6 +12,11 @@ on:
         description: 'Release tag to upload the DMG to, e.g. strata-v0.1.17'
         required: true
         type: string
+      local_signing_check:
+        description: 'Verify Apple credentials on the temporary local Mac runner; no publication'
+        required: false
+        default: false
+        type: boolean
       sign_and_notarize:
         description: 'Sign and notarize the DMG'
         required: false
@@ -24,6 +29,7 @@ permissions:
 
 jobs:
   package:
+    if: ${{ !inputs.local_signing_check }}
     name: Create and upload macOS DMG
     runs-on: macos-latest
     steps:
@@ -320,3 +326,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" macos ./*.dmg
+
+  local-signing-check:
+    if: ${{ inputs.local_signing_check }}
+    name: Verify Apple signing locally
+    runs-on: [self-hosted, macOS, ARM64, strata-local-signing]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Verify local identity and Apple notarization credentials
+        shell: bash
+        env:
+          MACOS_DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_APPLE_TEAM_ID: ${{ secrets.MACOS_APPLE_TEAM_ID }}
+          MACOS_APPLE_APP_PASSWORD: ${{ secrets.MACOS_APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$MACOS_DEVELOPER_ID"
+          test -n "$MACOS_APPLE_ID"
+          test -n "$MACOS_APPLE_TEAM_ID"
+          test -n "$MACOS_APPLE_APP_PASSWORD"
+          security find-identity -v -p codesigning | grep -Fq "$MACOS_DEVELOPER_ID"
+          RECEIPT="$RUNNER_TEMP/strata-notary-preflight.json"
+          trap 'rm -f "$RECEIPT"' EXIT
+          xcrun notarytool history --apple-id "$MACOS_APPLE_ID" \
+            --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" \
+            --output-format json > "$RECEIPT"
+          xcrun notarytool store-credentials strata-release-local \
+            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_APPLE_TEAM_ID" \
+            --password "$MACOS_APPLE_APP_PASSWORD" > /dev/null
+          echo "Apple signing identity and notarization credentials verified on the local runner." >> "$GITHUB_STEP_SUMMARY"
+          echo "Notarization credentials stored in the local Keychain; no plaintext export or release publication." >> "$GITHUB_STEP_SUMMARY"

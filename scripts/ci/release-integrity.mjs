@@ -1,3 +1,4 @@
+import { supportsInAppUpdates } from './update-manifest.mjs';
 import { readFile } from 'node:fs/promises';
 
 export const platformPatterns = {
@@ -57,6 +58,7 @@ export function sealedAssetNames(manifest) {
   }
   const binaries = Object.keys(platformPatterns).flatMap(platform => platformAssets(manifest.artifacts, platform)).map(file => file.name);
   const receipts = ['windows-verification.json', ...Object.keys(platformPatterns).map(platform => `build-${platform}.json`)];
+  if (supportsInAppUpdates(manifest.tag) || names.includes('update-manifest.json') || names.includes('update-manifest.sig')) receipts.push('update-manifest.json', 'update-manifest.sig', 'updater-acceptance.json');
   if (names.length !== binaries.length + receipts.length || receipts.some(name => !names.includes(name))) {
     throw new Error('Unexpected or missing sealed artifacts.');
   }

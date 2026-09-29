@@ -14,6 +14,7 @@
  ***************************************************************************/
 
 #include "qgsaisettingsdialog.h"
+#include "updates/qgsupdatewidget.h"
 
 #include <algorithm>
 #include <functional>
@@ -559,6 +560,7 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
   addSection( u"indexing"_s, tr( "Indexing & Docs" ), buildIndexingPage() );
   addSection( u"workspace"_s, tr( "Workspace" ), buildWorkspacePage() );
   addSection( u"privacy"_s, tr( "Privacy & Telemetry" ), buildPrivacyPage() );
+  addSection( u"updates"_s, tr( "Updates" ), new QgsUpdateWidget( this ) );
   addSection( u"onboarding"_s, tr( "Onboarding & Release" ), buildOnboardingPage() );
 
   connect( mSidebarList, &QListWidget::currentRowChanged, this, [this]( int ) {

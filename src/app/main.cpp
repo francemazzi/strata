@@ -18,6 +18,7 @@
 
 //qt includes
 #include "qgsconfig.h"
+#include <QProcess>
 
 #include <cstdarg>
 #include <cstdio>
@@ -697,6 +698,15 @@ APP_EXPORT
 #endif
 int main( int argc, char *argv[] )
 {
+#ifdef Q_OS_LINUX
+  // Keep a dedicated AppImage runtime alive until its helper finishes, so the
+  // mounted helper and libraries survive the original application's shutdown.
+  if ( argc == 3 && QByteArray( argv[1] ) == "--strata-apply-update" && qEnvironmentVariableIsSet( "APPIMAGE" ) )
+  {
+    QCoreApplication updater( argc, argv );
+    return QProcess::execute( QCoreApplication::applicationDirPath() + QStringLiteral( "/strata-update-helper" ), { QString::fromLocal8Bit( argv[2] ) } );
+  }
+#endif
   //log messages written before creating QgsApplication
   QStringList preApplicationLogMessages;
   QStringList preApplicationWarningMessages;

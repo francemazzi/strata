@@ -675,7 +675,7 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       // Authentication and policy errors require user action. Falling back
       // would hide the real failure behind a second provider's error.
       const bool requiresUserAction = httpStatus == 401 || httpStatus == 403;
-      if ( !requiresUserAction && !mPendingProviders.isEmpty() )
+      if ( mActiveProvider != QgsAiModelRouter::Provider::Plan && !requiresUserAction && !mPendingProviders.isEmpty() )
       {
         if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
           completeManagedAgentRun();
@@ -691,6 +691,7 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       assistant.metadata.insert( u"error_provider"_s, providerName );
       assistant.metadata.insert( u"error_code"_s, errorCodeFromText( errorMessage ) );
       assistant.metadata.insert( u"http_status"_s, httpStatus );
+      assistant.metadata.insert( u"recovery"_s, recoveryCheckpoint() );
       if ( isAuthenticationError( providerName, errorMessage, httpStatus ) )
         assistant.metadata.insert( u"error_kind"_s, u"authentication"_s );
       else if ( isPolicyError( errorMessage, httpStatus ) )
@@ -3221,6 +3222,7 @@ QList<QgsAiChatMessage> QgsAiAgentSessionManager::buildOutgoingMessages() const
       }
     }
   }
+  history.removeIf( []( const QgsAiChatMessage &message ) { return message.metadata.value( u"ui_kind"_s ).toString() == "request_error"_L1; } );
   result.append( history );
   return result;
 }
