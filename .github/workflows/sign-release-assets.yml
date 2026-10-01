@@ -14,6 +14,11 @@ on:
         description: Explicit draft release tag to seal
         required: true
         type: string
+      platform_seal_only:
+        description: Seal with the 1.6.0 platform scripts, without updater receipts
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: write
   id-token: write
@@ -42,4 +47,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STRATA_UPDATE_PRIVATE_KEY: ${{ secrets.STRATA_UPDATE_PRIVATE_KEY }}
           RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
-        run: node scripts/ci/seal-release.mjs "$RELEASE_TAG"
+          PLATFORM_SEAL_ONLY: ${{ inputs.platform_seal_only }}
+        run: |
+          if [ "$PLATFORM_SEAL_ONLY" = "true" ]; then
+            for script in seal-release.mjs release-integrity.mjs; do
+              gh api "repos/${GITHUB_REPOSITORY}/contents/scripts/ci/${script}?ref=strata-v1.6.0" --jq .content | base64 -d > "scripts/ci/${script}"
+            done
+            echo "Using the 1.6.0 platform sealing scripts. Updater receipts stay out of this release."
+          fi
+          node scripts/ci/seal-release.mjs "$RELEASE_TAG"
