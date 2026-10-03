@@ -14,6 +14,9 @@
  ***************************************************************************/
 
 #include "qgsailayertools.h"
+#include "qgsaigeographicverification.h"
+#include "qgsaiarcgissnapshot.h"
+#include "qgsdatasourceuri.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1123,6 +1126,20 @@ namespace
   }
 } //namespace
 
+QJsonObject qgsAiVerifyLayerQuality( QgsMapLayer *layer, QgsProject *project, bool *canceled )
+{
+  QJsonObject checks = layerQualityChecks( layer, project, canceled );
+  const auto rasterChecks = qgsAiVerifyRasterSource( layer );
+  bool passed = checks.value( u"passed"_s ).toBool();
+  for ( auto it = rasterChecks.begin(); it != rasterChecks.end(); ++it )
+  {
+    checks.insert( it.key(), it.value() );
+    passed = passed && it.value().toBool();
+  }
+  checks.insert( u"passed"_s, passed );
+  return checks;
+}
+
 // ---------------------------------------------------------------------------
 // add_layer_from_file
 // ---------------------------------------------------------------------------
@@ -1273,7 +1290,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   phaseTimer.restart();
   const QPointer<QgsMapLayer> addedGuard( added );
   bool qualityChecksCanceled = false;
-  const QJsonObject qualityChecks = layerQualityChecks( added, project, &qualityChecksCanceled );
+  const QJsonObject qualityChecks = qgsAiVerifyLayerQuality( added, project, &qualityChecksCanceled );
   qgsAiLogPerf( u"add_layer_from_file"_s, u"quality_check"_s, phaseTimer.elapsed() );
   if ( qualityChecksCanceled )
   {
@@ -1297,15 +1314,16 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
 // add_layer_from_service
 // ---------------------------------------------------------------------------
 
-QgsAiAddLayerFromServiceTool::QgsAiAddLayerFromServiceTool( QgsProject *project )
+QgsAiAddLayerFromServiceTool::QgsAiAddLayerFromServiceTool( QgsProject *project, QgsAiFileContextProvider *contextProvider )
   : mProject( project )
+  , mContextProvider( contextProvider )
 {}
 
 QString QgsAiAddLayerFromServiceTool::description() const
 {
   return QStringLiteral(
     "Loads a service-backed layer into the active QGIS project using native providers. "
-    "Supported providers are wms, wfs, xyz and postgres. The tool validates the resulting "
+    "Supported providers are wms, wfs, xyz, postgres and arcgis_mapserver (live by default; snapshot creates a verified static GeoTIFF). The tool validates the resulting "
     "layer, adds it to the project and returns a rollback token that removes the layer."
   );
 }
@@ -1313,9 +1331,16 @@ QString QgsAiAddLayerFromServiceTool::description() const
 QJsonObject QgsAiAddLayerFromServiceTool::schema() const
 {
   QJsonObject properties;
-  properties.insert( u"provider"_s, prop( u"string"_s, u"One of: wms, wfs, xyz, postgres."_s ) );
+  properties.insert( u"provider"_s, prop( u"string"_s, u"One of: wms, wfs, xyz, postgres, arcgis_mapserver."_s ) );
   properties.insert( u"uri"_s, prop( u"string"_s, u"Provider URI. XYZ may be a full QGIS URI or a tile URL template."_s ) );
   properties.insert( u"name"_s, prop( u"string"_s, u"Optional display name for the new layer."_s ) );
+  properties.insert( u"mode"_s, prop( u"string"_s, u"ArcGIS: live (default) or snapshot (static image)."_s ) );
+  properties.insert( u"bbox"_s, prop( u"array"_s, u"Snapshot area [xmin,ymin,xmax,ymax] in the supplied CRS."_s ) );
+  properties.insert( u"crs"_s, prop( u"string"_s, u"Area CRS such as EPSG:32632; required for snapshot."_s ) );
+  properties.insert( u"layers"_s, prop( u"array"_s, u"ArcGIS numeric layer IDs; required for snapshot. Live accepts at most one layer ID."_s ) );
+  properties.insert( u"destination"_s, prop( u"string"_s, u"New .tif path inside the workspace; required for snapshot. Never overwritten."_s ) );
+  properties.insert( u"width"_s, prop( u"integer"_s, u"Requested snapshot width; both server image limits are respected."_s ) );
+  properties.insert( u"height"_s, prop( u"integer"_s, u"Requested snapshot height."_s ) );
   properties.insert( u"layer_options"_s, prop( u"object"_s, u"Optional provider-specific URI parts to merge through QgsProviderMetadata."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous add_layer_from_service call. If set, removes that added layer."_s ) );
   return schemaObject( properties );
@@ -1335,8 +1360,29 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   if ( provider.isEmpty() )
     return QgsAiToolResult::error( u"Argument 'provider' is required."_s );
 
-  const QString providerKey = serviceLayerProviderKey( provider );
-  const QString layerType = serviceLayerType( provider );
+  const bool arcgis = provider == "arcgis_mapserver"_L1;
+  const QString mode = args.value( u"mode"_s ).toString( u"live"_s );
+  if ( arcgis && mode != "live"_L1 && mode != "snapshot"_L1 )
+    return QgsAiToolResult::error( u"ArcGIS mode must be live or snapshot."_s );
+  const bool snapshot = arcgis && mode == "snapshot"_L1;
+  QString destination;
+  if ( snapshot )
+  {
+    destination = mContextProvider ? mContextProvider->normalizePath( args.value( u"destination"_s ).toString() ) : QString();
+    if ( destination.isEmpty() || QFileInfo::exists( destination ) || QFileInfo( destination ).suffix().compare( "tif"_L1, Qt::CaseInsensitive ) != 0 )
+      return QgsAiToolResult::error( u"Snapshot destination must be a new .tif file inside the workspace."_s );
+    const QString root = QFileInfo( mContextProvider->workspaceRoot() ).canonicalFilePath();
+    QFileInfo ancestor( QFileInfo( destination ).absolutePath() );
+    while ( !ancestor.exists() && ancestor.absoluteFilePath() != ancestor.absolutePath() )
+      ancestor = QFileInfo( ancestor.absolutePath() );
+    const QString resolved = ancestor.canonicalFilePath();
+    if ( root.isEmpty() || resolved.isEmpty() || ( resolved != root && !resolved.startsWith( root + '/' ) ) )
+      return QgsAiToolResult::error( u"Snapshot destination resolves outside the workspace."_s );
+    if ( !QDir().mkpath( QFileInfo( destination ).absolutePath() ) )
+      return QgsAiToolResult::error( u"Cannot create destination directory."_s );
+  }
+  const QString providerKey = arcgis ? ( snapshot ? u"gdal"_s : u"arcgismapserver"_s ) : serviceLayerProviderKey( provider );
+  const QString layerType = arcgis ? u"raster"_s : serviceLayerType( provider );
   if ( providerKey.isEmpty() || layerType.isEmpty() )
     return QgsAiToolResult::error( u"Unsupported provider '%1'. Use one of: wms, wfs, xyz, postgres."_s.arg( provider ) );
 
@@ -1356,6 +1402,27 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( u"Argument 'uri' is required."_s );
 
   QString uri = normalizeServiceUri( provider, rawUri );
+  if ( arcgis )
+  {
+    if ( snapshot )
+      uri = destination;
+    else
+    {
+      const auto layers = args.value( u"layers"_s ).toArray();
+      if ( layers.size() > 1 )
+        return QgsAiToolResult::error( u"A live MapServer layer accepts one layer ID, or no ID for the full map."_s );
+      if ( !layers.isEmpty() && ( !layers.first().isDouble() || layers.first().toDouble() != layers.first().toInt() || layers.first().toInt() < 0 ) )
+        return QgsAiToolResult::error( u"Layer IDs must be non-negative integers."_s );
+      QgsDataSourceUri source;
+      source.setParam( u"url"_s, rawUri );
+      source.setParam( u"format"_s, u"png32"_s );
+      if ( !layers.isEmpty() )
+        source.setParam( u"layer"_s, QString::number( layers.first().toInt() ) );
+      if ( args.contains( u"crs"_s ) )
+        source.setParam( u"crs"_s, args.value( u"crs"_s ).toString() );
+      uri = QString::fromUtf8( source.encodedUri() );
+    }
+  }
   if ( args.value( u"layer_options"_s ).isObject() )
   {
     QString optionsError;
@@ -1364,7 +1431,8 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
       return QgsAiToolResult::error( optionsError );
   }
 
-  const QString name = args.value( u"name"_s ).toString().trimmed().isEmpty() ? provider.toUpper() : args.value( u"name"_s ).toString().trimmed();
+  const QString name = ( args.value( u"name"_s ).toString().trimmed().isEmpty() ? provider.toUpper() : args.value( u"name"_s ).toString().trimmed() )
+                       + ( snapshot ? u" (static snapshot)"_s : QString() );
   const int beforeLayerCount = project->mapLayers().size();
 
   QJsonObject output;
@@ -1379,7 +1447,14 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   auto load = std::make_shared<LayerToolsLoad>();
   const QgsAiTaskWaitResult wait = layerToolsOpenInBackground(
     u"Loading %1"_s.arg( name ),
-    [uri, name, provider, providerKey, layerType]( LayerToolsLoad &load, QgsFeedback * ) -> std::unique_ptr<QgsMapLayer> {
+    [uri, name, provider, providerKey, layerType, snapshot, destination, args]( LayerToolsLoad &load, QgsFeedback *feedback ) -> std::unique_ptr<QgsMapLayer> {
+      if ( snapshot )
+      {
+        load.error = qgsAiCreateArcGisSnapshot( args, destination, feedback );
+        if ( !load.error.isEmpty() )
+          return nullptr;
+        load.facts.insert( u"static_snapshot"_s, true );
+      }
       if ( layerType == "raster"_L1 )
       {
         auto layer = std::make_unique<QgsRasterLayer>( uri, name, providerKey );
@@ -1463,7 +1538,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   phaseTimer.restart();
   const QPointer<QgsMapLayer> addedGuard( added );
   bool qualityChecksCanceled = false;
-  const QJsonObject qualityChecks = layerQualityChecks( added, project, &qualityChecksCanceled );
+  const QJsonObject qualityChecks = qgsAiVerifyLayerQuality( added, project, &qualityChecksCanceled );
   qgsAiLogPerf( u"add_layer_from_service"_s, u"quality_check"_s, phaseTimer.elapsed() );
   if ( qualityChecksCanceled )
   {

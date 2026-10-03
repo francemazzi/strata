@@ -62,7 +62,7 @@ class APP_EXPORT QgsAiAddLayerFromFileTool : public QgsAiTool
 class APP_EXPORT QgsAiAddLayerFromServiceTool : public QgsAiTool
 {
   public:
-    explicit QgsAiAddLayerFromServiceTool( QgsProject *project );
+    explicit QgsAiAddLayerFromServiceTool( QgsProject *project, QgsAiFileContextProvider *contextProvider = nullptr );
 
     QString name() const override { return u"add_layer_from_service"_s; }
     QString description() const override;
@@ -73,6 +73,7 @@ class APP_EXPORT QgsAiAddLayerFromServiceTool : public QgsAiTool
 
   private:
     QgsProject *mProject = nullptr;
+    QgsAiFileContextProvider *mContextProvider = nullptr;
 };
 
 /**

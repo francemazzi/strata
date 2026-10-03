@@ -42,9 +42,11 @@ QgsAiDiscoveryController::QgsAiDiscoveryController( QgsAiModelRouter *router, Qg
     [this]( QNetworkRequest &req ) {
       if ( !mRouter || !mFiles || mFiles->workspaceRoot() != mWorkspaceRoot )
         return false;
-      const auto token = mRouter->planSessionToken().split( '.' );
-      const auto claims = token.size() == 3 ? QJsonDocument::fromJson( QByteArray::fromBase64( token[1].toLatin1(), QByteArray::Base64UrlEncoding ) ).object() : QJsonObject();
-      if ( claims.value( u"sub"_s ).toString() != mAccountId || QUrl( QgsAiPlanClient::apiBaseForChatEndpoint( mRouter->providerSettings( QgsAiModelRouter::Provider::Plan ).endpoint ) ) != mApiBase )
+      if (
+        mRouter->planCredentialScope() != mCredentialScope
+        || mRouter->verifiedPlanAccountId() != mAccountId
+        || QUrl( QgsAiPlanClient::apiBaseForChatEndpoint( mRouter->providerSettings( QgsAiModelRouter::Provider::Plan ).endpoint ) ) != mApiBase
+      )
         return false;
       return mRouter->applyAuthentication( QgsAiModelRouter::Provider::Plan, req );
     },
@@ -66,20 +68,22 @@ bool QgsAiDiscoveryController::scope()
     return false;
   }
   const QUrl base( QgsAiPlanClient::apiBaseForChatEndpoint( mRouter->providerSettings( QgsAiModelRouter::Provider::Plan ).endpoint ) );
-  const auto token = mRouter->planSessionToken().split( '.' );
-  const auto claims = token.size() == 3 ? QJsonDocument::fromJson( QByteArray::fromBase64( token[1].toLatin1(), QByteArray::Base64UrlEncoding ) ).object() : QJsonObject();
-  const QString user = claims.value( u"sub"_s ).toString();
+  const QString user = mRouter->verifiedPlanAccountId();
   if ( user.isEmpty() || !QgsAiDiscoveryFiles::safeUrl( base ) )
+  {
+    mClient->pause();
     return false;
+  }
   const QString key = u"strata/discovery/"_s
                       + QString::fromLatin1( QCryptographicHash::hash( ( base.toString() + '\n' + user + '\n' + mFiles->workspaceRoot() ).toUtf8(), QCryptographicHash::Sha256 ).toHex() );
-  if ( mScope != key )
+  if ( mScope != key || mCredentialScope != mRouter->planCredentialScope() )
   {
     const auto downloads = mDownloads;
     for ( auto download : downloads )
       if ( download )
         download->cancel();
     mAccountId = user;
+    mCredentialScope = mRouter->planCredentialScope();
     mWorkspaceRoot = mFiles->workspaceRoot();
     mApiBase = base;
     mScope = key;

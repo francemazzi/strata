@@ -88,6 +88,9 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     bool setPlanSessionToken( const QString &token, QString *errorMessage = nullptr );
     bool clearPlanSessionToken( QString *errorMessage = nullptr );
     QString planSessionToken() const;
+    QString planCredentialScope() const;
+    QString verifiedPlanAccountId( bool refresh = false );
+    QString cachedPlanAccountId() const;
     void setPlanAuthConfigId( const QString &authConfigId );
     //! Binds OpenRouter's managed prompt-cache session to the active local chat.
     void setPlanConversationId( const QString &conversationId );
@@ -189,6 +192,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QString agentMode() const { return mAgentMode; }
 
   signals:
+    void retryWaiting( const QString &requestId, qint64 retryAtMs, int remainingSeconds, int retryNumber );
     void requestProgress( const QString &requestId, const QString &chunk );
     void requestFinished(
       const QString &requestId, bool success, const QString &providerName, const QString &responseText, const QString &errorMessage, int httpStatus, int retryCount, bool retriable, qint64 latencyMs
@@ -242,6 +246,10 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         int attempt = 0;
         int maxRetries = 1;
         qint64 startedAtMs = 0;
+        qint64 firstAttemptAtMs = 0;
+        QString retryScope;
+        bool retryForbidden = false;
+        QString applicationErrorCode;
         QString streamingBuffer;
         QString aggregatedText;
         QString stopReason;                       // "end_turn", "tool_use", "stop", etc.
@@ -257,6 +265,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         QString responseModel;  // model that actually served the response (may differ from the requested one under routing)
     };
 
+    QString requestScope( Provider provider ) const;
     bool dispatchRequest( RequestContext &context );
     void finishRequest( const QString &requestId, bool success, const QString &responseText, const QString &errorMessage, int httpStatus, int retryCount, bool retriable, qint64 latencyMs );
     void queueFailedRequestFinish( const QString &requestId, const QString &errorMessage );
@@ -298,6 +307,9 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     void persistProviderSettings( Provider provider, const ProviderSettings &settings ) const;
     RequestContext *contextFromReply( QNetworkReply *reply );
 
+    bool mPlanIdentityFetching = false;
+    QString mPlanIdentityScope, mPlanAccountId;
+    qint64 mPlanIdentityExpires = 0;
     QMap<Provider, ProviderSettings> mProviderSettings;
     QSet<Provider> mVerifiedProviders;
     Provider mActiveProvider = Provider::OpenAi;

@@ -27,6 +27,9 @@
 #include "qgsmessagelog.h"
 #include "qgsprocessingfeedback.h"
 #include "qgspythonrunner.h"
+#include "qgsproject.h"
+#include "qgsmaplayer.h"
+#include "qgsaigeographicverification.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -318,6 +321,16 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
   if ( !QgsPythonRunner::isValid() )
     return QgsAiToolResult::error( availabilityReason() );
 
+  // Detect CRS/source/extent changes and in-place raster edits without treating
+  // a successful Python interpreter exit as evidence of geographic correctness.
+  const auto resourceState = []( QgsMapLayer *layer ) {
+    const QFileInfo file( layer->source() );
+    return layer->source() + '\n' + layer->crs().toWkt() + '\n' + layer->extent().toString( 17 ) + '\n' + QString::number( file.lastModified().toMSecsSinceEpoch() ) + ':' + QString::number( file.size() );
+  };
+  QMap<QString, QString> beforeResources;
+  for ( auto *layer : QgsProject::instance()->mapLayers() )
+    beforeResources.insert( layer->id(), resourceState( layer ) );
+
   const QString description = args.value( u"description"_s ).toString();
   const QStringList riskMarkers = QgsAiPythonApprovalDialog::detectRiskMarkers( code );
   const bool hasRiskMarkers = !riskMarkers.isEmpty();
@@ -445,6 +458,23 @@ QgsAiToolResult QgsAiRunPythonTool::execute( const QJsonObject &args )
     logMessage( u"run_python: completed (stdoutBytes=%1, stderrBytes=%2, failure=%3)"_s.arg( stdoutText.size() ).arg( stderrText.size() ).arg( hadFailure ), u"AI/Python"_s, hadFailure ? Qgis::MessageLevel::Warning : Qgis::MessageLevel::Info, false );
 
   QJsonObject output = diagnosis;
+  QJsonArray geographicChecks;
+  bool geographyPassed = true;
+  for ( auto *layer : QgsProject::instance()->mapLayers() )
+  {
+    if ( beforeResources.value( layer->id() ) == resourceState( layer ) )
+      continue;
+    const auto checks = qgsAiVerifyLayerQuality( layer, QgsProject::instance() );
+    geographyPassed = geographyPassed && checks.value( u"passed"_s ).toBool();
+    geographicChecks.append( QJsonObject { { u"layer_id"_s, layer->id() }, { u"quality_checks"_s, checks } } );
+  }
+  if ( !geographicChecks.isEmpty() )
+  {
+    output.insert( u"geographic_verifications"_s, geographicChecks );
+    output.insert( u"quality_checks"_s, QJsonObject { { u"passed"_s, geographyPassed } } );
+    if ( geographicChecks.size() == 1 )
+      output.insert( u"layer_id"_s, geographicChecks.first().toObject().value( u"layer_id"_s ) );
+  }
   output.insert( u"stdout"_s, truncateRunPythonOutput( stdoutText, MAX_CAPTURE_BYTES ) );
   output.insert( u"stderr"_s, truncateRunPythonOutput( stderrText, MAX_CAPTURE_BYTES ) );
   if ( !tracebackText.isEmpty() )

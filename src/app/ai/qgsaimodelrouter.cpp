@@ -28,6 +28,7 @@
 #include "qgsmessagelog.h"
 #include "qgsnetworkaccessmanager.h"
 #include "qgssettings.h"
+#include "qgsproject.h"
 
 #include <QBuffer>
 #include <QByteArray>
@@ -1292,7 +1293,11 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
   context.messages = messages;
   context.stream = stream;
   QgsSettings appSettings;
+  context.retryScope = requestScope( provider );
+  context.firstAttemptAtMs = QDateTime::currentMSecsSinceEpoch();
   context.maxRetries = std::clamp( appSettings.value( u"ai/network/maxRetries"_s, 2 ).toInt(), 0, 5 );
+  if ( provider == Provider::Plan )
+    context.maxRetries = std::clamp( appSettings.value( u"ai/network/maxRetries"_s, 3 ).toInt(), 0, 3 );
   mRequests.insert( context.requestId, context );
 
   const QString requestId = context.requestId;
@@ -1586,8 +1591,19 @@ QgsAiModelRouter::RequestContext *QgsAiModelRouter::contextFromReply( QNetworkRe
   return &mRequests[requestId];
 }
 
+QString QgsAiModelRouter::requestScope( Provider provider ) const
+{
+  const auto settings = providerSettings( provider );
+  return settings.endpoint + '\n' + settings.model + '\n' + planCredentialScope() + '\n' + mAgentMode + '\n' + mPlanConversationId + '\n' + QgsProject::instance()->fileName();
+}
+
 bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
 {
+  if ( context.attempt > 0 && context.retryScope != requestScope( context.provider ) )
+  {
+    context.preDispatchError = tr( "Recovery canceled because the account, project, chat, mode or model changed." );
+    return false;
+  }
   if ( requiresProviderSelection() )
   {
     context.preDispatchError = tr( "Choose a provider before sending another message." );
@@ -1661,6 +1677,8 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   context.streamItemIndexToToolCall.clear();
   context.midStreamError.clear();
   context.midStreamStatus = 0;
+  context.retryForbidden = false;
+  context.applicationErrorCode.clear();
   context.retryAfterSeconds = -1;
   context.usage = QgsAiUsage();
   context.responseModel.clear();
@@ -1704,6 +1722,9 @@ void QgsAiModelRouter::clearRequestTransport( RequestContext &context )
 
   if ( context.reply )
   {
+    context.reply->disconnect( this );
+    if ( !context.reply->isFinished() )
+      context.reply->abort();
     context.reply->deleteLater();
     context.reply = nullptr;
   }
@@ -1746,7 +1767,13 @@ void QgsAiModelRouter::startRequestWatchdog( RequestContext &context, int transf
     const qint64 latencyMs = timedOutContext.startedAtMs > 0 ? std::max<qint64>( 0, QDateTime::currentMSecsSinceEpoch() - timedOutContext.startedAtMs ) : 0;
     QgsMessageLog::logMessage( u"Request id=%1 provider=%2 watchdog timed out after %3 seconds."_s.arg( requestId, providerName ).arg( watchdogSeconds ), u"AI"_s, Qgis::MessageLevel::Warning, false );
     const int retryCount = timedOutContext.attempt - 1;
-    if ( timedOutContext.attempt <= timedOutContext.maxRetries )
+    if (
+      timedOutContext.aggregatedText.isEmpty()
+      && timedOutContext.toolCalls.isEmpty()
+      && !timedOutContext.retryForbidden
+      && timedOutContext.attempt <= timedOutContext.maxRetries
+      && QDateTime::currentMSecsSinceEpoch() - timedOutContext.firstAttemptAtMs < 599000
+    )
     {
       clearRequestTransport( timedOutContext );
       QTimer::singleShot( 1000, Qt::PreciseTimer, this, [this, requestId]() {
@@ -2153,6 +2180,8 @@ void QgsAiModelRouter::onReplyReadyRead()
     return;
 
   context->streamingBuffer += QString::fromUtf8( reply->readAll() );
+  if ( !reply->header( QNetworkRequest::ContentTypeHeader ).toString().contains( "text/event-stream"_L1 ) )
+    return;
   while ( true )
   {
     const int lineEnd = context->streamingBuffer.indexOf( '\n' );
@@ -2201,6 +2230,8 @@ void QgsAiModelRouter::onReplyReadyRead()
         const int status = errorObj.value( u"code"_s ).toInt();
         if ( status >= 400 && status <= 599 ) context->midStreamStatus = status;
         const QString applicationCode = errorObj.value( u"error_code"_s ).toString();
+        context->applicationErrorCode = applicationCode;
+        context->retryForbidden = ( errorObj.contains( u"recoverable"_s ) && !errorObj.value( u"recoverable"_s ).toBool() ) || errorObj.value( u"partial_output"_s ).toBool();
         if ( !applicationCode.isEmpty() ) message += u" code=%1"_s.arg( applicationCode );
         if ( !message.isEmpty() )
           context->midStreamError = message;
@@ -2380,7 +2411,18 @@ void QgsAiModelRouter::onReplyFinished()
     const QJsonDocument doc = QJsonDocument::fromJson( responseBody );
     if ( doc.isObject() )
     {
-      responseText = extractTextFromResponse( context->provider, doc.object() );
+      const auto bodyError = doc.object();
+      if ( bodyError.contains( u"recoverable"_s ) )
+        context->retryForbidden = !bodyError.value( u"recoverable"_s ).toBool();
+      context->retryForbidden = context->retryForbidden || bodyError.value( u"partial_output"_s ).toBool();
+      if ( bodyError.value( u"error"_s ).isString() )
+        context->applicationErrorCode = bodyError.value( u"error"_s ).toString();
+      if ( bodyError.contains( u"retry_after"_s ) )
+        context->retryAfterSeconds = bodyError.value( u"retry_after"_s ).toInt( -1 );
+      // An HTTP error envelope is diagnostic data, never model output. Keep
+      // previously streamed text so a failure after partial output cannot retry.
+      if ( httpStatus < 400 )
+        responseText = extractTextFromResponse( context->provider, doc.object() );
       // Non-streaming: also harvest tool calls and usage accounting from the body.
       if ( context->toolCalls.isEmpty() )
         extractToolCallsFromResponse( context->provider, doc.object(), *context );
@@ -2388,7 +2430,7 @@ void QgsAiModelRouter::onReplyFinished()
       if ( !doc.object().value( u"model"_s ).toString().isEmpty() )
         context->responseModel = doc.object().value( u"model"_s ).toString();
     }
-    else
+    else if ( httpStatus < 400 )
       responseText = QString::fromUtf8( responseBody );
   }
 
@@ -2420,7 +2462,10 @@ void QgsAiModelRouter::onReplyFinished()
   }
 
   const bool wantsToolUse = success && !context->toolCalls.isEmpty() && !hasUnparsedToolArguments;
-  const bool retriable = !success && ( shouldRetry( httpStatus, networkError, context->attempt, context->maxRetries ) || ( emptyCompletion && context->attempt <= context->maxRetries ) );
+  const bool retriable = !success
+                         && noCompletion
+                         && !context->retryForbidden
+                         && ( shouldRetry( httpStatus, networkError, context->attempt, context->maxRetries ) || ( emptyCompletion && context->attempt <= context->maxRetries ) );
   QgsMessageLog::logMessage(
     u"Reply id=%1 provider=%2 httpStatus=%3 networkError=%4 latencyMs=%5 textLen=%6 bodyBytes=%7 success=%8 toolCalls=%9 stopReason=%10"_s.arg( requestId, providerName )
       .arg( httpStatus )
@@ -2502,8 +2547,10 @@ void QgsAiModelRouter::onReplyFinished()
         if ( when.isValid() ) retryAfterSeconds = static_cast<int>( std::clamp<qint64>( QDateTime::currentDateTimeUtc().secsTo( when ), 0, 86400 ) );
       }
     }
-    if ( retryAfterSeconds > 30 )
+    if ( context->attempt > 3 || QDateTime::currentMSecsSinceEpoch() + std::max( 0, retryAfterSeconds ) * 1000 - context->firstAttemptAtMs > 600000 )
     {
+      if ( retryAfterSeconds > 0 )
+        emit retryWaiting( requestId, QDateTime::currentMSecsSinceEpoch() + static_cast<qint64>( retryAfterSeconds ) * 1000, retryAfterSeconds, context->attempt );
       finishRequest( requestId, false, QString(), tr( "The provider asked to wait %1 seconds before resuming." ).arg( retryAfterSeconds ), httpStatus, context->attempt - 1, false, latencyMs );
       return;
     }
@@ -2512,18 +2559,39 @@ void QgsAiModelRouter::onReplyFinished()
     clearRequestTransport( *context );
     QgsMessageLog::
       logMessage( u"Request id=%1 provider=%2 retrying in %3 ms (attempt %4 of %5)."_s.arg( requestId, providerName ).arg( backoffMs ).arg( context->attempt + 1 ).arg( context->maxRetries + 1 ), u"AI"_s, Qgis::MessageLevel::Info, false );
-    QTimer::singleShot( backoffMs, Qt::PreciseTimer, this, [this, requestId, httpStatus]() {
-      // The request may have been canceled while waiting for the backoff.
+    const qint64 retryAt = QDateTime::currentMSecsSinceEpoch() + backoffMs;
+    const int retryNumber = context->attempt;
+    auto *timer = new QTimer( this );
+    timer->setInterval( 250 );
+    auto tick = [this, timer, requestId, httpStatus, retryAt, retryNumber]() {
       if ( !mRequests.contains( requestId ) )
-        return;
-
-      RequestContext &retryContext = mRequests[requestId];
-      if ( !dispatchRequest( retryContext ) )
       {
-        const QString retryError = !retryContext.preDispatchError.isEmpty() ? retryContext.preDispatchError : u"Retry dispatch failed."_s;
-        finishRequest( requestId, false, QString(), sanitizeErrorText( retryError ), httpStatus, retryContext.attempt - 1, true, 0 );
+        timer->stop();
+        timer->deleteLater();
+        return;
       }
-    } );
+      auto &retryContext = mRequests[requestId];
+      if ( retryContext.retryScope != requestScope( retryContext.provider ) )
+      {
+        timer->stop();
+        timer->deleteLater();
+        finishRequest( requestId, false, {}, tr( "Recovery canceled because the account, project, chat, mode or model changed." ), httpStatus, retryNumber, false, 0 );
+        return;
+      }
+      const qint64 remaining = retryAt - QDateTime::currentMSecsSinceEpoch();
+      if ( remaining > 0 )
+      {
+        emit retryWaiting( requestId, retryAt, static_cast<int>( ( remaining + 999 ) / 1000 ), retryNumber );
+        return;
+      }
+      timer->stop();
+      timer->deleteLater();
+      if ( !dispatchRequest( retryContext ) )
+        finishRequest( requestId, false, {}, sanitizeErrorText( retryContext.preDispatchError ), httpStatus, retryNumber, false, 0 );
+    };
+    connect( timer, &QTimer::timeout, this, tick );
+    timer->start();
+    tick();
     return;
   }
 
@@ -2534,6 +2602,8 @@ void QgsAiModelRouter::onReplyFinished()
     errorMessage = reply->errorString();
   if ( errorMessage.isEmpty() )
     errorMessage = responseText;
+  if ( !context->applicationErrorCode.isEmpty() && !errorMessage.contains( context->applicationErrorCode ) )
+    errorMessage += u" code=%1"_s.arg( context->applicationErrorCode );
   errorMessage = sanitizeErrorText( errorMessage );
 
   finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );

@@ -591,6 +591,33 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
   {
     connect( mRouter, &QgsAiModelRouter::toolCallsRequested, this, &QgsAiAgentSessionManager::onToolCallsRequested );
 
+    connect( mRouter, &QgsAiModelRouter::retryWaiting, this, [this]( const QString &id, qint64 retryAt, int seconds, int number ) {
+      if ( id != mActiveRequestId )
+        return;
+      if ( mRecoveryWaitRequestId != id )
+      {
+        mRecoveryWaitRequestId = id;
+        auto note = buildAssistantMessage( tr( "AI response interrupted temporarily; waiting for the same model. Resume is required after restarting Strata." ) + interruptedToolSummary() );
+        note.metadata = { { u"ui_kind"_s, u"request_error"_s }, { u"error_code"_s, u"managed_provider_busy"_s }, { u"recovery"_s, recoveryCheckpoint() }, { u"retry_at_ms"_s, retryAt } };
+        mRecoveryWaitMessageId = note.id;
+        mRecoveryWaitRequestId = id;
+        recordHistoryMessage( note );
+      }
+      else
+      {
+        for ( const auto &message : std::as_const( mHistory ) )
+          if ( message.id == mRecoveryWaitMessageId && message.metadata.value( u"retry_at_ms"_s ).toLongLong() != retryAt )
+          {
+            auto metadata = message.metadata;
+            metadata.insert( u"retry_at_ms"_s, retryAt );
+            updateMessageMetadata( message.id, metadata );
+            persistRecoveryJournal();
+            break;
+          }
+      }
+      emit requestStateChanged( u"retrying"_s, tr( "Provider busy: retry %1/3 on the same model in %2 s. Cancel to stop." ).arg( number ).arg( seconds ) );
+    } );
+
     connect( mRouter, &QgsAiModelRouter::usageReported, this, [this]( const QString &requestId, const QString &, const QString &, const QgsAiUsage &usage ) {
       if ( requestId != mActiveRequestId )
         return;
@@ -663,6 +690,7 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
           finalText = fallbackAssistantTextAfterEmptyReply( mHistory );
         const QgsAiChatMessage assistant = buildAssistantMessage( finalText );
         recordHistoryMessage( assistant );
+        QFile::remove( recoveryJournalPath() );
         emit requestStateChanged( u"completed"_s, u"%1 (%2 ms)"_s.arg( providerName ).arg( latencyMs ) );
         mActiveRequestId.clear();
         mLastToolRoundHadError = false;
@@ -685,13 +713,17 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
         return;
       }
 
-      const QString finalError = actionableError( providerName, errorMessage, httpStatus );
+      const QString finalError = actionableError( providerName, errorMessage, httpStatus ) + interruptedToolSummary();
       QgsAiChatMessage assistant = buildAssistantMessage( finalError );
       assistant.metadata.insert( u"ui_kind"_s, u"request_error"_s );
       assistant.metadata.insert( u"error_provider"_s, providerName );
       assistant.metadata.insert( u"error_code"_s, errorCodeFromText( errorMessage ) );
       assistant.metadata.insert( u"http_status"_s, httpStatus );
       assistant.metadata.insert( u"recovery"_s, recoveryCheckpoint() );
+      if ( mRecoveryWaitRequestId == requestId )
+        for ( const auto &message : std::as_const( mHistory ) )
+          if ( message.id == mRecoveryWaitMessageId )
+            assistant.metadata.insert( u"retry_at_ms"_s, message.metadata.value( u"retry_at_ms"_s ) );
       if ( isAuthenticationError( providerName, errorMessage, httpStatus ) )
         assistant.metadata.insert( u"error_kind"_s, u"authentication"_s );
       else if ( isPolicyError( errorMessage, httpStatus ) )
@@ -789,6 +821,11 @@ void QgsAiAgentSessionManager::setActiveAgent( const QString &agentName )
 
 QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 {
+  if ( mRouter && !mActiveRequestId.isEmpty() )
+  {
+    disconnect( mRouter, nullptr, this, nullptr );
+    mRouter->cancelRequest( mActiveRequestId );
+  }
   qgsAiSetBackgroundToolProgressHandler( {} );
   if ( qgsAiHasActiveBackgroundTool() )
     qgsAiCancelActiveBackgroundTool();
@@ -812,6 +849,7 @@ QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 
 void QgsAiAgentSessionManager::clearHistory()
 {
+  QFile::remove( recoveryJournalPath() );
   mHistory.clear();
   mAgentMemory.clear();
   mCachedRetrievalContext.clear();
@@ -1113,6 +1151,7 @@ void QgsAiAgentSessionManager::recordHistoryMessage( const QgsAiChatMessage &mes
   mHistory.append( message );
   if ( mHistoryStore && mHistoryStore->hasPersistentHistoryScope() && !mActiveSessionId.isEmpty() )
     mHistoryStore->appendMessage( mActiveSessionId, message, mNextMessageOrdering++ );
+  persistRecoveryJournal();
   emit messageAdded( message );
 }
 
@@ -1377,6 +1416,7 @@ void QgsAiAgentSessionManager::setProjectChatHistoryScopeKey( const QString &sco
   if ( normalizedScope.isEmpty() )
   {
     resetProjectChatHistoryScope();
+    QTimer::singleShot( 0, this, &QgsAiAgentSessionManager::restoreRecoveryJournal );
     return;
   }
 
@@ -1402,6 +1442,8 @@ void QgsAiAgentSessionManager::setProjectChatHistoryScopeKey( const QString &sco
     persistCurrentHistoryToStore();
   else
     resetCurrentSessionState( true );
+
+  QTimer::singleShot( 0, this, &QgsAiAgentSessionManager::restoreRecoveryJournal );
 
   emit sessionListChanged();
 }
@@ -1483,6 +1525,15 @@ void QgsAiAgentSessionManager::deleteSession( const QString &sessionId )
     return;
   if ( !mHistoryStore->deleteSession( sessionId ) )
     return;
+
+  QFile journal( recoveryJournalPath() );
+  if ( journal.open( QIODevice::ReadOnly ) )
+  {
+    const bool matches = QJsonDocument::fromJson( journal.readAll() ).object().value( u"session_id"_s ).toString() == sessionId;
+    journal.close();
+    if ( matches )
+      journal.remove();
+  }
 
   if ( sessionId == mActiveSessionId )
     startNewSession();
@@ -3328,6 +3379,12 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
     toolMessage.metadata.insert( u"tool_result_truncated"_s, true );
   }
   toolMessage.content = serialized;
+  const bool mutating = !tool || ( tool->requiresApproval() || tool->riskLevel() != QgsAiToolRiskLevel::Low );
+  toolMessage.metadata.insert( u"execution_state"_s, result.canceled ? u"canceled"_s : result.success ? u"completed"_s : u"failed"_s );
+  toolMessage.metadata.insert( u"effects_state"_s, !mutating ? u"read_only"_s : result.success ? u"applied"_s : u"unknown"_s );
+  toolMessage.metadata.insert( u"verification_state"_s, qualityFailure ? u"failed"_s : !qualityChecks.isEmpty() ? u"passed"_s : u"pending"_s );
+  toolMessage.metadata.insert( u"quality_checks"_s, qualityChecks.toVariantMap() );
+  toolMessage.metadata.insert( u"resource_layer_id"_s, outputObject.value( u"layer_id"_s ).toString() );
   toolMessage.metadata.insert( u"tool_call_id"_s, call.id );
   toolMessage.metadata.insert( u"tool_name"_s, call.name );
   toolMessage.metadata.insert( u"tool_args"_s, call.args.toVariantMap() );

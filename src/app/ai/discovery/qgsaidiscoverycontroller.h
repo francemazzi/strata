@@ -43,7 +43,7 @@ class APP_EXPORT QgsAiDiscoveryController : public QObject
     QPointer<QgsMapCanvas> mCanvas;
     QPointer<QgsProject> mProject;
     QgsAiDiscoveryClient *mClient;
-    QString mScope, mAccountId, mWorkspaceRoot;
+    QString mScope, mAccountId, mWorkspaceRoot, mCredentialScope;
     QUrl mApiBase;
     QMap<QString, QString> mLastStates;
     QMap<QString, QPointer<QLabel>> mProgress;

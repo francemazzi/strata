@@ -330,6 +330,8 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaiaccountwidget.cpp
     ai/qgsaiagentsessionmanager.cpp
     ai/qgsaichatrecovery.cpp
+    ai/qgsairecoveryjournal.cpp
+    ai/qgsaiplanidentity.cpp
     ai/qgsaiauditlog.cpp
     ai/qgsaichatdockwidget.cpp
     ai/qgsaichatpromptedit.cpp
@@ -379,6 +381,8 @@ if (ENABLE_AI_ASSISTANT)
     ai/tools/qgsaiindextools.cpp
     ai/tools/qgsaiinstallpackagetool.cpp
     ai/tools/qgsailayertools.cpp
+    ai/tools/qgsaigeographicverification.cpp
+    ai/tools/qgsaiarcgissnapshot.cpp
     ai/tools/qgsaimessagelogtool.cpp
     ai/tools/qgsaipythonruntime.cpp
     ai/tools/qgsaiprojecttools.cpp

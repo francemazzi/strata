@@ -1217,10 +1217,26 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mGisCardRefreshTimer->setSingleShot( true );
   mGisCardRefreshTimer->setInterval( 1500 );
   connect( mGisCardRefreshTimer, &QTimer::timeout, this, &QgsAiChatDockWidget::refreshGisSuggestionCard );
-  connect( QgsProject::instance(), &QgsProject::layersAdded, mGisCardRefreshTimer, qOverload<>( &QTimer::start ) );
-  connect( QgsProject::instance(), &QgsProject::layersRemoved, mGisCardRefreshTimer, qOverload<>( &QTimer::start ) );
-  connect( QgsProject::instance(), &QgsProject::readProject, mGisCardRefreshTimer, qOverload<>( &QTimer::start ) );
-  connect( QgsProject::instance(), &QgsProject::cleared, mGisCardRefreshTimer, qOverload<>( &QTimer::start ) );
+  const auto invalidateSuggestions = [this]() {
+    ++mGisSuggestionGeneration;
+    if ( mGisSuggestionTask )
+      mGisSuggestionRefreshPending = true;
+    showGisSuggestions( {} );
+    mGisCardRefreshTimer->start();
+  };
+  const auto watchLayers = [this, invalidateSuggestions]( const QList<QgsMapLayer *> &layers ) {
+    for ( auto *layer : layers )
+    {
+      connect( layer, &QgsMapLayer::crsChanged, this, invalidateSuggestions );
+      connect( layer, &QgsMapLayer::dataSourceChanged, this, invalidateSuggestions );
+    }
+    invalidateSuggestions();
+  };
+  connect( QgsProject::instance(), &QgsProject::layersAdded, this, watchLayers );
+  connect( QgsProject::instance(), &QgsProject::layersRemoved, this, invalidateSuggestions );
+  connect( QgsProject::instance(), &QgsProject::readProject, this, invalidateSuggestions );
+  connect( QgsProject::instance(), &QgsProject::cleared, this, invalidateSuggestions );
+  watchLayers( QgsProject::instance()->mapLayers().values() );
 
   setRequestRunning( false );
   refreshProposalList();
@@ -3961,7 +3977,9 @@ void QgsAiChatDockWidget::refreshGisSuggestionCard()
 
   QgsAiGisSuggestionTask *task = new QgsAiGisSuggestionTask( std::move( snapshot ) );
   mGisSuggestionTask = task;
-  const auto finish = [this, task]( bool completed ) {
+  const quint64 generation = mGisSuggestionGeneration;
+  const auto finish = [this, task, generation]( bool completed ) {
+    completed = completed && generation == mGisSuggestionGeneration;
     if ( mGisSuggestionTask == task )
       mGisSuggestionTask = nullptr;
     if ( completed )

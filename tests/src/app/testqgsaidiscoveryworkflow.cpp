@@ -116,6 +116,7 @@ void TestQgsAiDiscoveryWorkflow::previewSelectionDownloadImport()
   };
   auto response = []( const QJsonObject &value ) { return QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QJsonDocument( value ).toJson() ); };
   server.responses
+    << response( { { u"id"_s, u"synthetic-discovery-user"_s } } )
     << response( { { u"status"_s, u"ready"_s }, { u"brief"_s, QJsonObject { { u"workflow"_s, u"inquadramento"_s } } } } )
     << response( plan )
     << response( { { u"id"_s, u"run"_s }, { u"status"_s, u"QUEUED"_s } } )
@@ -123,8 +124,7 @@ void TestQgsAiDiscoveryWorkflow::previewSelectionDownloadImport()
     << QgsAiTestLoopbackServer::jsonResponse( 200, "OK", kit )
     << response( { { u"id"_s, u"review"_s } } );
   QgsAiModelRouter router;
-  const auto claims = QJsonDocument( QJsonObject { { u"sub"_s, u"synthetic-discovery-user"_s } } ).toJson( QJsonDocument::Compact ).toBase64( QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals );
-  QVERIFY( router.setPlanSessionToken( u"e30.%1.synthetic"_s.arg( QString::fromLatin1( claims ) ) ) );
+  QVERIFY( router.setPlanSessionToken( u"strata_synthetic_opaque"_s ) );
   auto settings = router.providerSettings( QgsAiModelRouter::Provider::Plan );
   settings.endpoint = u"http://127.0.0.1:%1/ai/messages"_s.arg( server.serverPort() );
   settings.enabled = true;
@@ -144,34 +144,34 @@ void TestQgsAiDiscoveryWorkflow::previewSelectionDownloadImport()
   QTRY_COMPARE( controller.execute( u"discovery_status"_s, { { u"id"_s, id }, { u"kind"_s, u"resolve"_s } } ).value( u"status"_s ).toString(), u"ready"_s );
   controller.execute( u"discovery_search"_s, { { u"resolutionId"_s, id }, { u"maxCredits"_s, 1 } } );
   QTRY_VERIFY( preview );
-  QCOMPARE( server.requestCount, 2 );
+  QCOMPARE( server.requestCount, 3 );
   QVERIFY( project.mapLayers().isEmpty() );
   preview->findChild<QCheckBox *>()->setChecked( true );
   if ( unverified )
   {
     QVERIFY( !preview->findChild<QPushButton *>( u"discoveryConfirm"_s )->isEnabled() );
-    QCOMPARE( server.requestCount, 2 );
+    QCOMPARE( server.requestCount, 3 );
     preview->findChild<QCheckBox *>( u"discoveryContentConsent"_s )->setChecked( true );
   }
   preview->findChild<QPushButton *>( u"discoveryConfirm"_s )->click();
   preview->findChild<QPushButton *>( u"discoveryConfirm"_s )->click();
   QTRY_COMPARE_WITH_TIMEOUT( project.mapLayers().size(), 1, 30000 );
-  QTRY_COMPARE_WITH_TIMEOUT( server.requestCount, 6, 10000 );
+  QTRY_COMPARE_WITH_TIMEOUT( server.requestCount, 7, 10000 );
   QCOMPARE( project.crs().authid(), u"EPSG:3857"_s );
   auto layer = qobject_cast<QgsVectorLayer *>( project.mapLayers().first() );
   QVERIFY( layer );
   QCOMPARE( layer->crs().authid(), u"EPSG:4326"_s );
   QCOMPARE( layer->featureCount(), 1 );
   QVERIFY( project.layerTreeRoot()->findGroup( u"Discovery · run"_s ) );
-  const auto submitted = QJsonDocument::fromJson( server.requestBodies[2] ).object();
+  const auto submitted = QJsonDocument::fromJson( server.requestBodies[3] ).object();
   QCOMPARE( submitted.value( u"selection"_s ).toArray(), selection );
   QVERIFY( submitted.contains( u"workspaceId"_s ) );
-  const auto review = QJsonDocument::fromJson( server.requestBodies[5] ).object();
+  const auto review = QJsonDocument::fromJson( server.requestBodies[6] ).object();
   QCOMPARE( review.value( u"outcome"_s ).toObject().value( u"status"_s ).toString(), u"SUCCEEDED"_s );
   QVERIFY( !review.value( u"outcome"_s ).toObject().value( u"coverage"_s ).toObject().value( u"complete"_s ).toBool() );
   controller.resume();
   QTest::qWait( 50 );
-  QCOMPARE( server.requestCount, 6 );
+  QCOMPARE( server.requestCount, 7 );
   server.responses
     << response( { { u"id"_s, u"cancel-plan"_s }, { u"status"_s, u"QUEUED"_s } } )
     << response( { { u"id"_s, u"cancel-plan"_s }, { u"status"_s, u"CANCELLED"_s }, { u"cancelRequested"_s, true } } ); // # spellok: API protocol status.
