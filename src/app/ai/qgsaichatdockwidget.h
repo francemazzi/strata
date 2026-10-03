@@ -242,6 +242,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QTimer *mGisCardRefreshTimer = nullptr;
     QPointer<QgsAiGisSuggestionTask> mGisSuggestionTask;
     bool mGisSuggestionRefreshPending = false;
+    quint64 mGisSuggestionGeneration = 0;
     QList<QgsAiGisSuggestion> mGisSuggestions;
 
     QFrame *mErrorBanner = nullptr;

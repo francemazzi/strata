@@ -1,0 +1,13 @@
+# Managed chat and raster recovery
+
+Managed provider failures retry the same model only before any content or tool call has arrived. The router honors the server's wait, allows at most three retries in ten minutes, and cancels recovery on a change of credentials, endpoint, model, mode, conversation or project. The UI shows a countdown and retains Cancel. User credit failures remain separate.
+
+A local owner-only journal outside the indexed workspace preserves the interruption, deadline, history and project resource fingerprints. After restart it restores a notice, never a request. Resume verifies the original project/resources and refreshes identity with `/v1/auth/me`. Discovery uses the same server-verified identity for opaque desktop tokens and JWTs, scoped to credentials and endpoint.
+
+Tool records distinguish execution, applied effects and verification. Resume permits completed read-only failures, but blocks missing, duplicated, canceled or undone mutation results. Failed GIS checks are run again against the actual resource. Successful corrections append evidence linked to the original call; the original error remains in history. Python changes to CRS, source, extent or backing file trigger the same checks. A successful Python interpreter exit is not geographic verification.
+
+`add_layer_from_service` supports `arcgis_mapserver` in `live` mode by default. Explicit `snapshot` requires selected layers, bbox with CRS and a new workspace `.tif` destination. It respects both image limits, reads `/export?f=json`, compares returned dimensions to pixels, uses returned extent/CRS, embeds transform and alpha, then reopens the GeoTIFF before publishing. Existing files are not overwritten. CRS assignment in the project is checked separately from embedded raster georeferencing. CRS/source changes invalidate stale suggestions and asynchronous snapshots.
+
+Regression coverage includes HTTP/SSE failures, same-payload retry, 120-second wait without an early request, cancellation, retry/window limits, model changes, manual recovery after restart, opaque/JWT identity and revocation, failed CRS corrected before Resume with no tool replay, and a synthetic 4000×4400 request returning 3723×4096 with changed extent. Raster checks verify bounds to half a pixel, embedded CRS, transparency, reopening and no overwrite. Workspace symlink escapes are rejected.
+
+Real incident acceptance remains separate: the original saved project must be opened, the corrected GeoTIFF verified and substituted while preserving layer identity/order/style and a restore path, and the real interrupted conversation resumed without duplicate effects. A blank project or passing unit tests cannot establish this acceptance.

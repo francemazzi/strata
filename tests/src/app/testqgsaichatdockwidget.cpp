@@ -555,6 +555,21 @@ void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()
   QVERIFY( card );
   QTRY_VERIFY_WITH_TIMEOUT( card->isVisible(), 10000 );
 
+  // Changing CRS invalidates an in-flight snapshot as well as the visible card.
+  const auto cardText = [card]() {
+    QStringList labels;
+    for ( auto *label : card->findChildren<QLabel *>() )
+      labels << label->text();
+    return labels.join( '\n' );
+  };
+  QVERIFY( QMetaObject::invokeMethod( &dock, "refreshGisSuggestionCard", Qt::DirectConnection ) );
+  noCrsLayer->setCrs( QgsCoordinateReferenceSystem( u"EPSG:4326"_s ) );
+  QVERIFY( !card->isVisible() );
+  QTest::qWait( 1700 );
+  QTRY_VERIFY_WITH_TIMEOUT( !cardText().contains( u"Layer CRS is undefined"_s ), 10000 );
+  noCrsLayer->setCrs( QgsCoordinateReferenceSystem() );
+  QTRY_VERIFY_WITH_TIMEOUT( cardText().contains( u"Layer CRS is undefined"_s ), 10000 );
+
   QPushButton *review = dock.findChild<QPushButton *>( u"aiGisCardReviewButton"_s );
   QVERIFY( review );
 

@@ -76,6 +76,7 @@ set(TESTS
 if (ENABLE_AI_ASSISTANT)
   set(TESTS ${TESTS} testqgsaireviewpatchengine.cpp)
   set(TESTS ${TESTS} testqgsaimodelrouter.cpp)
+  set(TESTS ${TESTS} testqgsaiincidentrecovery.cpp)
   set(TESTS ${TESTS} testqgsaiagentsessionmanager.cpp)
   set(TESTS ${TESTS} testqgsaichathistorystore.cpp)
   set(TESTS ${TESTS} testqgsaichatdockwidget.cpp)

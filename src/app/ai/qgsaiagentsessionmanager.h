@@ -177,6 +177,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     //! Resumes a failed provider round without replaying completed tools.
     bool resumeLastInterruptedTurn( QString *error = nullptr );
     QVariantMap recoveryCheckpoint() const;
+    QString interruptedToolSummary() const;
 
     /**
      * Replaces the user message \a messageId with \a text and sends it, dropping everything
@@ -190,7 +191,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
      * history scope is persistent. Pass nullptr to disable persistence.
      * Ownership is not transferred.
      */
-    void setHistoryStore( QgsAiChatHistoryStore *store ) { mHistoryStore = store; }
+    void setHistoryStore( QgsAiChatHistoryStore *store );
     QgsAiChatHistoryStore *historyStore() const { return mHistoryStore; }
 
     //! Returns the persisted sessions for the current history scope ordered by most recent first.
@@ -470,6 +471,9 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     static QString deriveSessionTitle( const QString &text );
     void resetCurrentSessionState( bool emitHistorySignal );
     void persistCurrentHistoryToStore();
+    QString recoveryJournalPath() const;
+    void persistRecoveryJournal() const;
+    void restoreRecoveryJournal();
 
     QgsAiModelRouter *mRouter = nullptr;
     QgsAiFileContextProvider *mContextProvider = nullptr;
@@ -479,6 +483,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QList<QgsAiChatMessage> mHistory;
     QList<QgsAiModelRouter::Provider> mPendingProviders;
     QString mActiveRequestId;
+    QString mRecoveryWaitRequestId, mRecoveryWaitMessageId;
     //! Id of the tool call running now, for its progress.
     QString mRunningToolCallId;
     std::function<QgsAiMapContext()> mMapContextProvider;
