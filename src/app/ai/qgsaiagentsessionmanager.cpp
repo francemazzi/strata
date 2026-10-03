@@ -849,6 +849,7 @@ QgsAiAgentSessionManager::~QgsAiAgentSessionManager()
 
 void QgsAiAgentSessionManager::clearHistory()
 {
+  QFile::remove( recoveryJournalPath() );
   mHistory.clear();
   mAgentMemory.clear();
   mCachedRetrievalContext.clear();
@@ -1524,6 +1525,15 @@ void QgsAiAgentSessionManager::deleteSession( const QString &sessionId )
     return;
   if ( !mHistoryStore->deleteSession( sessionId ) )
     return;
+
+  QFile journal( recoveryJournalPath() );
+  if ( journal.open( QIODevice::ReadOnly ) )
+  {
+    const bool matches = QJsonDocument::fromJson( journal.readAll() ).object().value( u"session_id"_s ).toString() == sessionId;
+    journal.close();
+    if ( matches )
+      journal.remove();
+  }
 
   if ( sessionId == mActiveSessionId )
     startNewSession();

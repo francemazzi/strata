@@ -179,6 +179,11 @@ class TestQgsAiIncidentRecovery : public QObject
       QVERIFY2( error.contains( u"wait ends"_s ), qPrintable( error ) );
       QTest::qWait( 300 );
       QCOMPARE( server.requestCount, 1 );
+      restored.clearHistory();
+      QgsAiAgentSessionManager cleared( &router, &files, &review );
+      cleared.setHistoryStore( &store );
+      QTest::qWait( 100 );
+      QVERIFY( cleared.history().isEmpty() );
     }
     void rejectsPartialOutputRetry()
     {
