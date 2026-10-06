@@ -360,6 +360,28 @@ jobs:
           find universal -mindepth 1 -maxdepth 1 ! -name '*.app' -exec rm -rf {} +
           ls -la universal/*.app
 
+      - name: Set the Strata release version in the macOS bundle
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, plistlib, re
+          from pathlib import Path
+          tag = os.environ['RELEASE_TAG']
+          match = re.fullmatch(r'strata-v([0-9]+\.[0-9]+\.[0-9]+)', tag)
+          assert match, 'A numeric Strata release tag is required'
+          bundles = list(Path('universal').glob('*.app'))
+          assert len(bundles) == 1
+          path = bundles[0] / 'Contents/Info.plist'
+          info = plistlib.loads(path.read_bytes())
+          assert info['CFBundleIdentifier'] == 'com.francemazzi.strata'
+          info['CFBundleShortVersionString'] = match[1]
+          info['CFBundleVersion'] = match[1]
+          path.write_bytes(plistlib.dumps(info))
+          print('macOS bundle version:', match[1])
+          PYCODE
+
       - name: 🔐 Import Apple code signing certificate
         if: ${{ env.IS_STRATA_RELEASE == 'true' }}
         uses: apple-actions/import-codesign-certs@8f3fb608891dd2244cdab3d69cd68c0d37a7fe93 # v5.0.2

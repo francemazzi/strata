@@ -51,8 +51,28 @@ jobs:
         run: |
           test "$SIGN_AND_NOTARIZE" = true
           node scripts/ci/release-assets.mjs draft "$RELEASE_TAG"
-          SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')
-          test "$SOURCE_SHA" = "$(git rev-parse HEAD)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          SOURCE_SHA=$(jq -r '.head_sha' source-run.json)
+          if [ "$SOURCE_SHA" != "$(git rev-parse HEAD)" ]; then
+            # A manual rebuild may use a newer workflow while checking out the
+            # immutable tag. Only the recorded class-layout build setting may
+            # differ in application sources; verify it instead of trusting HEAD.
+            test "$(jq -r '.event' source-run.json)" = workflow_dispatch
+            test "$(jq -r '.path' source-run.json)" = .github/workflows/build-macos-qt6.yml
+            git fetch --depth=1 origin "$SOURCE_SHA"
+            git diff --exit-code HEAD "$SOURCE_SHA" -- . ':!.github/workflows' ':!docs' ':!scripts/ci/verify_crs_runtime.py' ':!src/app/CMakeLists.txt'
+            SOURCE_SHA="$SOURCE_SHA" python3 - <<'PYCODE'
+          import os, subprocess
+          from pathlib import Path
+          old = Path('src/app/CMakeLists.txt').read_text()
+          new = subprocess.check_output(['git', 'show', os.environ['SOURCE_SHA'] + ':src/app/CMakeLists.txt'], text=True)
+          old = old.replace('target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)', 'target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)')
+          def significant(text):
+              return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          assert significant(old) == significant(new), 'Unexpected application build changes'
+          PYCODE
+            echo 'VERIFY_CONFIGURATION_PATCH=true' >> "$GITHUB_ENV"
+          fi
           # Packaging can fail after both native builds succeeded. Reuse only
           # those exact successful build jobs from the immutable source commit.
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > source-jobs.json
@@ -76,6 +96,32 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pattern: strata-app-${{ inputs.release_tag }}-*
           path: artifacts
+
+      - name: Verify the native rebuild configuration receipts
+        if: env.VERIFY_CONFIGURATION_PATCH == 'true'
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json
+          from pathlib import Path
+          patches = list(Path('artifacts').rglob('candidate-build-configuration.patch'))
+          assert len(patches) == 2, patches
+          hashes = []
+          needs_override = 'target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)' in Path('src/app/CMakeLists.txt').read_text()
+          for path in patches:
+              text = path.read_text()
+              added = [line for line in text.splitlines() if line.startswith('+') and not line.startswith('+++')]
+              removed = [line for line in text.splitlines() if line.startswith('-') and not line.startswith('---')]
+              if needs_override:
+                  assert added == ['+  target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)']
+                  assert removed == ['-  target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)']
+                  assert text.count('diff --git ') == 1 and 'diff --git a/src/app/CMakeLists.txt b/src/app/CMakeLists.txt' in text
+              else:
+                  assert not text.strip(), 'Unexpected build configuration override'
+              hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+          assert len(set(hashes)) == 1
+          Path('native-build-configuration.json').write_text(json.dumps({'patch_sha256': hashes[0], 'native_architectures_verified': 2}, indent=2) + '\n')
+          print('Verified native build configuration:', hashes[0])
+          PYCODE
 
       - name: Create universal app
         run: |
@@ -117,6 +163,28 @@ jobs:
           fi
           find universal -mindepth 1 -maxdepth 1 ! -name '*.app' -exec rm -rf {} +
           ls -la universal/*.app
+
+      - name: Set the Strata release version in the macOS bundle
+        if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, plistlib, re
+          from pathlib import Path
+          tag = os.environ['RELEASE_TAG']
+          match = re.fullmatch(r'strata-v([0-9]+\.[0-9]+\.[0-9]+)', tag)
+          assert match, 'A numeric Strata release tag is required'
+          bundles = list(Path('universal').glob('*.app'))
+          assert len(bundles) == 1
+          path = bundles[0] / 'Contents/Info.plist'
+          info = plistlib.loads(path.read_bytes())
+          assert info['CFBundleIdentifier'] == 'com.francemazzi.strata'
+          info['CFBundleShortVersionString'] = match[1]
+          info['CFBundleVersion'] = match[1]
+          path.write_bytes(plistlib.dumps(info))
+          print('macOS bundle version:', match[1])
+          PYCODE
 
       - name: Import Apple code signing certificate
         if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
@@ -379,6 +447,9 @@ jobs:
           path: |
             notary-result.json
             notary-log.json
+            native-build-configuration.json
+            source-run.json
+            source-jobs.json
           if-no-files-found: ignore
 
       - name: Upload release assets
