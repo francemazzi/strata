@@ -33,7 +33,8 @@ with tempfile.TemporaryDirectory(prefix="strata-candidate-postgis-") as director
         "generate-random-password-for-keychain=false\n"
     )
     env.update(
-        QT_QPA_PLATFORM="offscreen", QTWEBENGINE_DISABLE_SANDBOX="1",
+        QT_QPA_PLATFORM="xcb" if sys.platform.startswith("linux") else "offscreen",
+        QTWEBENGINE_DISABLE_SANDBOX="1",
         STRATA_CRS_CANDIDATE_OUT=str(output), STRATA_CRS_TEST_SOURCE=str(source),
         APPIMAGE_EXTRACT_AND_RUN="1",
     )

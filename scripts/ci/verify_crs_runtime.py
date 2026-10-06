@@ -53,7 +53,9 @@ def main():
             ):
                 env.pop(key, None)
         env.update(
-            QT_QPA_PLATFORM="offscreen",
+            # The Linux AppImage ships xcb, not the optional offscreen plugin.
+            # Run it under Xvfb in CI, using the same platform plugin as users.
+            QT_QPA_PLATFORM="xcb" if sys.platform.startswith("linux") else "offscreen",
             QTWEBENGINE_DISABLE_SANDBOX="1",
             STRATA_PYQGIS_SMOKE_OUT=str(result),
         )
