@@ -1195,6 +1195,19 @@ void TestQgsAiAgentSessionManager::mapContextTellsTheModelWhatTheUserSees()
   QVERIFY( prompt.contains( u"Selected features in Parcels: 2 (feature ids"_s ) );
   QCOMPARE( manager.mapContextSummary(), u"Parcels · 2 selected · 1:%1"_s.arg( QLocale().toString( 5000.0, 'f', 0 ) ) );
 
+  // A custom view CRS must not be described as absent or replace the layer CRS.
+  manager.setMapContextProvider( [layerId]() {
+    QgsAiMapContext context;
+    context.activeLayerId = layerId;
+    context.extent = QgsRectangle( 0, 0, 100, 100 );
+    context.crs = QgsCoordinateReferenceSystem::fromProj( u"+proj=tmerc +lat_0=0 +lon_0=9.123456 +k=0.9996 +x_0=500000 +y_0=0 +ellps=GRS80 +units=m"_s );
+    return context;
+  } );
+  QVERIFY( manager.mapContextText().contains( u"Custom CRS (valid)"_s ) );
+  QVERIFY( !manager.mapContextText().contains( u"(no CRS)"_s ) );
+  QVERIFY( manager.buildSystemPrompt().contains( u"EPSG:3003"_s ) );
+  QVERIFY( manager.buildSystemPrompt().contains( u"crs_details.is_valid"_s ) );
+
   // The user can leave it out.
   manager.setMapContextIncluded( false );
   QVERIFY( !manager.buildSystemPrompt().contains( u"Active layer"_s ) );

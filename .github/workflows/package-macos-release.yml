@@ -278,6 +278,18 @@ jobs:
           APP_PATH=$(ls -d universal/*.app | head -n1)
           python3 scripts/ci/verify_pyqgis_bundle.py --platform macos "${APP_PATH}"
 
+      - name: Verify CRS runtime in candidate app
+        run: |
+          APP_PATH=$(ls -d universal/*.app | head -n1)
+          python3 scripts/ci/verify_crs_runtime.py "${APP_PATH}/Contents/MacOS/Strata" --output crs-runtime-macos.json
+
+      - name: Preserve CRS runtime evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crs-runtime-macos
+          path: crs-runtime-macos.json
+          if-no-files-found: error
+
       - name: Create dmg
         run: |
           QGIS_APP_NAME="Strata"

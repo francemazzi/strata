@@ -1,0 +1,154 @@
+{
+  "date": "2026-10-06",
+  "scope": "development source validation; not package or customer acceptance",
+  "base_commit": "affaa070ecb69f11b2a296e8ee7efa3c7938e7f5",
+  "host": "macOS arm64",
+  "database": "disposable PostGIS 3.4 / PostgreSQL 16",
+  "cpp_suites": [
+    {
+      "suite": "aicrsmetadata",
+      "exit_code": 0,
+      "summary": "Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 5904ms"
+    },
+    {
+      "suite": "ailayerchunker",
+      "exit_code": 0,
+      "summary": "Totals: 12 passed, 0 failed, 0 skipped, 0 blacklisted, 309ms"
+    },
+    {
+      "suite": "ailayerindexcoordinator",
+      "exit_code": 0,
+      "summary": "Totals: 16 passed, 0 failed, 0 skipped, 0 blacklisted, 5799ms"
+    },
+    {
+      "suite": "aiagentsessionmanager",
+      "exit_code": 0,
+      "summary": "Totals: 78 passed, 0 failed, 0 skipped, 0 blacklisted, 5648ms"
+    },
+    {
+      "suite": "aitoolregistry",
+      "exit_code": 0,
+      "summary": "Totals: 39 passed, 0 failed, 0 skipped, 0 blacklisted, 3678ms"
+    },
+    {
+      "suite": "aidatabasetools",
+      "exit_code": 0,
+      "summary": "Totals: 20 passed, 0 failed, 0 skipped, 0 blacklisted, 8289ms"
+    },
+    {
+      "suite": "aiprojecttools",
+      "exit_code": 0,
+      "summary": "Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 338ms"
+    }
+  ],
+  "pyqgis": {
+    "methods": 5,
+    "srid_matrix_cases": 16,
+    "result": "PASS"
+  },
+  "desktop_smoke": {
+    "console": true,
+    "crs_checks": {
+      "25832": "EPSG:25832",
+      "3003": "EPSG:3003",
+      "3004": "EPSG:3004",
+      "32632": "EPSG:32632",
+      "32633": "EPSG:32633",
+      "4326": "EPSG:4326",
+      "6707": "EPSG:6707",
+      "7791": "EPSG:7791",
+      "7792": "EPSG:7792"
+    },
+    "custom_crs": true,
+    "ok": true,
+    "python": "3.14.6",
+    "qgis_core": "4.3.1-Master",
+    "qsci": true,
+    "runtime_mode": "development"
+  },
+  "gui": {
+    "browser_loading": "PASS (custom, EPSG:3003, SRID 0)",
+    "provider_properties": "PASS (safe source-SRID diagnostic)",
+    "unresolved_layer_attribute_table": "PASS (one synthetic record)",
+    "save_reopen": [
+      {
+        "name": "custom_crs",
+        "valid": true,
+        "crs_valid": true,
+        "authid": "",
+        "wkt_available": true,
+        "diagnostic": {
+          "source_srid": 990091,
+          "status": "valid"
+        }
+      },
+      {
+        "name": "monte_mario",
+        "valid": true,
+        "crs_valid": true,
+        "authid": "EPSG:3003",
+        "wkt_available": true,
+        "diagnostic": {
+          "source_srid": 3003,
+          "status": "valid"
+        }
+      },
+      {
+        "name": "unresolved_crs",
+        "valid": true,
+        "crs_valid": false,
+        "authid": "",
+        "wkt_available": false,
+        "diagnostic": {
+          "diagnostic": {
+            "code": "srid_unspecified",
+            "message": "The source does not specify a usable spatial reference identifier (SRID)."
+          },
+          "source_srid": 0,
+          "status": "missing"
+        }
+      }
+    ],
+    "assistant_gui": "PENDING: Mac session locked; fake-provider automated context/payload tests pass"
+  },
+  "package_acceptance": {
+    "macos": "PENDING",
+    "windows": "PENDING",
+    "linux": "PENDING"
+  },
+  "customer_layer": "PENDING: platform/version/SRID/layer not available",
+  "source_file_sha256": {
+    ".github/workflows/build-appimage.yml": "d76b060fa1698dda229320a8c3bc2febb9b769fd0659aec19dd1b73f1cc3ef26",
+    ".github/workflows/build-macos-qt6.yml": "1cedcca3524b954f39a937a5111c8788a95fa89cbb93e379153f46ba48335b10",
+    ".github/workflows/package-macos-release.yml": "a7be4dc328c45c6824a1b11a126f157e94f630633b9b6ae23aa8dee58af401fb",
+    "scripts/build-appimage.sh": "74564bdaab36096ed8b8d0e56f06ca6837b58a195db0ab70d0bc24bffe0eee95",
+    "scripts/ci/smoke_pyqgis.py": "896a69c629b6d1592a339934348e127b7cc27d8139aeec893f3aa1dba7e7274c",
+    "scripts/ci/test-windows-runtime.ps1": "5148c9ea43f9594a210d4b55eb735149c959a8585017ec32beb79840fd0d7456",
+    "scripts/ci/verify_crs_runtime.py": "549d212ee77326a7018a01e7d7b6d7f5bf5a37839b80fa6c3c95095dd6441adc",
+    "src/app/CMakeLists.txt": "6a817a8f21aae1fd8a8172ff8e785dcbe17a3bd23eef793aaee5f4692525ec65",
+    "src/app/ai/index/qgsailayerchunker.cpp": "b862303874de989f3c773d29883a82844b265faae21068816d52ba27bd71188c",
+    "src/app/ai/index/qgsailayerchunker.h": "3d4c2fa216d15953016921bd88f4107c431004f0fe99850792bebb0bd1b18145",
+    "src/app/ai/qgsaiagentsessionmanager.cpp": "d6b91b4a4d2c6b97e0392d25c794f7dd6a828010825b8693a1d886e2ddb21221",
+    "src/app/ai/qgsaicrsutils.cpp": "e1be5baec304ad05c34040fa8b7ea9f2fe062da12231cf4b9e8fa4113a523c9c",
+    "src/app/ai/qgsaicrsutils.h": "85e802eff2fafb31a1e5f18a47643525cfc75e7c556b2334691b06af49a90867",
+    "src/app/ai/tools/qgsaiattributetabletools.cpp": "1a9129d4c3dc14fce0858606911247a43d41d003134e55e4256e8dc01652372e",
+    "src/app/ai/tools/qgsaidatabasetools.cpp": "1968bf40e0f63f7e64c872a172cbd5ab2aab1ec1fafd5b23cb49707993bf5261",
+    "src/app/ai/tools/qgsailayertools.cpp": "39c410b01419429b2d73e383914b678532e09db0771fe6751f1afcbf44cecf5c",
+    "src/app/ai/tools/qgsaiprojecttools.cpp": "f1a2452bdddef605b72b75fcb0bca9b70c73db15c7d3bba91671c3a976e7e794",
+    "src/app/ai/tools/qgsaireadtools.cpp": "ce4ba868e84a68d3bfaa13078efe37a9d9fac97bdb09abd124e400ccb5aa6fcb",
+    "src/app/qgisapp.cpp": "5acba73e89cb3e2743999dfcc871f0a72738570f83d4cfc195dbf2d2f256904f",
+    "src/core/vector/qgsvectorlayer.cpp": "d54cd03b6604d8032d6177218e550dcb706591c1839b35361466a9d2403e4afd",
+    "src/providers/postgres/qgspostgresconn.cpp": "729d288da8ab9f3d8863c7c95439e2457658e0f6a125120ffe99c0dc4229df28",
+    "src/providers/postgres/qgspostgresconn.h": "626ecae15aeba103f2893e8af0716d68f38673dfef43693826048d1f38fe6adb",
+    "src/providers/postgres/qgspostgresprovider.cpp": "67f95cef120c6d9002d019b6bd74eedb2af430d06321e5804673516b3fbe152e",
+    "src/providers/postgres/qgspostgresprovider.h": "f23956d5917861ac128db407c96b735dc4c3674d75063ea3b8f0d3a973eda572",
+    "src/providers/postgres/qgspostgresproviderconnection.cpp": "139a93c14322563970ebbdf91c09779d5e679b8f1e653a27406c9f88426cba28",
+    "tests/src/app/CMakeLists.txt": "14669075712ab9d56ca1658323f015223c365cd03a8404de12b82340ea58a070",
+    "tests/src/app/testqgsaiagentsessionmanager.cpp": "15edbfe2e40f95a111e3c7a83f7af600673e29f17644753a059ff39a970a0e5c",
+    "tests/src/app/testqgsaicrsmetadata.cpp": "14e3cb8a36956dcab0419640bced751facb1da86965338dc5d769cc23d1085ba",
+    "tests/src/app/testqgsailayerchunker.cpp": "b1e4e4c9ab821c03161b73523f041c2e01619cab64a53b1e7ed48c8a57fb073a",
+    "tests/src/app/testqgsailayerindexcoordinator.cpp": "7972344219451cd216cef1ca8ea746e662822c32b531f428acbbb497c4dd75b9",
+    "tests/src/python/CMakeLists.txt": "5ce4add4aa10461915c6a3cab75291efd4d26598115bdd0581491779bbd248f0",
+    "tests/src/python/test_provider_postgres_crs.py": "27a776f96e912341ae4208c8202bdea0dc3c74fb5737147cc060c0ffaeb4fc17"
+  }
+}

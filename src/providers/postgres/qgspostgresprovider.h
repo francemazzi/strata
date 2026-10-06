@@ -51,6 +51,7 @@ class QgsPostgresListener;
 class QgsPostgresProvider final : public QgsVectorDataProvider
 {
     Q_OBJECT
+    Q_PROPERTY( QVariantMap crsResolution READ crsResolution )
 
     friend class TestQgsPostgresProvider;
 
@@ -93,6 +94,8 @@ class QgsPostgresProvider final : public QgsVectorDataProvider
     QgsAbstractFeatureSource *featureSource() const override;
     QString storageType() const override;
     QgsCoordinateReferenceSystem crs() const override;
+    //! Snapshot only: reading this property never queries the database.
+    QVariantMap crsResolution() const { return mCrsResolution; }
     QgsFeatureIterator getFeatures( const QgsFeatureRequest &request ) const override;
     Qgis::WkbType wkbType() const override;
     QgsLayerMetadata layerMetadata() const override;
@@ -451,6 +454,7 @@ class QgsPostgresProvider final : public QgsVectorDataProvider
     mutable QgsPostgresConn *mConnectionRO = nullptr; //!< Read-only database connection (initially)
     QgsPostgresConn *mConnectionRW = nullptr;         //!< Read-write database connection (on update)
 
+    mutable QVariantMap mCrsResolution;
     QgsPostgresConn *connectionRO() const;
     QgsPostgresConn *connectionRW();
 

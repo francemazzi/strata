@@ -154,7 +154,8 @@ void TestQgsAiLayerChunker::officeSpreadsheetVectorLayerSkipsFeatureSampling()
   QVERIFY( chunks.first().wktBlob.isEmpty() );
   QVERIFY( chunks.first().text.contains( u"sampled_feature_limit=0"_s ) );
   QVERIFY( chunks.first().text.contains( u"Office spreadsheet layers"_s ) );
-  QVERIFY( !chunks.first().text.contains( u"fields="_s ) );
+  QVERIFY( chunks.first().text.contains( u"fields="_s ) );
+  QVERIFY( chunks.first().text.contains( u"crs_details="_s ) );
 }
 
 void TestQgsAiLayerChunker::rasterMetadataSkipsBandStatistics()

@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsailayerchunker.h"
 
 #include <algorithm>
@@ -36,6 +37,7 @@
 #include <QByteArray>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QJsonDocument>
 #include <QFileInfo>
 #include <QSet>
 #include <QString>
@@ -47,7 +49,7 @@ namespace
 {
   constexpr int MAX_VECTOR_FEATURE_SAMPLE = 200;
   //! Bump when the chunk text changes, so every layer is chunked again.
-  constexpr const char *LAYER_CHUNK_FORMAT_VERSION = "layer-chunks-2";
+  constexpr const char *LAYER_CHUNK_FORMAT_VERSION = "layer-chunks-3";
   constexpr int MAX_VECTOR_CHUNKS = 20;
 
   QString fieldsSummary( const QgsFields &fields )
@@ -86,6 +88,7 @@ namespace
     QString out;
     out += u"Raster layer '%1' (id=%2)\n"_s.arg( layer->name(), layer->id() );
     out += u"crs=%1; size=%2x%3; bands=%4\n"_s.arg( layer->crs().authid() ).arg( layer->width() ).arg( layer->height() ).arg( layer->bandCount() );
+    out += u"crs_details=%1\n"_s.arg( QString::fromUtf8( QJsonDocument( qgsAiLayerCrsDetails( layer ) ).toJson( QJsonDocument::Compact ) ) );
 
     const QgsRectangle ext = layer->extent();
     out += u"extent=(%1,%2,%3,%4)\n"_s.arg( ext.xMinimum() ).arg( ext.yMinimum() ).arg( ext.xMaximum() ).arg( ext.yMaximum() );
@@ -134,8 +137,15 @@ namespace
   QString metadataOnlyVectorText( QgsVectorLayer *layer, const QString &reason )
   {
     return u"Vector layer '%1' (id=%2, provider=%3)\n"
+           u"crs_details=%4\ngeometry=%5; fields=%6\n"
            u"feature_count=unknown; sampled_feature_limit=0; chunk_limit=1\n"
-           u"feature sampling skipped: %4\n"_s.arg( layer->name(), layer->id(), layer->providerType(), reason );
+           u"feature sampling skipped: %7\n"_s.arg( layer->name(),
+                                                    layer->id(),
+                                                    layer->providerType(),
+                                                    QString::fromUtf8( QJsonDocument( qgsAiLayerCrsDetails( layer ) ).toJson( QJsonDocument::Compact ) ),
+                                                    QgsWkbTypes::geometryDisplayString( layer->geometryType() ),
+                                                    fieldsSummary( layer->fields() ),
+                                                    reason );
   }
 
   QgsAiWorkspaceIndex::Chunk layerChunk( const QgsAiPreparedLayer &prepared, int chunkIndex, const QString &text )
@@ -192,7 +202,13 @@ QgsAiPreparedLayer QgsAiLayerChunker::prepare( QgsMapLayer *layer )
 
   // The data source is hashed, never stored: it can hold database credentials.
   const QByteArray sourceHash = QCryptographicHash::hash( layer->source().toUtf8(), QCryptographicHash::Sha1 ).toHex();
-  QStringList parts { QString::fromLatin1( LAYER_CHUNK_FORMAT_VERSION ), prepared.name, prepared.providerType, prepared.crsAuthId, QString::fromLatin1( sourceHash ), prepared.metadataText };
+  QStringList parts { QString::fromLatin1( LAYER_CHUNK_FORMAT_VERSION ),
+                      prepared.name,
+                      prepared.providerType,
+                      prepared.crsAuthId,
+                      prepared.crsDefinition,
+                      QString::fromLatin1( sourceHash ),
+                      prepared.metadataText };
   if ( prepared.source )
   {
     const QgsVectorLayer *vector = qobject_cast<const QgsVectorLayer *>( layer );
@@ -252,6 +268,8 @@ QgsAiPreparedLayer QgsAiLayerChunker::prepareUnfingerprinted( QgsMapLayer *layer
   prepared.name = layer->name();
   prepared.providerType = layer->providerType();
   prepared.crsAuthId = layer->crs().authid();
+  prepared.crsDefinition = layer->crs().toWkt( Qgis::CrsWktVariant::Preferred );
+  prepared.crsMetadata = QString::fromUtf8( QJsonDocument( qgsAiLayerCrsDetails( layer ) ).toJson( QJsonDocument::Compact ) );
 
   if ( QgsRasterLayer *raster = qobject_cast<QgsRasterLayer *>( layer ) )
   {
@@ -263,7 +281,7 @@ QgsAiPreparedLayer QgsAiLayerChunker::prepareUnfingerprinted( QgsMapLayer *layer
   QgsVectorLayer *vector = qobject_cast<QgsVectorLayer *>( layer );
   if ( !vector )
   {
-    prepared.metadataText = u"Layer '%1' (id=%2, provider=%3)\n"_s.arg( layer->name(), layer->id(), layer->providerType() );
+    prepared.metadataText = u"Layer '%1' (id=%2, provider=%3)\ncrs_details=%4\n"_s.arg( layer->name(), layer->id(), layer->providerType(), prepared.crsMetadata );
     return prepared;
   }
 
@@ -308,11 +326,11 @@ QList<QgsAiWorkspaceIndex::Chunk> QgsAiLayerChunker::chunk( const QgsAiPreparedL
   const QString extentText = prepared.extentKnown
                                ? u"(%1,%2,%3,%4)"_s.arg( prepared.extent.xMinimum() ).arg( prepared.extent.yMinimum() ).arg( prepared.extent.xMaximum() ).arg( prepared.extent.yMaximum() )
                                : u"unknown"_s;
-  const QString header = u"Vector layer '%1' (id=%2, crs=%3, geometry=%4)\nfeature_count=unknown; sampled_feature_limit=%5; chunk_limit=%6\nextent=%7\nfields=%8\n"_s
+  const QString header = u"crs_details=%9\nVector layer '%1' (id=%2, crs=%3, geometry=%4)\nfeature_count=unknown; sampled_feature_limit=%5; chunk_limit=%6\nextent=%7\nfields=%8\n"_s
                            .arg( prepared.name, prepared.layerId, prepared.crsAuthId, prepared.geometryType )
                            .arg( MAX_VECTOR_FEATURE_SAMPLE )
                            .arg( MAX_VECTOR_CHUNKS )
-                           .arg( extentText, fieldsSummary( prepared.fields ) );
+                           .arg( extentText, fieldsSummary( prepared.fields ), prepared.crsMetadata );
 
   const auto countTokens = [&tokenCount]( const QString &text ) {
     const int count = tokenCount( text );

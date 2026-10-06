@@ -26,6 +26,7 @@
 #include "qgsdatasourceuri.h"
 #include "qgsdbquerylog.h"
 #include "qgsdbquerylog_p.h"
+#include "qgsfeedback.h"
 #include "qgsjsonutils.h"
 #include "qgslogger.h"
 #include "qgsmessagelog.h"
@@ -38,6 +39,7 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QScopeGuard>
 #include <QString>
 #include <QStringList>
 #include <QThread>
@@ -719,6 +721,7 @@ bool QgsPostgresConn::getTableInfo( bool searchGeometryColumnsOnly, bool allowGe
       type += "ZM"_L1;
     layerProperty.types = QList<Qgis::WkbType>() << ( QgsPostgresConn::wkbTypeFromPostgis( type ) );
     layerProperty.srids = QList<int>() << srid;
+    layerProperty.catalogSrid = ssrid;
     layerProperty.sql.clear();
     layerProperty.relKind = relKindFromValue( relkind );
     layerProperty.isRaster = isRaster;
@@ -1427,9 +1430,10 @@ Qgis::PostgresRelKind QgsPostgresConn::relKindFromValue( const QString &value )
   return Qgis::PostgresRelKind::Unknown;
 }
 
-bool QgsPostgresConn::supportedLayers( QVector<QgsPostgresLayerProperty> &layers, bool searchGeometryColumnsOnly, bool allowGeometrylessTables, bool allowRasterOverviewTables, const QString &schema )
+bool QgsPostgresConn::supportedLayers(
+  QVector<QgsPostgresLayerProperty> &layers, bool searchGeometryColumnsOnly, bool allowGeometrylessTables, bool allowRasterOverviewTables, const QString &schema, const QString &table )
 {
-  return supportedLayersPrivate( layers, searchGeometryColumnsOnly, allowGeometrylessTables, allowRasterOverviewTables, schema );
+  return supportedLayersPrivate( layers, searchGeometryColumnsOnly, allowGeometrylessTables, allowRasterOverviewTables, schema, table );
 }
 
 bool QgsPostgresConn::supportedLayer( QgsPostgresLayerProperty &layerProperty, const QString &schema, const QString &table )
@@ -2895,45 +2899,82 @@ QString QgsPostgresConn::currentDatabase() const
   return database;
 }
 
-QgsCoordinateReferenceSystem QgsPostgresConn::sridToCrs( int srid )
+QgsPostgresConn::CrsResolution QgsPostgresConn::resolveCrs( int srid, QgsFeedback *feedback )
 {
-  QgsCoordinateReferenceSystem crs;
+  CrsResolution resolved;
+  if ( srid != std::numeric_limits<int>::min() )
+    resolved.details.insert( u"source_srid"_s, srid );
+  resolved.details.insert( u"status"_s, u"unresolved"_s );
+  const auto fail = [&resolved]( const QString &code, const QString &message ) {
+    resolved.details.insert( u"diagnostic"_s, QVariantMap { { u"code"_s, code }, { u"message"_s, message } } );
+    return resolved;
+  };
+  if ( srid <= 0 )
+  {
+    resolved.details.insert( u"status"_s, u"missing"_s );
+    return fail( u"srid_unspecified"_s, tr( "The source does not specify a usable spatial reference identifier (SRID)." ) );
+  }
 
   QMutexLocker locker( &mCrsCacheMutex );
   if ( mCrsCache.contains( srid ) )
-    crs = mCrsCache.value( srid );
+    resolved.crs = mCrsCache.value( srid );
   else
   {
-    QgsPostgresResult result( LoggedPQexec( u"QgsPostgresProvider"_s, u"SELECT auth_name, auth_srid, srtext, proj4text FROM spatial_ref_sys WHERE srid=%1"_s.arg( srid ) ) );
-    if ( result.PQresultStatus() == PGRES_TUPLES_OK )
+    QMetaObject::Connection cancellation;
+    if ( feedback )
+      cancellation = QObject::connect( feedback, &QgsFeedback::canceled, [this] { PQCancel(); } );
+    const auto disconnect = qScopeGuard( [&] { QObject::disconnect( cancellation ); } );
+    if ( feedback && feedback->isCanceled() )
+      return fail( u"operation_canceled"_s, tr( "Reading the spatial reference definition was canceled. Reopen the layer to try again." ) );
+    QgsPostgresResult result( LoggedPQexecNoLogError( u"QgsPostgresProvider"_s, u"SELECT auth_name, auth_srid, srtext, proj4text FROM spatial_ref_sys WHERE srid=%1"_s.arg( srid ) ) );
+    if ( feedback && feedback->isCanceled() )
+      return fail( u"operation_canceled"_s, tr( "Reading the spatial reference definition was canceled. Reopen the layer to try again." ) );
+    if ( result.PQresultStatus() != PGRES_TUPLES_OK )
     {
-      if ( result.PQntuples() > 0 )
-      {
-        const QString authName = result.PQgetvalue( 0, 0 );
-        const QString authSRID = result.PQgetvalue( 0, 1 );
-        const QString srText = result.PQgetvalue( 0, 2 );
-        bool ok = false;
-        if ( authName == "EPSG"_L1 || authName == "ESRI"_L1 )
-        {
-          ok = crs.createFromUserInput( authName + ':' + authSRID );
-        }
-        if ( !ok && !srText.isEmpty() )
-        {
-          ok = crs.createFromUserInput( srText );
-        }
-        if ( !ok )
-          crs = QgsCoordinateReferenceSystem::fromProj( result.PQgetvalue( 0, 3 ) );
-      }
-      mCrsCache.insert( srid, crs );
+      const char *errorState = result.result() ? PQresultErrorField( result.result(), PG_DIAG_SQLSTATE ) : nullptr;
+      const QString state = errorState ? QString::fromLatin1( errorState ) : QString();
+      if ( state == "42501"_L1 )
+        return fail( u"permission_denied"_s, tr( "The connection can read the layer but cannot read the spatial reference catalog (spatial_ref_sys). Check its database permissions." ) );
+      if ( state == "42P01"_L1 || state == "3F000"_L1 )
+        return fail( u"catalog_unavailable"_s, tr( "The spatial reference catalog (spatial_ref_sys) is not accessible in this connection. Check the database and schema search path." ) );
+      if ( PQstatus() != CONNECTION_OK || state.isEmpty() || state.startsWith( "08"_L1 ) || state == "57P01"_L1 || state == "57P02"_L1 || state == "57P03"_L1 )
+        return fail( u"connection_error"_s, tr( "The database connection could not read the spatial reference definition. Reconnect and try again." ) );
+      return fail( u"catalog_query_failed"_s, tr( "The database could not return the spatial reference definition." ) );
     }
+    if ( result.PQntuples() == 0 )
+      return fail( u"definition_missing"_s, tr( "No definition for SRID %1 exists in spatial_ref_sys." ).arg( srid ) );
+
+    const QString authName = result.PQgetvalue( 0, 0 );
+    const QString authSrid = result.PQgetvalue( 0, 1 );
+    const QString wkt = result.PQgetvalue( 0, 2 );
+    bool ok = false;
+    if ( authName.compare( "EPSG"_L1, Qt::CaseInsensitive ) == 0 || authName.compare( "ESRI"_L1, Qt::CaseInsensitive ) == 0 )
+      ok = resolved.crs.createFromUserInput( authName + ':' + authSrid );
+    if ( !ok && !wkt.isEmpty() )
+      ok = resolved.crs.createFromUserInput( wkt );
+    if ( !ok )
+      resolved.crs = QgsCoordinateReferenceSystem::fromProj( result.PQgetvalue( 0, 3 ) );
+    if ( !resolved.crs.isValid() )
+    {
+      if ( !QgsCoordinateReferenceSystem::fromEpsgId( 4326 ).isValid() )
+        return fail( u"local_catalog_unavailable"_s, tr( "The local CRS catalog cannot resolve even EPSG:4326. Check the application's PROJ installation." ) );
+      return fail( u"definition_invalid"_s, tr( "The spatial reference definition for SRID %1 could not be interpreted." ).arg( srid ) );
+    }
+    mCrsCache.insert( srid, resolved.crs );
   }
-  return crs;
+  resolved.details.insert( u"status"_s, u"valid"_s );
+  return resolved;
+}
+
+QgsCoordinateReferenceSystem QgsPostgresConn::sridToCrs( int srid )
+{
+  return resolveCrs( srid ).crs;
 }
 
 int QgsPostgresConn::crsToSrid( const QgsCoordinateReferenceSystem &crs )
 {
   QMutexLocker locker( &mCrsCacheMutex );
-  int srid = mCrsCache.key( crs );
+  int srid = mCrsCache.key( crs, -1 );
 
   if ( srid > -1 )
     return srid;
@@ -2946,7 +2987,7 @@ int QgsPostgresConn::crsToSrid( const QgsCoordinateReferenceSystem &crs )
     const QString authId = authParts.last();
     QgsPostgresResult result( PQexec( u"SELECT srid FROM spatial_ref_sys WHERE auth_name=%1 AND auth_srid=%2"_s.arg( quotedString( authName ), authId ) ) );
 
-    if ( result.PQresultStatus() == PGRES_TUPLES_OK )
+    if ( result.PQresultStatus() == PGRES_TUPLES_OK && result.PQntuples() > 0 && crs.isValid() )
     {
       int srid = result.PQgetvalue( 0, 0 ).toInt();
       mCrsCache.insert( srid, crs );

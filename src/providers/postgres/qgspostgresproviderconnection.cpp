@@ -246,7 +246,11 @@ QList<QgsAbstractDatabaseProviderConnection::TableProperty> QgsPostgresProviderC
   const QgsDataSourceUri dsUri { uri() };
   QgsPostgresConn *conn = QgsPostgresConnPool::instance()->acquireConnection( QgsPostgresConn::connectionInfo( dsUri, false ), -1, false, feedback );
   if ( feedback && feedback->isCanceled() )
+  {
+    if ( conn )
+      QgsPostgresConnPool::instance()->releaseConnection( conn );
     return {};
+  }
 
   if ( !conn )
   {
@@ -257,19 +261,7 @@ QList<QgsAbstractDatabaseProviderConnection::TableProperty> QgsPostgresProviderC
     bool ok { false };
     QVector<QgsPostgresLayerProperty> properties;
     const bool aspatial { !flags || flags.testFlag( TableFlag::Aspatial ) };
-    if ( !table.isEmpty() )
-    {
-      QgsPostgresLayerProperty property;
-      ok = conn->supportedLayer( property, schema, table );
-      if ( ok )
-      {
-        properties.push_back( property );
-      }
-    }
-    else
-    {
-      ok = conn->supportedLayers( properties, false, aspatial, false, schema );
-    }
+    ok = conn->supportedLayers( properties, false, aspatial, false, schema, table );
 
     if ( !ok )
     {
@@ -287,9 +279,12 @@ QList<QgsAbstractDatabaseProviderConnection::TableProperty> QgsPostgresProviderC
       bool dontResolveType = configuration().value( u"dontResolveType"_s, false ).toBool();
       bool useEstimatedMetadata = configuration().value( u"estimatedMetadata"_s, false ).toBool();
 
+      QMap<int, QgsPostgresConn::CrsResolution> resolutions;
       // Cannot be const:
       for ( auto &pr : properties )
       {
+        if ( feedback && feedback->isCanceled() )
+          break;
         // Classify
         TableFlags prFlags;
         if ( pr.relKind == Qgis::PostgresRelKind::View || pr.relKind == Qgis::PostgresRelKind::MaterializedView )
@@ -323,14 +318,39 @@ QList<QgsAbstractDatabaseProviderConnection::TableProperty> QgsPostgresProviderC
           if ( !dontResolveType
                && ( !pr.geometryColName.isNull() && ( pr.types.value( 0, Qgis::WkbType::Unknown ) == Qgis::WkbType::Unknown || pr.srids.value( 0, std::numeric_limits<int>::min() ) == std::numeric_limits<int>::min() ) ) )
           {
+            const auto catalogTypes = pr.types;
             conn->retrieveLayerTypes( pr, useEstimatedMetadata, feedback );
+            // Empty/all-null geometry columns have no sampled combinations.
+            // Keep their catalog metadata, including a genuine source SRID 0.
+            if ( pr.types.isEmpty() && !pr.geometryColName.isEmpty() )
+            {
+              pr.types = { catalogTypes.value( 0, Qgis::WkbType::Unknown ) };
+              pr.srids = { pr.catalogSrid.isEmpty() ? std::numeric_limits<int>::min() : pr.catalogSrid.toInt() };
+            }
           }
           QgsPostgresProviderConnection::TableProperty property;
           property.setFlags( prFlags );
+          QVariantList crsDetails;
           for ( int i = 0; i < std::min( pr.types.size(), pr.srids.size() ); i++ )
           {
-            property.addGeometryColumnType( pr.types.at( i ), QgsCoordinateReferenceSystem::fromEpsgId( pr.srids.at( i ) ) );
+            if ( feedback && feedback->isCanceled() )
+              break;
+            const int srid = pr.srids.at( i );
+            const bool spatial = pr.types.at( i ) != Qgis::WkbType::NoGeometry;
+            if ( spatial && !resolutions.contains( srid ) )
+              resolutions.insert( srid, conn->resolveCrs( srid, feedback ) );
+            const auto resolved = resolutions.value( srid );
+            property.addGeometryColumnType( pr.types.at( i ), resolved.crs );
+            QVariantMap details = resolved.details;
+            if ( !spatial )
+              details = { { u"status"_s, u"not_applicable"_s } };
+            details.insert( u"crs"_s, QVariant::fromValue( resolved.crs ) );
+            details.insert( u"wkb_type"_s, static_cast<int>( pr.types.at( i ) ) );
+            details.insert( u"geometry_type"_s, QgsWkbTypes::displayString( pr.types.at( i ) ) );
+            details.insert( u"geometry_column"_s, pr.geometryColName );
+            crsDetails.append( details );
           }
+          property.setInfo( { { u"crs_details"_s, crsDetails } } );
           property.setTableName( pr.tableName );
           property.setSchema( pr.schemaName );
           property.setGeometryColumn( pr.geometryColName );
@@ -383,7 +403,7 @@ QList<QgsAbstractDatabaseProviderConnection::TableProperty> QgsPostgresProviderC
   {
     throw QgsProviderConnectionException( errCause );
   }
-  return tables;
+  return feedback && feedback->isCanceled() ? QList<TableProperty>() : tables;
 }
 
 void QgsPostgresProviderConnection::renameVectorTable( const QString &schema, const QString &name, const QString &newName ) const
@@ -760,7 +780,14 @@ QgsAbstractDatabaseProviderConnection::TableProperty QgsPostgresProviderConnecti
   const QList<QgsPostgresProviderConnection::TableProperty> properties { tablesPrivate( schema, table, TableFlags(), feedback ) };
   if ( !properties.empty() )
   {
-    return properties.first();
+    TableProperty property = properties.first();
+    QVariantList crsDetails;
+    for ( const auto &column : properties )
+      crsDetails.append( column.info().value( u"crs_details"_s ).toList() );
+    QVariantMap info = property.info();
+    info.insert( u"crs_details"_s, crsDetails );
+    property.setInfo( info );
+    return property;
   }
   else
   {
@@ -1875,13 +1902,14 @@ QgsFields QgsPostgresProviderConnection::fields( const QString &schema, const QS
     {
       QgsDataSourceUri tUri { tableUri( schema, tableName ) };
 
-      if ( tableInfo.geometryColumnTypes().count() > 1 )
+      const QVariantList sourceTypes = tableInfo.info().value( u"crs_details"_s ).toList();
+      if ( sourceTypes.size() > 1 )
       {
-        const auto geomColTypes( tableInfo.geometryColumnTypes() );
-        TableProperty::GeometryColumnType geomCol { geomColTypes.first() };
+        const QVariantMap first = sourceTypes.first().toMap();
         tUri.setGeometryColumn( tableInfo.geometryColumn() );
-        tUri.setWkbType( geomCol.wkbType );
-        tUri.setSrid( QString::number( geomCol.crs.postgisSrid() ) );
+        tUri.setWkbType( static_cast<Qgis::WkbType>( first.value( u"wkb_type"_s ).toInt() ) );
+        if ( first.contains( u"source_srid"_s ) )
+          tUri.setSrid( first.value( u"source_srid"_s ).toString() );
       }
 
       if ( tableInfo.primaryKeyColumns().count() > 0 )

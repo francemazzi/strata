@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsailayertools.h"
 #include "qgsaigeographicverification.h"
 #include "qgsaiarcgissnapshot.h"
@@ -1281,6 +1282,7 @@ QgsAiToolResult QgsAiAddLayerFromFileTool::execute( const QJsonObject &args )
   output.insert( u"layer_id"_s, added->id() );
   output.insert( u"name"_s, added->name() );
   output.insert( u"crs"_s, added->crs().authid() );
+  output.insert( u"crs_details"_s, qgsAiLayerCrsDetails( added ) );
   output.insert( u"source"_s, added->publicSource() );
   output.insert( u"spatial"_s, added->isSpatial() );
   output.insert( u"extent"_s, load->facts.contains( u"extent"_s ) ? load->facts.value( u"extent"_s ) : QJsonValue( QJsonValue::Null ) );
@@ -1529,6 +1531,7 @@ QgsAiToolResult QgsAiAddLayerFromServiceTool::execute( const QJsonObject &args )
   output.insert( u"layer_id"_s, added->id() );
   output.insert( u"name"_s, added->name() );
   output.insert( u"crs"_s, added->crs().authid() );
+  output.insert( u"crs_details"_s, qgsAiLayerCrsDetails( added ) );
   output.insert( u"source"_s, added->publicSource() );
   output.insert( u"spatial"_s, added->isSpatial() );
   output.insert( u"extent"_s, load->facts.contains( u"extent"_s ) ? load->facts.value( u"extent"_s ) : QJsonValue( QJsonValue::Null ) );
@@ -1670,6 +1673,7 @@ QgsAiToolResult QgsAiDescribeLayerTool::execute( const QJsonObject &args )
   output.insert( u"name"_s, layer->name() );
   output.insert( u"type"_s, QgsMapLayerFactory::typeToString( layer->type() ) );
   output.insert( u"crs"_s, layer->crs().authid() );
+  output.insert( u"crs_details"_s, qgsAiLayerCrsDetails( layer ) );
   output.insert( u"source"_s, layer->publicSource() );
   output.insert( u"extent"_s, extentJson( layer->extent() ) );
   output.insert( u"visual"_s, layerVisualSummary( layer, treeNode ) );

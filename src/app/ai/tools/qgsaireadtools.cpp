@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsaireadtools.h"
 
 #include <algorithm>
@@ -624,6 +625,7 @@ QgsAiToolResult QgsAiListProjectLayersTool::execute( const QJsonObject &args )
     entry.insert( u"name"_s, layer->name() );
     entry.insert( u"type"_s, QgsMapLayerFactory::typeToString( layer->type() ) );
     entry.insert( u"crs"_s, layer->crs().authid() );
+    entry.insert( u"crs_details"_s, qgsAiLayerCrsDetails( layer ) );
     entry.insert( u"source"_s, layer->publicSource() );
     entry.insert( u"visual"_s, layerVisualSummary( layer, treeNode, renderOrder ) );
 
@@ -694,6 +696,7 @@ QgsAiToolResult QgsAiGetCanvasExtentTool::execute( const QJsonObject &args )
   QJsonObject output;
   output.insert( u"extent"_s, extentJson );
   output.insert( u"crs"_s, crs.authid() );
+  output.insert( u"crs_details"_s, qgsAiCrsDetails( crs ) );
   output.insert( u"scale"_s, mCanvas->scale() );
   output.insert( u"rotation"_s, mCanvas->rotation() );
   output.insert( u"width"_s, mCanvas->mapSettings().outputSize().width() );
@@ -924,6 +927,7 @@ QgsAiToolResult QgsAiSetCanvasExtentTool::execute( const QJsonObject &args )
   QJsonObject output;
   output.insert( u"extent"_s, readToolsExtentJson( mCanvas->extent() ) );
   output.insert( u"crs"_s, mCanvas->mapSettings().destinationCrs().authid() );
+  output.insert( u"crs_details"_s, qgsAiCrsDetails( mCanvas->mapSettings().destinationCrs() ) );
   output.insert( u"scale"_s, mCanvas->scale() );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
@@ -1035,6 +1039,7 @@ QgsAiToolResult QgsAiCaptureMapCanvasTool::execute( const QJsonObject &args )
   canvasJson.insert( u"extent"_s, readToolsExtentJson( settings.extent() ) );
   canvasJson.insert( u"visible_extent"_s, readToolsExtentJson( settings.visibleExtent() ) );
   canvasJson.insert( u"crs"_s, settings.destinationCrs().authid() );
+  canvasJson.insert( u"crs_details"_s, qgsAiCrsDetails( settings.destinationCrs() ) );
   canvasJson.insert( u"scale"_s, settings.scale() );
   canvasJson.insert( u"rotation"_s, settings.rotation() );
   canvasJson.insert( u"width"_s, outputSize.width() );

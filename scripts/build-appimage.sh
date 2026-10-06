@@ -332,6 +332,7 @@ if ! [[ "${APPIMAGE_OFFSET}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 file "${OUTPUT}"
+python3 scripts/ci/verify_crs_runtime.py "./${OUTPUT}" --output crs-runtime-linux.json
 
 echo "==> Done"
 ls -lh Strata-*.AppImage

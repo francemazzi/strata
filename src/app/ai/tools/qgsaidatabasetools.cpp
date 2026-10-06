@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsaidatabasetools.h"
 
 #include <algorithm>
@@ -429,6 +430,24 @@ namespace
       if ( columnType.crs.isValid() )
         crsIds.append( columnType.crs.authid() );
     }
+    QJsonArray crsDetails;
+    const QVariantList sourceTypes = property.info().value( u"crs_details"_s ).toList();
+    for ( const QVariant &sourceType : sourceTypes )
+    {
+      const QVariantMap source = sourceType.toMap();
+      QJsonObject details = qgsAiCrsDetails( source.value( u"crs"_s ).value<QgsCoordinateReferenceSystem>(), source.value( u"status"_s ).toString() != "not_applicable"_L1, source );
+      details.insert( u"geometry_type"_s, source.value( u"geometry_type"_s ).toString() );
+      details.insert( u"geometry_column"_s, source.value( u"geometry_column"_s ).toString() );
+      crsDetails.append( details );
+    }
+    if ( sourceTypes.isEmpty() )
+    {
+      for ( const auto &columnType : geometryColumnTypes )
+        crsDetails.append( qgsAiCrsDetails( columnType.crs, columnType.wkbType != Qgis::WkbType::NoGeometry ) );
+      if ( crsDetails.isEmpty() && property.geometryColumn().isEmpty() )
+        crsDetails.append( qgsAiCrsDetails( QgsCoordinateReferenceSystem(), false ) );
+    }
+    object.insert( u"crs_details"_s, crsDetails );
     if ( !geometryTypes.isEmpty() )
       object.insert( u"geometry_type"_s, geometryTypes.size() == 1 ? geometryTypes.at( 0 ) : QJsonValue( geometryTypes ) );
     if ( !crsIds.isEmpty() )
@@ -777,6 +796,10 @@ namespace
           output.remove( u"fields"_s );
           output.insert( u"note"_s, u"Field list omitted because the result exceeded the size cap."_s );
         }
+        // A custom CRS can carry a large WKT. Never silently truncate a CRS
+        // definition into something unusable, or exceed the tool's byte limit.
+        if ( outputExceedsCap( output ) )
+          return QgsAiToolResult::error( u"The table metadata exceeds the result size limit, even without its fields. Inspect individual layers with describe_layer."_s );
         return QgsAiToolResult::ok( output );
       }
 

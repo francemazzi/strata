@@ -65,6 +65,7 @@ jobs:
           name: strata-appimage-x86_64
           path: |
             Strata-*.AppImage
+            crs-runtime-linux.json
 
       - name: Upload release assets
         if: ${{ startsWith(github.ref, 'refs/tags/strata-v') }}

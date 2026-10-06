@@ -531,6 +531,7 @@ jobs:
         run: |
           APP_PATH=$(ls -d universal/*.app | head -n1)
           python3 scripts/ci/verify_pyqgis_bundle.py --platform macos "${APP_PATH}"
+          python3 scripts/ci/verify_crs_runtime.py "${APP_PATH}/Contents/MacOS/Strata" --output crs-runtime-macos.json
 
       - name: Create dmg
         run: |
@@ -586,6 +587,7 @@ jobs:
           name: strata-${{steps.workflow-artifact-ids.outputs.filename}}-dmg
           path: |
             *.dmg
+            crs-runtime-macos.json
 
       - name: Upload release assets
         if: ${{ env.IS_STRATA_RELEASE == 'true' }}

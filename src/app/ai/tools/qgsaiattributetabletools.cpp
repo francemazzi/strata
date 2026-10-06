@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsaiattributetabletools.h"
 
 #include <algorithm>
@@ -791,6 +792,7 @@ QgsAiToolResult QgsAiIdentifyFeaturesAtTool::execute( const QJsonObject &args )
   output.insert( u"x"_s, point.x() );
   output.insert( u"y"_s, point.y() );
   output.insert( u"crs"_s, layer->crs().authid() );
+  output.insert( u"crs_details"_s, qgsAiLayerCrsDetails( layer ) );
   output.insert( u"tolerance"_s, tolerance );
   output.insert( u"feature_count"_s, features.size() );
   output.insert( u"features"_s, features );

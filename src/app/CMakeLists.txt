@@ -324,6 +324,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/index/qgsaiindexingactivity.cpp
     ai/index/qgsaiindexingscheduler.cpp
     ai/index/qgsaiindexingthrottle.cpp
+    ai/qgsaicrsutils.cpp
     ai/index/qgsailayerchunker.cpp
     ai/index/qgsailayerindexcoordinator.cpp
     ai/index/qgsaiworkspaceindex.cpp

@@ -38,6 +38,7 @@ class TestQgsAiLayerIndexCoordinator : public QObject
     void cleanup();
 
     void enablingSchedulesExistingLayers();
+    void customCrsReplacesOldChunks();
     void layerChangeSignalsAreDebounced();
     void layerWillBeRemovedDropsChunksImmediately();
     void disabledCoordinatorIgnoresProjectSignals();
@@ -185,6 +186,66 @@ void TestQgsAiLayerIndexCoordinator::enablingSchedulesExistingLayers()
   QCOMPARE( index.directReindexLayerCalls, 0 );
 
   QgsProject::instance()->removeMapLayer( layer.release() );
+}
+
+void TestQgsAiLayerIndexCoordinator::customCrsReplacesOldChunks()
+{
+  QTemporaryDir root;
+  QgsAiFileContextProvider context( root.path() );
+  QgsAiLocalEmbeddingProvider provider;
+  QgsAiWorkspaceIndex index( &context, &provider );
+  auto *layer = new QgsVectorLayer( copyPointsShapefile( root.path() ), u"custom"_s, u"ogr"_s );
+  QVERIFY( layer->isValid() );
+  const auto firstCrs = QgsCoordinateReferenceSystem::fromProj( u"+proj=tmerc +lon_0=9.123456 +ellps=GRS80 +units=m"_s );
+  const auto secondCrs = QgsCoordinateReferenceSystem::fromProj( u"+proj=tmerc +lon_0=9.654321 +ellps=GRS80 +units=m"_s );
+  QVERIFY( firstCrs.authid().isEmpty() && secondCrs.authid().isEmpty() );
+  layer->setCrs( firstCrs );
+  QgsProject::instance()->addMapLayer( layer );
+  auto legacy = QgsAiLayerChunker::chunkVector( layer );
+  QVERIFY( !legacy.isEmpty() );
+  legacy.first().text = u"layer-chunks-2 legacy metadata"_s;
+  QgsAiWorkspaceIndex::Chunk sentinel;
+  sentinel.sourceType = QString::fromLatin1( QgsAiWorkspaceIndex::SOURCE_TYPE_FILE );
+  sentinel.relativePath = u"notes.md"_s;
+  sentinel.text = u"Keep unrelated file chunks"_s;
+  legacy.append( sentinel );
+  QList<QVector<float>> vectors;
+  for ( const auto &chunk : legacy )
+  {
+    Q_UNUSED( chunk )
+    vectors.append( QVector<float>( 384, 0.1f ) );
+  }
+  QString error;
+  QVERIFY2( index.persistChunks( legacy, vectors, QgsAiWorkspaceIndex::ReplaceScope::All, {}, &error ), qPrintable( error ) );
+  QgsAiLayerIndexCoordinator coordinator( &index );
+  coordinator.setDebounceMs( 10 );
+  coordinator.setBulkDebounceMs( 10 );
+  QSignalSpy done( &coordinator, &QgsAiLayerIndexCoordinator::reindexFinished );
+  coordinator.setEnabled( true );
+  QVERIFY( done.wait( 5000 ) );
+  QVERIFY( done.last().at( 1 ).toBool() );
+  const auto initial = index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() );
+  QVERIFY( !initial.isEmpty() );
+  QVERIFY( initial.first().text.contains( u"9.123456"_s ) );
+  QVERIFY( !initial.first().text.contains( u"legacy metadata"_s ) );
+  done.clear();
+  coordinator.beginBulkOperation();
+  layer->setCrs( secondCrs );
+  QTest::qWait( 100 );
+  QCOMPARE( done.count(), 0 );
+  coordinator.endBulkOperation();
+  QVERIFY( done.wait( 5000 ) );
+  QVERIFY( done.last().at( 1 ).toBool() );
+  const auto replaced = index.chunks( QgsAiWorkspaceIndex::ReplaceScope::SingleLayer, layer->id() );
+  QCOMPARE( replaced.size(), initial.size() );
+  QVERIFY( replaced.first().text.contains( u"9.654321"_s ) );
+  QVERIFY( !replaced.first().text.contains( u"9.123456"_s ) );
+  QCOMPARE( index.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 1 );
+  coordinator.setEnabled( false );
+  done.clear();
+  layer->setCrs( firstCrs );
+  QTest::qWait( 100 );
+  QCOMPARE( done.count(), 0 );
 }
 
 void TestQgsAiLayerIndexCoordinator::layerChangeSignalsAreDebounced()
