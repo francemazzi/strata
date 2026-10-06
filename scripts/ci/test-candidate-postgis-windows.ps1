@@ -53,10 +53,14 @@ try {
   $env:STRATA_CRS_TEST_SOURCE = Join-Path $env:GITHUB_WORKSPACE 'tests/src/python/test_provider_postgres_crs.py'
   $env:STRATA_CRS_CANDIDATE_OUT = Join-Path $env:GITHUB_WORKSPACE 'postgis-candidate-windows.json'
   foreach ($key in @('PROJ_DATA', 'PROJ_LIB', 'GDAL_DATA')) { [Environment]::SetEnvironmentVariable($key, $null) }
+  $desktop = Join-Path $root "bin\Strata.exe"
+  $version = (& $desktop --version | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or $version -notmatch "Strata 1\.6\.3 \(based on QGIS ") { throw "Candidate application version mismatch: $version" }
   & $python[0].FullName (Join-Path $PSScriptRoot 'run_candidate_postgis.py')
   if ($LASTEXITCODE -ne 0) { throw 'Candidate PostGIS regression failed' }
   $result = Get-Content $env:STRATA_CRS_CANDIDATE_OUT -Raw | ConvertFrom-Json
   if (-not $result.success -or $result.source_sha -ne $sourceSha) { throw 'Invalid candidate receipt' }
+  $result | Add-Member -NotePropertyName application_version -NotePropertyValue $version
   $result | Add-Member -NotePropertyName asset_sha256 -NotePropertyValue $digest
   $result | ConvertTo-Json -Depth 8 | Set-Content $env:STRATA_CRS_CANDIDATE_OUT -Encoding utf8
 } finally {

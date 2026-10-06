@@ -37,11 +37,14 @@ with tempfile.TemporaryDirectory(prefix="strata-candidate-postgis-") as director
         STRATA_CRS_CANDIDATE_OUT=str(output), STRATA_CRS_TEST_SOURCE=str(source),
         APPIMAGE_EXTRACT_AND_RUN="1",
     )
+    version = subprocess.check_output([str(args.desktop.resolve()), "--version"], env=env, text=True, timeout=180)
+    assert "Strata 1.6.3 (based on QGIS " in version, version
     subprocess.run([
         str(args.desktop.resolve()), "--profiles-path", directory, "--profile", "crs-test",
         "--noplugins", "--noversioncheck", "--nologo", "--code", str(script),
     ], env=env, timeout=300, check=True)
 report = json.loads(output.read_text())
+report["application_version"] = version.strip()
 assert report["success"] and report["tests_run"] == 5 and report["skipped"] == 0
 with args.asset.open("rb") as asset:
     report["asset_sha256"] = hashlib.file_digest(asset, "sha256").hexdigest()
