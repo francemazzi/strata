@@ -378,6 +378,8 @@ jobs:
           assert info['CFBundleIdentifier'] == 'com.francemazzi.strata'
           info['CFBundleShortVersionString'] = match[1]
           info['CFBundleVersion'] = match[1]
+          # Finder launches must preserve the resource seal just like CI.
+          info.setdefault('LSEnvironment', {})['PYTHONDONTWRITEBYTECODE'] = '1'
           path.write_bytes(plistlib.dumps(info))
           print('macOS bundle version:', match[1])
           PYCODE

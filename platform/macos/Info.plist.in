@@ -34,6 +34,11 @@
         </dict>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>PYTHONDONTWRITEBYTECODE</key>
+		<string>1</string>
+	</dict>
 	<key>CSResourcesFileMapped</key>
 	<true/>
 	<key>CFBundleDocumentTypes</key>
