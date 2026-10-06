@@ -1,117 +1,36 @@
 name: Windows release signing checks
 on:
+  pull_request:
+    paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
+  push:
+    branches: [master]
+    paths: ['scripts/ci/**', 'cmake/*Sign*', 'cmake/Bundle.cmake', '.github/workflows/**']
   workflow_dispatch:
-    inputs:
-      platform:
-        description: Candidate platform to test
-        type: choice
-        options: [all, linux, windows]
-        default: all
-        required: true
 permissions:
   contents: read
 jobs:
-  linux-candidate-postgis:
-    if: inputs.platform != 'windows'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      actions: read
-    timeout-minutes: 20
-    services:
-      postgis:
-        image: postgis/postgis:16-3.4
-        env:
-          POSTGRES_DB: strata_crs_candidate
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 55013:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Verify test suite matches immutable candidate
-        run: |
-          test "$(git rev-parse 'strata-v1.6.3^{commit}')" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
-          git diff --exit-code strata-v1.6.3 -- tests/src/python/test_provider_postgres_crs.py
-      - name: Recover and verify immutable AppImage build artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/francemazzi/strata/actions/artifacts/11418791128 > source-artifact.json
-          gh api repos/francemazzi/strata/actions/artifacts/11418791128/zip > source-artifact.zip
-          git diff --exit-code strata-v1.6.3 23d4e46f0365510d8e4b057c35f5992231f0ceb1 -- . ':!.github/workflows/build-appimage.yml'
-          python3 - <<'PYCODE'
-          import hashlib,json,pathlib,zipfile
-          artifact=json.loads(pathlib.Path('source-artifact.json').read_text())
-          assert artifact['workflow_run']['id']==37465170765
-          assert artifact['workflow_run']['head_sha']=='23d4e46f0365510d8e4b057c35f5992231f0ceb1'
-          with open('source-artifact.zip','rb') as file: digest=hashlib.file_digest(file,'sha256').hexdigest()
-          assert artifact['digest']=='sha256:'+digest
-          name='Strata-1.6.3-x86_64.AppImage'
-          with zipfile.ZipFile('source-artifact.zip') as archive:
-              assert name in archive.namelist()
-              pathlib.Path(name).write_bytes(archive.read(name))
-          PYCODE
-          chmod +x Strata-1.6.3-x86_64.AppImage
-      - name: Configure virtual display for the packaged desktop
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth
-      - name: Verify the recovered packaged CRS catalog
-        run: xvfb-run -a python3 scripts/ci/verify_crs_runtime.py ./Strata-1.6.3-x86_64.AppImage --output crs-runtime-linux.json
-      - name: Test packaged desktop with isolated PostGIS
-        env:
-          STRATA_CRS_TEST_DB: host=127.0.0.1 port=55013 dbname=strata_crs_candidate user=postgres sslmode=disable
-        run: xvfb-run -a python3 scripts/ci/test_candidate_postgis.py ./Strata-1.6.3-x86_64.AppImage --asset Strata-1.6.3-x86_64.AppImage --output postgis-candidate-linux.json
-      - name: Upload verified unchanged candidate to the draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          candidate="$GITHUB_WORKSPACE/Strata-1.6.3-x86_64.AppImage"
-          git worktree add --detach "$RUNNER_TEMP/release-source" strata-v1.6.3
-          cd "$RUNNER_TEMP/release-source"
-          test "$(git rev-parse HEAD)" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
-          node scripts/ci/release-assets.mjs upload strata-v1.6.3 linux "$candidate"
-      - name: Upload candidate evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: postgis-candidate-linux
-          path: |
-            postgis-candidate-linux.json
-            crs-runtime-linux.json
-            source-artifact.json
-          if-no-files-found: error
-  candidate-postgis:
-    if: inputs.platform != 'linux'
+  verification:
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-          fetch-depth: 0
-      - name: Verify test suite matches immutable candidate
-        shell: bash
-        run: |
-          test "$(git rev-parse 'strata-v1.6.3^{commit}')" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
-          git diff --exit-code strata-v1.6.3 -- tests/src/python/test_provider_postgres_crs.py
-      - name: Test candidate with isolated PostGIS
+      - name: Locate NSIS for the installer finalizer regression
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci/test-candidate-postgis-windows.ps1
-      - name: Upload candidate evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: postgis-candidate-windows
-          path: postgis-candidate-windows.json
-          if-no-files-found: error
+        run: |
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path -LiteralPath $nsis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          "STRATA_TEST_NSIS=$nsis" >> $env:GITHUB_ENV
+      - name: Test release integrity and publication gates
+        run: node --test scripts/ci/release-integrity.test.mjs scripts/ci/windows-packaging.test.mjs
+      - name: Test unsigned and invalid file handling
+        shell: pwsh
+        run: ./scripts/ci/test-windows-signing-files.ps1
+      - name: Verify real Authenticode signatures without Azure credentials
+        timeout-minutes: 5
+        shell: powershell
+        run: ./scripts/ci/test-windows-signing-integration.ps1
