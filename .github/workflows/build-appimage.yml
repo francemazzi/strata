@@ -6,6 +6,11 @@ on:
       - 'strata-v*'
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: 'Rebuild an existing draft release from its immutable tag'
+        required: false
+        default: ''
+        type: string
       version:
         description: 'Version label baked into the AppImage filename (e.g. 0.1.0-test)'
         required: false
@@ -30,13 +35,18 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Resolve version
         id: version
         env:
           DEVELOPMENT_VERSION: ${{ inputs.version || 'dev' }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
+          if [[ -n "$REQUESTED_RELEASE_TAG" ]]; then
+            [[ "$REQUESTED_RELEASE_TAG" =~ ^strata-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+            VERSION="${REQUESTED_RELEASE_TAG#strata-v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#strata-v}"
           else
@@ -48,18 +58,22 @@ jobs:
         uses: hendrikmuhs/ccache-action@33522472633dbd32578e909b315f5ee43ba878ce # v1.2.22
         with:
           max-size: 1G
-          key: build-ccache-appimage-${{ github.ref_name }}
+          key: build-ccache-appimage-${{ inputs.release_tag || github.ref_name }}
           save: ${{ github.event_name == 'push' }}
 
       - name: Build AppImage
         env:
           STRATA_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
           chmod +x scripts/build-appimage.sh
-          scripts/build-appimage.sh
+          # QGIS checks DISPLAY before initializing Qt, including offscreen mode.
+          xvfb-run -a scripts/build-appimage.sh
 
 
       - name: 📤 Upload AppImage as workflow artifact
+        if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: strata-appimage-x86_64
@@ -68,9 +82,9 @@ jobs:
             crs-runtime-linux.json
 
       - name: Upload release assets
-        if: ${{ startsWith(github.ref, 'refs/tags/strata-v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/strata-v') || startsWith(inputs.release_tag, 'strata-v') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" linux Strata-*.AppImage
