@@ -79,6 +79,16 @@ jobs:
           cd "$RUNNER_TEMP/release-source"
           test "$(git rev-parse HEAD)" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
           node scripts/ci/release-assets.mjs upload strata-v1.6.3 linux "$candidate"
+      - name: Diagnose Linux desktop startup on failure
+        if: failure()
+        run: |
+          sudo apt-get install -y --no-install-recommends gdb
+          chmod +x Strata-1.6.3-x86_64.AppImage
+          ./Strata-1.6.3-x86_64.AppImage --appimage-extract > /dev/null
+          mkdir -p "$RUNNER_TEMP/debug-profile/profiles/test/Strata"
+          printf '[authentication]\nuse-password-helper=false\ngenerate-random-password-for-keychain=false\n' > "$RUNNER_TEMP/debug-profile/profiles/test/Strata/Strata.ini"
+          QT_QPA_PLATFORM=xcb QTWEBENGINE_DISABLE_SANDBOX=1 timeout 90s xvfb-run -a gdb -batch -ex run -ex 'thread apply all bt' --args /bin/bash squashfs-root/AppRun --profiles-path "$RUNNER_TEMP/debug-profile" --profile test --noplugins --noversioncheck --nologo --code "$GITHUB_WORKSPACE/scripts/ci/smoke_pyqgis.py" > linux-startup-backtrace.txt 2>&1 || true
+          tail -n 160 linux-startup-backtrace.txt
       - name: Upload candidate evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,6 +98,7 @@ jobs:
             postgis-candidate-linux.json
             crs-runtime-linux.json
             source-artifact.json
+            linux-startup-backtrace.txt
           if-no-files-found: error
   candidate-postgis:
     if: inputs.platform != 'linux'
