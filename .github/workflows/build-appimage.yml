@@ -66,6 +66,31 @@ jobs:
         env:
           STRATA_CRS_TEST_DB: host=127.0.0.1 port=55013 dbname=strata_crs_candidate user=postgres sslmode=disable
         run: xvfb-run -a python3 scripts/ci/test_candidate_postgis.py ./Strata-1.6.3-x86_64.AppImage --asset Strata-1.6.3-x86_64.AppImage --output postgis-candidate-linux.json
+      - name: Verify the corrected constructor allocation
+        run: |
+          sudo apt-get install -y --no-install-recommends valgrind binutils
+          ./Strata-1.6.3-x86_64.AppImage --appimage-extract >/dev/null
+          # Optional debug metadata only, in a disposable extraction. Published
+          # AppImage and the application executable are unchanged.
+          sha256sum squashfs-root/usr/bin/Strata > constructor-executable-before.sha256
+          find squashfs-root/usr/plugins -type f -name '*.so' -exec strip --strip-debug {} +
+          sha256sum --check constructor-executable-before.sha256
+          mkdir -p "$RUNNER_TEMP/memory-profile/profiles/test/Strata"
+          printf '[authentication]\nuse-password-helper=false\ngenerate-random-password-for-keychain=false\n' > "$RUNNER_TEMP/memory-profile/profiles/test/Strata/Strata.ini"
+          QT_QPA_PLATFORM=xcb QTWEBENGINE_DISABLE_SANDBOX=1 PYTHONDONTWRITEBYTECODE=1 STRATA_PYQGIS_SMOKE_OUT="$GITHUB_WORKSPACE/constructor-smoke.json" timeout 180s xvfb-run -a valgrind --trace-children=yes --undef-value-errors=no --num-callers=18 --error-limit=yes --log-file=constructor-memcheck.%p.txt /bin/bash squashfs-root/AppRun --profiles-path "$RUNNER_TEMP/memory-profile" --profile test --noplugins --noversioncheck --nologo --code "$GITHUB_WORKSPACE/scripts/ci/smoke_pyqgis.py" > constructor-stdout.txt 2>&1
+          python3 - <<'PYCODE'
+          import json,pathlib
+          smoke=json.loads(pathlib.Path('constructor-smoke.json').read_text())
+          failures=[]
+          for path in pathlib.Path('.').glob('constructor-memcheck.*.txt'):
+              lines=path.read_text().splitlines()
+              for i,line in enumerate(lines):
+                  if 'Invalid write' in line and 'QgisApp::QgisApp' in '\n'.join(lines[i:i+24]):
+                      failures.append({'log':str(path),'line':i+1})
+          result={'constructor_invalid_writes':failures,'desktop_smoke_completed':True,'scope':'QgisApp constructor allocation; no claim that all third-party Memcheck diagnostics are clean'}
+          pathlib.Path('constructor-regression.json').write_text(json.dumps(result,indent=2)+'\n')
+          assert not failures,failures
+          PYCODE
       - name: Diagnose Linux desktop startup on failure
         if: failure()
         run: |
@@ -90,6 +115,9 @@ jobs:
             candidate-release.json
             linux-startup-backtrace.txt
             linux-valgrind*.txt
+            constructor-*.txt
+            constructor-*.json
+            constructor-executable-before.sha256
           if-no-files-found: error
   candidate-postgis:
     if: inputs.platform != 'linux'
