@@ -1,4 +1,4 @@
-# Unreleased: PostGIS coordinate reference systems
+# Strata 1.6.3
 
 Strata now recognizes valid custom coordinate reference systems even when they
 have no EPSG identifier. The assistant, database catalog and layer properties
@@ -18,5 +18,5 @@ use consistent CRS metadata and distinguish layer coordinates from the map view.
   through the normal indexing coordinator, respecting pause and disable settings.
 
 This change does not alter customer databases, privileges or the cloud backend.
-It is not a released version. See [implementation and validation](../implementation/postgis-crs.md)
+Candidate validation is in progress. See [implementation and validation](../implementation/postgis-crs.md)
 for evidence and the outstanding package/customer acceptance gates.
