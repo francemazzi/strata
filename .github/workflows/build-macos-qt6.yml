@@ -1,40 +1,51 @@
-name: macOS notarization diagnostics
+name: Diagnose discarded Linux candidate
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
-  diagnose:
-    runs-on: macos-latest
-    timeout-minutes: 10
+  memcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
     steps:
-      - name: Read this release submission and its Apple diagnostic
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: strata-v1.6.3
+          persist-credentials: false
+      - name: Obtain discarded build artifact with provenance
         env:
-          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
-          MACOS_APPLE_TEAM_ID: ${{ secrets.MACOS_APPLE_TEAM_ID }}
-          MACOS_APPLE_APP_PASSWORD: ${{ secrets.MACOS_APPLE_APP_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          xcrun notarytool history --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" --output-format json > history.json
-          submission=$(python3 - <<'PY'
-          import json,pathlib
-          data=json.loads(pathlib.Path('history.json').read_text())
-          matches=[x for x in data['history'] if x['name']=='Strata-Installer.dmg' and '2026-10-06T13:49:00' <= x['createdDate'] <= '2026-10-06T14:07:00']
-          assert len(matches)==1,matches
-          pathlib.Path('submission.json').write_text(json.dumps(matches[0],indent=2)+'\n')
-          print(matches[0]['id'])
-          PY
-          )
-          xcrun notarytool log "$submission" --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" notary-log.json
-          python3 - <<'PY'
-          import json,pathlib
-          data=json.loads(pathlib.Path('notary-log.json').read_text())
-          print(json.dumps({k:data.get(k) for k in ['status','statusSummary','statusCode','issues']},indent=2))
-          PY
-      - uses: actions/upload-artifact@v4
+          gh api repos/francemazzi/strata/actions/artifacts/11418791128 > source-artifact.json
+          gh api repos/francemazzi/strata/actions/artifacts/11418791128/zip > source-artifact.zip
+          python3 - <<'PYCODE'
+          import hashlib,json,pathlib,zipfile
+          artifact=json.loads(pathlib.Path('source-artifact.json').read_text())
+          assert artifact['workflow_run']['id']==37465170765
+          with open('source-artifact.zip','rb') as file: digest=hashlib.file_digest(file,'sha256').hexdigest()
+          assert artifact['digest']=='sha256:'+digest
+          with zipfile.ZipFile('source-artifact.zip') as archive:
+              pathlib.Path('candidate.AppImage').write_bytes(archive.read('Strata-1.6.3-x86_64.AppImage'))
+          PYCODE
+          chmod +x candidate.AppImage
+          ./candidate.AppImage --appimage-extract >/dev/null
+      - name: Trace invalid memory access on native x86_64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libegl1 libopengl0 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0 valgrind binutils
+          # linuxdeploy leaves malformed optional debug metadata in Qt plugins.
+          # Repair only the discarded diagnostic copy; never publish these bytes.
+          find squashfs-root/usr/plugins -type f -name '*.so' -exec strip --strip-debug {} +
+          mkdir -p "$RUNNER_TEMP/debug-profile/profiles/test/Strata"
+          printf '[authentication]\nuse-password-helper=false\ngenerate-random-password-for-keychain=false\n' > "$RUNNER_TEMP/debug-profile/profiles/test/Strata/Strata.ini"
+          QT_QPA_PLATFORM=xcb QTWEBENGINE_DISABLE_SANDBOX=1 timeout 150s xvfb-run -a valgrind --trace-children=yes --undef-value-errors=no --num-callers=18 --error-limit=yes --log-file=linux-memcheck.%p.txt /bin/bash squashfs-root/AppRun --profiles-path "$RUNNER_TEMP/debug-profile" --profile test --noplugins --noversioncheck --nologo --code "$GITHUB_WORKSPACE/scripts/ci/smoke_pyqgis.py" > linux-memcheck-stdout.txt 2>&1 || true
+          for report in linux-memcheck.*.txt; do head -n 220 "$report"; done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: macos-notary-diagnostic
+          name: discarded-linux-memory-diagnostics
           path: |
-            submission.json
-            notary-log.json
+            linux-memcheck*.txt
+            source-artifact.json
           if-no-files-found: error
