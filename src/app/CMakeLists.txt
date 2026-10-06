@@ -324,6 +324,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/index/qgsaiindexingactivity.cpp
     ai/index/qgsaiindexingscheduler.cpp
     ai/index/qgsaiindexingthrottle.cpp
+    ai/qgsaicrsutils.cpp
     ai/index/qgsailayerchunker.cpp
     ai/index/qgsailayerindexcoordinator.cpp
     ai/index/qgsaiworkspaceindex.cpp
@@ -631,7 +632,9 @@ qt_add_qml_module(qgis_app
 target_compile_definitions(qgis_app PRIVATE "QT_PLUGINS_DIR=\"${QT_PLUGINS_DIR}\"")
 target_compile_definitions(qgis_app PRIVATE "QGISPOSTFIX=\"${QGISPOSTFIX}\"")
 if (ENABLE_AI_ASSISTANT)
-  target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)
+  # qgisapp.h conditionally declares AI members. Consumers (including main.cpp)
+  # must see the same class layout as the library when allocating QgisApp.
+  target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)
 endif()
 if (POSTGRES_FOUND)
   target_compile_definitions(qgis_app PRIVATE -DPOSTGRESQL_VERSION=\"${PostgreSQL_VERSION_STRING}\")

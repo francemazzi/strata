@@ -32,6 +32,8 @@ jobs:
     if: ${{ !inputs.local_signing_check }}
     name: Create and upload macOS DMG
     runs-on: macos-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -49,9 +51,39 @@ jobs:
         run: |
           test "$SIGN_AND_NOTARIZE" = true
           node scripts/ci/release-assets.mjs draft "$RELEASE_TAG"
-          SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')
-          test "$SOURCE_SHA" = "$(git rev-parse HEAD)"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          SOURCE_SHA=$(jq -r '.head_sha' source-run.json)
+          if [ "$SOURCE_SHA" != "$(git rev-parse HEAD)" ]; then
+            # A manual rebuild may use a newer workflow while checking out the
+            # immutable tag. Only the recorded class-layout build setting may
+            # differ in application sources; verify it instead of trusting HEAD.
+            test "$(jq -r '.event' source-run.json)" = workflow_dispatch
+            test "$(jq -r '.path' source-run.json)" = .github/workflows/build-macos-qt6.yml
+            git fetch --depth=1 origin "$SOURCE_SHA"
+            git diff --exit-code HEAD "$SOURCE_SHA" -- . ':!.github/workflows' ':!docs' ':!scripts/ci/verify_crs_runtime.py' ':!src/app/CMakeLists.txt'
+            SOURCE_SHA="$SOURCE_SHA" python3 - <<'PYCODE'
+          import os, subprocess
+          from pathlib import Path
+          old = Path('src/app/CMakeLists.txt').read_text()
+          new = subprocess.check_output(['git', 'show', os.environ['SOURCE_SHA'] + ':src/app/CMakeLists.txt'], text=True)
+          old = old.replace('target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)', 'target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)')
+          def significant(text):
+              return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          assert significant(old) == significant(new), 'Unexpected application build changes'
+          PYCODE
+            echo 'VERIFY_CONFIGURATION_PATCH=true' >> "$GITHUB_ENV"
+          fi
+          # Packaging can fail after both native builds succeeded. Reuse only
+          # those exact successful build jobs from the immutable source commit.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > source-jobs.json
+          python3 - <<'PYCODE'
+          import json
+          with open('source-jobs.json') as source:
+              jobs = [job for job in json.load(source)['jobs'] if job['name'].startswith('build (macos)')]
+          assert len(jobs) == 2 and all(job['conclusion'] == 'success' for job in jobs), jobs
+          assert any('arm64' in job['name'] for job in jobs)
+          assert any('x86_64' in job['name'] for job in jobs)
+          PYCODE
 
       - name: Prepare build env
         run: |
@@ -64,6 +96,32 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pattern: strata-app-${{ inputs.release_tag }}-*
           path: artifacts
+
+      - name: Verify the native rebuild configuration receipts
+        if: env.VERIFY_CONFIGURATION_PATCH == 'true'
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json
+          from pathlib import Path
+          patches = list(Path('artifacts').rglob('candidate-build-configuration.patch'))
+          assert len(patches) == 2, patches
+          hashes = []
+          needs_override = 'target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)' in Path('src/app/CMakeLists.txt').read_text()
+          for path in patches:
+              text = path.read_text()
+              added = [line for line in text.splitlines() if line.startswith('+') and not line.startswith('+++')]
+              removed = [line for line in text.splitlines() if line.startswith('-') and not line.startswith('---')]
+              if needs_override:
+                  assert added == ['+  target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)']
+                  assert removed == ['-  target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)']
+                  assert text.count('diff --git ') == 1 and 'diff --git a/src/app/CMakeLists.txt b/src/app/CMakeLists.txt' in text
+              else:
+                  assert not text.strip(), 'Unexpected build configuration override'
+              hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+          assert len(set(hashes)) == 1
+          Path('native-build-configuration.json').write_text(json.dumps({'patch_sha256': hashes[0], 'native_architectures_verified': 2}, indent=2) + '\n')
+          print('Verified native build configuration:', hashes[0])
+          PYCODE
 
       - name: Create universal app
         run: |
@@ -105,6 +163,30 @@ jobs:
           fi
           find universal -mindepth 1 -maxdepth 1 ! -name '*.app' -exec rm -rf {} +
           ls -la universal/*.app
+
+      - name: Set the Strata release version in the macOS bundle
+        if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, plistlib, re
+          from pathlib import Path
+          tag = os.environ['RELEASE_TAG']
+          match = re.fullmatch(r'strata-v([0-9]+\.[0-9]+\.[0-9]+)', tag)
+          assert match, 'A numeric Strata release tag is required'
+          bundles = list(Path('universal').glob('*.app'))
+          assert len(bundles) == 1
+          path = bundles[0] / 'Contents/Info.plist'
+          info = plistlib.loads(path.read_bytes())
+          assert info['CFBundleIdentifier'] == 'com.francemazzi.strata'
+          info['CFBundleShortVersionString'] = match[1]
+          info['CFBundleVersion'] = match[1]
+          # Finder launches must preserve the resource seal just like CI.
+          info.setdefault('LSEnvironment', {})['PYTHONDONTWRITEBYTECODE'] = '1'
+          path.write_bytes(plistlib.dumps(info))
+          print('macOS bundle version:', match[1])
+          PYCODE
 
       - name: Import Apple code signing certificate
         if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
@@ -169,6 +251,24 @@ jobs:
             echo "Frameworks/lib not present or already a symlink, skipping."
           fi
 
+      - name: Remove broken symlinks from app bundle
+        if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
+        run: |
+          # The merged universal bundle can contain optional dependency symlinks
+          # from one architecture that are absent in the other. Broken symlinks
+          # make `codesign --verify --strict` fail with a generic
+          # "No such file or directory" against the top-level .app.
+          APP_PATH=$(ls -d universal/*.app | head -n1)
+          REMOVED=0
+          while IFS= read -r -d '' link; do
+            if [ ! -e "$link" ]; then
+              echo "Removing broken symlink $link -> $(readlink "$link")"
+              rm -f "$link"
+              REMOVED=$((REMOVED + 1))
+            fi
+          done < <(find "${APP_PATH}" -type l -print0)
+          echo "Removed ${REMOVED} broken symlink(s)."
+
       - name: Inventory Contents/MacOS (debug)
         if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
         run: |
@@ -186,17 +286,20 @@ jobs:
           APP_NAME=$(basename "${APP_PATH}" .app)
           MAIN_EXEC="${APP_PATH}/Contents/MacOS/${APP_NAME}"
           DEST="${APP_PATH}/Contents/Resources/python"
-          PYI_DEST="${APP_PATH}/Contents/Resources/python_stubs"
-          mkdir -p "${DEST}"
-          # PyQt typing stubs are not loaded at runtime.  Leaving them under
-          # Frameworks makes the outer bundle seal treat them as code objects.
-          # Keep their relative paths under Resources, outside the code seal.
+          SUPPORT_DEST="${APP_PATH}/Contents/Resources/python_support"
+          mkdir -p "${DEST}" "${SUPPORT_DEST}"
+          # PyQt and other Python deps ship typing stubs, utility scripts, and
+          # other non-Mach-O files under Frameworks/. codesign treats them as #spellok
+          # subcomponents of the outer bundle seal, so keep them under Resources.
           while IFS= read -r -d '' f; do
+            if file -bL "$f" 2>/dev/null | grep -qE 'Mach-O'; then #spellok
+              continue
+            fi
             rel="${f#${APP_PATH}/Contents/Frameworks/}"
-            target="${PYI_DEST}/${rel}"
+            target="${SUPPORT_DEST}/${rel}"
             mkdir -p "$(dirname "${target}")"
             mv "${f}" "${target}"
-          done < <(find "${APP_PATH}/Contents/Frameworks" -type f -name '*.pyi' -print0)
+          done < <(find "${APP_PATH}/Contents/Frameworks" -type f -print0)
           echo "Signing ${APP_PATH} (main executable: ${MAIN_EXEC})..."
 
           # Try to sign $1; if codesign refuses because the file is not a
@@ -278,6 +381,19 @@ jobs:
           APP_PATH=$(ls -d universal/*.app | head -n1)
           python3 scripts/ci/verify_pyqgis_bundle.py --platform macos "${APP_PATH}"
 
+      - name: Verify CRS runtime in candidate app
+        run: |
+          APP_PATH=$(ls -d universal/*.app | head -n1)
+          python3 scripts/ci/verify_crs_runtime.py "${APP_PATH}/Contents/MacOS/Strata" --output crs-runtime-macos.json
+          codesign --verify --strict --verbose=2 "${APP_PATH}"
+
+      - name: Preserve CRS runtime evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crs-runtime-macos
+          path: crs-runtime-macos.json
+          if-no-files-found: error
+
       - name: Create dmg
         run: |
           QGIS_APP_NAME="Strata"
@@ -311,13 +427,32 @@ jobs:
             --team-id "$MACOS_APPLE_TEAM_ID" \
             --password "$MACOS_APPLE_APP_PASSWORD" \
             --wait --output-format json > notary-result.json
-          jq -e '.status == "Accepted"' notary-result.json
+          if ! jq -e '.status == "Accepted"' notary-result.json; then
+            SUBMISSION_ID=$(jq -r '.id' notary-result.json)
+            xcrun notarytool log "$SUBMISSION_ID" --apple-id "$MACOS_APPLE_ID" \
+              --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" notary-log.json
+            cat notary-log.json
+            exit 1
+          fi
           for attempt in 1 2 3 4 5; do
             if xcrun stapler staple "$DMG_FILE"; then break; fi
             if [ "$attempt" -eq 5 ]; then exit 1; fi
             sleep 30
           done
           xcrun stapler validate "$DMG_FILE"
+
+      - name: Preserve notarization diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-notarization
+          path: |
+            notary-result.json
+            notary-log.json
+            native-build-configuration.json
+            source-run.json
+            source-jobs.json
+          if-no-files-found: ignore
 
       - name: Upload release assets
         if: ${{ success() }}

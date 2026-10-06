@@ -28,6 +28,8 @@ sudo apt-get install -y --no-install-recommends \
   ccache \
   pkg-config \
   python3-dev \
+  python3-gdal \
+  python3-numpy \
   python3-pip \
   python3-pyqt6 \
   python3-pyqt6.qsci \
@@ -169,6 +171,14 @@ for path in paths:
 PY
   )
 
+  # GDAL's apt bindings and NumPy must use the same ABI. A runner-local pip
+  # installation must not replace either half of this pair in the bundle.
+  for module in osgeo numpy; do
+    test -d "/usr/lib/python3/dist-packages/${module}"
+    rm -rf "${py_bundle_site:?}/${module}"
+    cp -a "/usr/lib/python3/dist-packages/${module}" "${py_bundle_site}/"
+  done
+
   find "${py_bundle_lib}" -type d -name '__pycache__' -prune -exec rm -rf {} +
   find "${py_bundle_lib}" -type d \( -name 'test' -o -name 'tests' \) -prune -exec rm -rf {} + || true
 }
@@ -212,6 +222,7 @@ import qgis.core
 import qgis.gui
 from qgis.PyQt import Qsci
 import console
+from osgeo import gdal, gdal_array, ogr, osr
 
 print("PyQGIS runtime check OK")
 PY
@@ -312,6 +323,9 @@ LIBRARY_ARGS=()
 while IFS= read -r -d '' lib; do
   LIBRARY_ARGS+=( "--library" "$lib" )
 done < <(find "${APPDIR}/usr/lib" -maxdepth 3 -name 'libqgis_*.so*' -print0)
+while IFS= read -r -d '' lib; do
+  LIBRARY_ARGS+=( "--library" "$lib" )
+done < <(find "${APPDIR}/usr/lib" -type f \( -path '*/site-packages/osgeo/*.so' -o -path '*/site-packages/numpy/*.so' \) -print0)
 
 .tools/linuxdeploy-x86_64.AppImage \
   --appdir "${APPDIR}" \
@@ -332,6 +346,7 @@ if ! [[ "${APPIMAGE_OFFSET}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 file "${OUTPUT}"
+python3 scripts/ci/verify_crs_runtime.py "./${OUTPUT}" --output crs-runtime-linux.json
 
 echo "==> Done"
 ls -lh Strata-*.AppImage

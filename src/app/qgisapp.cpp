@@ -15305,7 +15305,7 @@ void QgisApp::updateCrsStatusBar()
     else if ( isTopocentric )
       mOnTheFlyProjectionStatusButton->setText( tr( "Topocentric" ) );
     else
-      mOnTheFlyProjectionStatusButton->setText( tr( "Unknown CRS" ) );
+      mOnTheFlyProjectionStatusButton->setText( tr( "Custom CRS" ) );
 
     mOnTheFlyProjectionStatusButton->setToolTip( tr( "Current CRS: %1" ).arg( projectCrs.userFriendlyIdentifier() ) );
     mOnTheFlyProjectionStatusButton->setIcon( QgsApplication::getThemeIcon( u"mIconProjectionEnabled.svg"_s ) );

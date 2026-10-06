@@ -1,0 +1,208 @@
+{
+  "verifiedAt": "2026-10-06T17:45:46.773539+00:00",
+  "release": "https://github.com/francemazzi/strata/releases/tag/strata-v1.6.3",
+  "applicationSource": "01ee92498993e2d8e3e0b375262d5f66f56a3a51",
+  "applicationCppAndHeadersUnchangedSinceTag": true,
+  "buildRecipes": {
+    "linux": {
+      "platform": "linux",
+      "sourceSha": "01ee92498993e2d8e3e0b375262d5f66f56a3a51",
+      "files": [
+        {
+          "name": "Strata-1.6.3-x86_64.AppImage",
+          "sha256": "556608f3d9abf694ab1b0788dd2c1d9adc80ad7774ea2e70fef512df5cd4c28e"
+        }
+      ],
+      "buildRecipe": {
+        "workflowRevision": "2df694fc5a7422201ade0d917fd5e1307e00b12c",
+        "workflowRun": "https://github.com/francemazzi/strata/actions/runs/37481097282",
+        "taggedApplicationCppAndHeadersUnchanged": true,
+        "cmakeCompileDefinition": "target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)",
+        "configurationPatchArtifact": "candidate-build-configuration.patch",
+        "reason": "QgisApp consumers must share the library class layout; see the reviewed recipe and PR #61",
+        "packagingWorkflowRevision": "ec643ea759f78c740fcb22b6b6780a5ae79937e3",
+        "packagingWorkflowRun": "https://github.com/francemazzi/strata/actions/runs/37492626029",
+        "nativeBuildConclusion": "compiled; initial package validation failed because GDAL Python bindings were absent",
+        "pythonRuntimeRepair": {
+          "gdal": "3080400",
+          "numpy": "1.26.4",
+          "bundled_modules": true,
+          "gdal_numpy_array_roundtrip": true,
+          "application_executable_unchanged": true
+        },
+        "packagingEvidenceArtifact": "linux-runtime-packaging-evidence",
+        "configurationPatchSha256": "f01a0f65f08608380b31f2db237fea9ffab15a4f129fe362caf3162eddeaf497",
+        "applicationExecutableSha256": "6e82309653f39282565a1cd1bbf52b1bfb73a094ebaa2c98657532c846f40a23"
+      }
+    },
+    "macos": {
+      "platform": "macos",
+      "sourceSha": "01ee92498993e2d8e3e0b375262d5f66f56a3a51",
+      "files": [
+        {
+          "name": "Strata-Installer.dmg",
+          "sha256": "7b4a4982ce3ffbae5cd4fce5c629a7b33b5d99a6685d008b25ea892a3f8a405b"
+        }
+      ],
+      "buildRecipe": {
+        "workflowRevision": "2df694fc5a7422201ade0d917fd5e1307e00b12c",
+        "workflowRun": "https://github.com/francemazzi/strata/actions/runs/37481102475",
+        "taggedApplicationCppAndHeadersUnchanged": true,
+        "cmakeCompileDefinition": "target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)",
+        "configurationPatchArtifact": "candidate-build-configuration.patch",
+        "reason": "QgisApp consumers must share the library class layout; see the reviewed recipe and PR #61",
+        "packagingWorkflowRevision": "a4a7e0638f8dcce322855d59a9dbccc43d0fbf80",
+        "packagingWorkflowRun": "https://github.com/francemazzi/strata/actions/runs/37499186422",
+        "nativeBuildJobs": "both successful; the superseded packaging job was canceled",
+        "macosBundleVersion": "1.6.3",
+        "finderPythonBytecodeWritesDisabled": true,
+        "notarizationSubmissionId": "fa1b83d8-8b9b-4014-8e60-efe53edaf59d",
+        "configurationPatchSha256": "62fa48919a72607d8e47a8e16ed5e732ea015d8f549fec6baa49dfc583765141"
+      }
+    },
+    "windows": {
+      "platform": "windows",
+      "sourceSha": "01ee92498993e2d8e3e0b375262d5f66f56a3a51",
+      "files": [
+        {
+          "name": "Strata-1.6.3-win64.exe",
+          "sha256": "50e89fd79056030f64c2464c986461eba8aeab65ee16f017a6bd87141e450e7c"
+        },
+        {
+          "name": "Strata-1.6.3-win64.zip",
+          "sha256": "c5f06259939cbb8f91e0cdd4f8b43580f2097f010db9a37b794d3ae379877892"
+        },
+        {
+          "name": "windows-verification.json",
+          "sha256": "8d6770dbc447a6d1946244936d8b92f70edd5f3b3c6909d7692118e2f68ffa27"
+        }
+      ]
+    }
+  },
+  "cppSuites": {
+    "aicrsmetadata": "Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 6090ms",
+    "ailayerchunker": "Totals: 12 passed, 0 failed, 0 skipped, 0 blacklisted, 465ms",
+    "ailayerindexcoordinator": "Totals: 16 passed, 0 failed, 0 skipped, 0 blacklisted, 5822ms",
+    "aiagentsessionmanager": "Totals: 78 passed, 0 failed, 0 skipped, 0 blacklisted, 5495ms",
+    "aitoolregistry": "Totals: 39 passed, 0 failed, 0 skipped, 0 blacklisted, 3967ms",
+    "aidatabasetools": "Totals: 20 passed, 0 failed, 0 skipped, 0 blacklisted, 8884ms",
+    "aiprojecttools": "Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 359ms"
+  },
+  "packagedPostgis": {
+    "macos-arm64": {
+      "success": true,
+      "test_methods": 5,
+      "standard_custom_remapped_srid_cases": 16,
+      "asset": "Strata-Installer.dmg",
+      "sha256": "7b4a4982ce3ffbae5cd4fce5c629a7b33b5d99a6685d008b25ea892a3f8a405b",
+      "architecture": "arm64"
+    },
+    "macos-x86_64": {
+      "success": true,
+      "test_methods": 5,
+      "standard_custom_remapped_srid_cases": 16,
+      "asset": "Strata-Installer.dmg",
+      "sha256": "7b4a4982ce3ffbae5cd4fce5c629a7b33b5d99a6685d008b25ea892a3f8a405b",
+      "architecture": "x86_64"
+    },
+    "windows": {
+      "success": true,
+      "test_methods": 5,
+      "standard_custom_remapped_srid_cases": 16,
+      "asset": "Strata-1.6.3-win64.zip",
+      "sha256": "c5f06259939cbb8f91e0cdd4f8b43580f2097f010db9a37b794d3ae379877892",
+      "architecture": "AMD64"
+    },
+    "linux": {
+      "success": true,
+      "test_methods": 5,
+      "standard_custom_remapped_srid_cases": 16,
+      "asset": "Strata-1.6.3-x86_64.AppImage",
+      "sha256": "556608f3d9abf694ab1b0788dd2c1d9adc80ad7774ea2e70fef512df5cd4c28e",
+      "architecture": "x86_64"
+    }
+  },
+  "linuxConstructorRegression": {
+    "constructor_invalid_writes": [],
+    "desktop_smoke_completed": true,
+    "scope": "QgisApp constructor allocation; no claim that all third-party Memcheck diagnostics are clean"
+  },
+  "macosPackage": {
+    "sha256": "7b4a4982ce3ffbae5cd4fce5c629a7b33b5d99a6685d008b25ea892a3f8a405b",
+    "version": "1.6.3",
+    "universal": true,
+    "codesignGatekeeperAndStaplePassed": true,
+    "finderBytecodeWritesDisabled": true
+  },
+  "seal": {
+    "assetCount": 19,
+    "allFourPackageBytesAndSigstoreSignaturesVerified": true,
+    "signedManifestVerified": true
+  },
+  "guiDevelopment": {
+    "browserPropertiesAttributeAccessSaveReopen": true,
+    "assistantActualToolPayloadVerifiedByLoopbackProvider": true,
+    "externalModelUsed": false,
+    "customerDataUsed": false
+  },
+  "cloudRun": {
+    "project": "strata-dev-qgis",
+    "region": "europe-west1",
+    "service": "strata-be",
+    "revision": "strata-be-rel163-4610976",
+    "backendSource": "4610976d4b1ba008fe75cfd849bab5cb89064717",
+    "image": "europe-west1-docker.pkg.dev/strata-dev-qgis/cloud-run-source-deploy/strata-be@sha256:b337c61f365989f8e678c54a547538c6180ae228a5baf430006e96fa551cc909",
+    "percent": 100,
+    "checks": {
+      "/health": {
+        "status": 200,
+        "body": {
+          "status": "ok"
+        }
+      },
+      "/health/ready": {
+        "status": 200,
+        "body": {
+          "status": "ready",
+          "checks": {
+            "database": true,
+            "taskQueue": true,
+            "chroma": true
+          }
+        }
+      },
+      "/docs/json": {
+        "status": 200,
+        "body": {
+          "paths": 127,
+          "sha256": "af2da9bb183194400f05c86112a333d116e811c461760c313df4f8b362d8411b"
+        }
+      }
+    },
+    "sourceCodeChanged": false,
+    "databaseMigrations": false
+  },
+  "remainingAcceptance": [
+    "Original customer layer, platform/version and SRID have not been supplied.",
+    "Manual Windows 11 Smart App Control field acceptance remains pending.",
+    "No automatic updater feed is published; this is the platform installer channel.",
+    "Additional interactive GUI check of the final DMG is pending: the Mac requires manual unlock."
+  ],
+  "ci": {
+    "windowsBuild": "https://github.com/francemazzi/strata/actions/runs/37457162026",
+    "windowsPostgis": "https://github.com/francemazzi/strata/actions/runs/37480042618",
+    "linuxNative": "https://github.com/francemazzi/strata/actions/runs/37481097282",
+    "linuxPackaging": "https://github.com/francemazzi/strata/actions/runs/37492626029",
+    "linuxPostgisAndMemcheck": "https://github.com/francemazzi/strata/actions/runs/37493152621",
+    "macosNative": "https://github.com/francemazzi/strata/actions/runs/37481102475",
+    "macosPackaging": "https://github.com/francemazzi/strata/actions/runs/37499186422"
+  },
+  "guiMacosPackage": {
+    "checkedAt": "2026-10-06T17:43:11.418728+00:00",
+    "status": "pending",
+    "reason": "Mac locked; computer-use automatic unlock is paused after physical input and requires manual unlock.",
+    "developmentGuiAndLoopbackAssistant": "passed earlier on the modified source",
+    "packagedMacosPostgis": "passed on arm64 and x86_64",
+    "signedBundleChecks": "passed; interactive Finder launch and post-GUI signature check are not claimed"
+  }
+}

@@ -46,6 +46,8 @@ struct APP_EXPORT QgsAiPreparedLayer
     //! When not empty, the layer is indexed from this text alone and no feature is read.
     QString metadataText;
     QString crsAuthId;
+    QString crsMetadata;
+    QString crsDefinition;
     QString geometryType;
     QgsFields fields;
     bool extentKnown = false;

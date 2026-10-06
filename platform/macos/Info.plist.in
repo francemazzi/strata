@@ -17,9 +17,9 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>An AI-native fork of QGIS. Chat with your maps, run multi-step geospatial agents, and query your entire workspace — right inside the desktop. Strata is not endorsed by or affiliated with QGIS.ORG or the QGIS project. Copyright © QGIS contributors and Strata contributors. GPLv2+.</string>
 	<key>CFBundleShortVersionString</key>
-	<string>@COMPLETE_VERSION@</string>
+	<string>@STRATA_VERSION_MAJOR@.@STRATA_VERSION_MINOR@.@STRATA_VERSION_PATCH@</string>
 	<key>CFBundleVersion</key>
-	<string>@COMPLETE_VERSION@</string>
+	<string>@STRATA_VERSION_MAJOR@.@STRATA_VERSION_MINOR@.@STRATA_VERSION_PATCH@</string>
 	<key>CFBundleIconFile</key>
 	<string>strata.icns</string>
         <key>CFBundleIcons</key>
@@ -34,6 +34,11 @@
         </dict>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>PYTHONDONTWRITEBYTECODE</key>
+		<string>1</string>
+	</dict>
 	<key>CSResourcesFileMapped</key>
 	<true/>
 	<key>CFBundleDocumentTypes</key>

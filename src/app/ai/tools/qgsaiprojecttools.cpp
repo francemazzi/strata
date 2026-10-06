@@ -13,6 +13,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include "qgsaicrsutils.h"
 #include "qgsaiprojecttools.h"
 
 #include "qgsaitoolschemautil.h"
@@ -97,7 +98,7 @@ namespace
     output.insert( u"layer_count"_s, project->mapLayers().size() );
 
     const QgsCoordinateReferenceSystem crs = project->crs();
-    QJsonObject crsJson;
+    QJsonObject crsJson = qgsAiCrsDetails( crs );
     crsJson.insert( u"authid"_s, crs.authid() );
     crsJson.insert( u"description"_s, crs.description() );
     crsJson.insert( u"is_valid"_s, crs.isValid() );

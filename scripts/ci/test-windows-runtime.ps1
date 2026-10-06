@@ -19,7 +19,7 @@ try {
   $env:QGIS_PREFIX_PATH = $Root
   $code = @'
 import ctypes, os, tempfile
-from qgis.core import QgsApplication, QgsProject, QgsVectorLayer, QgsRasterLayer
+from qgis.core import QgsApplication, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsCoordinateReferenceSystem
 from qgis.analysis import QgsNativeAlgorithms
 from osgeo import gdal
 import processing
@@ -28,8 +28,17 @@ app.setPrefixPath(os.environ['QGIS_PREFIX_PATH'], True)
 app.initQgis()
 app.processingRegistry().addProvider(QgsNativeAlgorithms())
 with tempfile.TemporaryDirectory() as tmp:
+    custom = QgsCoordinateReferenceSystem.fromProj('+proj=tmerc +lon_0=9.123456 +ellps=GRS80 +units=m')
+    assert custom.isValid() and not custom.authid() and custom.toWkt()
+    custom_layer = QgsVectorLayer('Point', 'custom', 'memory')
+    custom_layer.setCrs(custom)
+    assert custom_layer.crs().isValid() and custom_layer.crs().toWkt()
     vector = QgsVectorLayer('Point?crs=EPSG:4326', 'test', 'memory')
     assert vector.isValid()
+    for epsg in (4326, 3003, 3004, 32632, 32633, 25832, 6707, 7791, 7792):
+        crs = QgsCoordinateReferenceSystem.fromEpsgId(epsg)
+        assert crs.isValid() and crs.authid() == f'EPSG:{epsg}' and crs.toWkt(), epsg
+    assert vector.crs().isValid() and vector.crs().authid() == 'EPSG:4326'
     output = processing.run('native:buffer', {'INPUT': vector, 'DISTANCE': 1, 'SEGMENTS': 5,
         'END_CAP_STYLE': 0, 'JOIN_STYLE': 0, 'MITER_LIMIT': 2, 'DISSOLVE': False, 'OUTPUT': 'memory:'})
     assert output['OUTPUT'].isValid()
@@ -41,9 +50,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert raster.isValid()
     project = QgsProject()
     project.addMapLayer(vector)
+    project.addMapLayer(custom_layer)
     project.addMapLayer(raster)
     assert project.write(os.path.join(tmp, 'smoke.qgz'))
     assert project.read(os.path.join(tmp, 'smoke.qgz'))
+    assert project.mapLayersByName('custom')[0].crs() == custom
     project.clear()
     del project, vector, raster, output
 opencl = ctypes.WinDLL(os.path.join(os.environ['QGIS_PREFIX_PATH'], 'bin', 'OpenCL.dll'))

@@ -4744,10 +4744,22 @@ Qgis::VectorExportResult QgsPostgresProvider::createEmptyLayer(
 
 QgsCoordinateReferenceSystem QgsPostgresProvider::crs() const
 {
-  QgsCoordinateReferenceSystem srs;
-  int srid = mRequestedSrid.isEmpty() ? mDetectedSrid.toInt() : mRequestedSrid.toInt();
-
-  return sridToCrs( srid, connectionRO() );
+  const int srid = mRequestedSrid.isEmpty() ? mDetectedSrid.toInt() : mRequestedSrid.toInt();
+  if ( mGeometryColumn.isEmpty() )
+  {
+    mCrsResolution = { { u"status"_s, u"not_applicable"_s } };
+    return QgsCoordinateReferenceSystem();
+  }
+  if ( QgsPostgresConn *conn = connectionRO() )
+  {
+    const auto resolved = conn->resolveCrs( srid );
+    mCrsResolution = resolved.details;
+    return resolved.crs;
+  }
+  mCrsResolution = { { u"source_srid"_s, srid },
+                     { u"status"_s, u"unresolved"_s },
+                     { u"diagnostic"_s, QVariantMap { { u"code"_s, u"connection_error"_s }, { u"message"_s, tr( "The database connection could not resolve the layer CRS." ) } } } };
+  return QgsCoordinateReferenceSystem();
 }
 
 QString QgsPostgresProvider::subsetString() const
@@ -5250,9 +5262,16 @@ QString QgsPostgresProvider::htmlMetadata() const
     }
   }
 
-  const QVariantMap
-    additionalInformation { { tr( "Privileges" ), privileges }, { tr( "Rows (estimation)" ), estimateRowCount }, { tr( "Spatial Index" ), spatialIndexText }, { tr( "Table Comment" ), tableComment } };
+  QVariantMap additionalInformation { { tr( "Privileges" ), privileges },
+                                      { tr( "Rows (estimation)" ), estimateRowCount },
+                                      { tr( "Spatial Index" ), spatialIndexText },
+                                      { tr( "Table Comment" ), tableComment } };
 
+  if ( mCrsResolution.contains( u"source_srid"_s ) )
+    additionalInformation.insert( tr( "Source SRID" ), mCrsResolution.value( u"source_srid"_s ) );
+  const QVariantMap diagnostic = mCrsResolution.value( u"diagnostic"_s ).toMap();
+  if ( !diagnostic.isEmpty() )
+    additionalInformation.insert( tr( "Coordinate reference system" ), diagnostic.value( u"message"_s ).toString().toHtmlEscaped() );
   return QgsVariantUtils::variantToHtml( additionalInformation, tr( "Additional information" ) );
 }
 

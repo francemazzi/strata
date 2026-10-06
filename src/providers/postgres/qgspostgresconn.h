@@ -90,6 +90,8 @@ struct QgsPostgresLayerProperty
     QgsPostgresGeometryColumnType geometryColType;
     QStringList pkCols;
     QList<int> srids;
+    //! Catalog SRID before 0 is converted to the type-detection sentinel.
+    QString catalogSrid;
     unsigned int nSpCols;
     QString sql;
     Qgis::PostgresRelKind relKind = Qgis::PostgresRelKind::Unknown;
@@ -119,6 +121,7 @@ struct QgsPostgresLayerProperty
 
       property.types << types[i];
       property.srids << srids[i];
+      property.catalogSrid = catalogSrid;
       property.schemaName = schemaName;
       property.tableName = tableName;
       property.geometryColName = geometryColName;
@@ -380,11 +383,15 @@ class QgsPostgresConn : public QObject
      * \param allowGeometrylessTables
      * \param allowRasterOverviewTables list raster layer overviews
      * \param schema restrict layers to layers within specified schema
+     * \param table restrict layers to a table, retaining every geometry column
      * \returns true if layers were fetched successfully
      */
-    bool supportedLayers(
-      QVector<QgsPostgresLayerProperty> &layers, bool searchGeometryColumnsOnly = true, bool allowGeometrylessTables = false, bool allowRasterOverviewTables = false, const QString &schema = QString()
-    );
+    bool supportedLayers( QVector<QgsPostgresLayerProperty> &layers,
+                          bool searchGeometryColumnsOnly = true,
+                          bool allowGeometrylessTables = false,
+                          bool allowRasterOverviewTables = false,
+                          const QString &schema = QString(),
+                          const QString &table = QString() );
 
     /**
      * Get the information about a supported layer
@@ -485,6 +492,14 @@ class QgsPostgresConn : public QObject
     void lock() { mLock.lock(); }
     void unlock() { mLock.unlock(); }
 
+    struct CrsResolution
+    {
+        QgsCoordinateReferenceSystem crs;
+        QVariantMap details;
+    };
+
+    //! Resolves the database SRID; only successful resolutions are cached.
+    CrsResolution resolveCrs( int srid, QgsFeedback *feedback = nullptr );
     QgsCoordinateReferenceSystem sridToCrs( int srsId );
 
     int crsToSrid( const QgsCoordinateReferenceSystem &crs );

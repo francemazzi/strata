@@ -6,6 +6,16 @@ on:
       - 'strata-v*'
   workflow_dispatch:
     inputs:
+      source_run_id:
+        description: 'Complete Python dependencies in an existing unpublished AppImage artifact'
+        required: false
+        default: ''
+        type: string
+      release_tag:
+        description: 'Rebuild an existing draft release from its immutable tag'
+        required: false
+        default: ''
+        type: string
       version:
         description: 'Version label baked into the AppImage filename (e.g. 0.1.0-test)'
         required: false
@@ -21,6 +31,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.source_run_id }}
     name: build (linux x86_64)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -30,13 +41,42 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Configure AI class layout for an immutable draft rebuild
+        if: inputs.release_tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^strata-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # HAVE_AI_ASSISTANT affects QgisApp's size, so the desktop allocation
+          # must use the same definition as its library. This is a build setting;
+          # preserve the immutable tagged application sources and record the recipe.
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          path = Path('src/app/CMakeLists.txt')
+          content = path.read_text()
+          old = 'target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)'
+          new = 'target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)'
+          assert content.count(old) + content.count(new) == 1
+          path.write_text(content.replace(old, new))
+          PYCODE
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/ci/verify_crs_runtime.py" > scripts/ci/verify_crs_runtime.py
+          git show "$GITHUB_SHA:scripts/build-appimage.sh" > scripts/build-appimage.sh
+          git diff -- src/app/CMakeLists.txt scripts/ci/verify_crs_runtime.py scripts/build-appimage.sh > candidate-build-configuration.patch
 
       - name: Resolve version
         id: version
         env:
           DEVELOPMENT_VERSION: ${{ inputs.version || 'dev' }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
+          if [[ -n "$REQUESTED_RELEASE_TAG" ]]; then
+            [[ "$REQUESTED_RELEASE_TAG" =~ ^strata-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+            VERSION="${REQUESTED_RELEASE_TAG#strata-v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/strata-v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#strata-v}"
           else
@@ -48,28 +88,118 @@ jobs:
         uses: hendrikmuhs/ccache-action@33522472633dbd32578e909b315f5ee43ba878ce # v1.2.22
         with:
           max-size: 1G
-          key: build-ccache-appimage-${{ github.ref_name }}
+          key: build-ccache-appimage-${{ inputs.release_tag || github.ref_name }}
           save: ${{ github.event_name == 'push' }}
 
       - name: Build AppImage
         env:
           STRATA_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
           chmod +x scripts/build-appimage.sh
-          scripts/build-appimage.sh
+          # QGIS checks DISPLAY before initializing Qt, including offscreen mode.
+          xvfb-run -a scripts/build-appimage.sh
 
 
       - name: 📤 Upload AppImage as workflow artifact
+        if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: strata-appimage-x86_64
           path: |
             Strata-*.AppImage
+            crs-runtime-linux.json
+            candidate-build-configuration.patch
 
       - name: Upload release assets
-        if: ${{ startsWith(github.ref, 'refs/tags/strata-v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/strata-v') || startsWith(inputs.release_tag, 'strata-v') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" linux Strata-*.AppImage
+
+  complete-python-runtime:
+    if: inputs.source_run_id
+    name: Complete and verify the draft Linux runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Validate the immutable source and unpublished destination
+        run: |
+          [[ "$RELEASE_TAG" =~ ^strata-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          node scripts/ci/release-assets.mjs draft "$RELEASE_TAG"
+          gh release view "$RELEASE_TAG" --json isDraft,assets > destination.json
+          python3 - <<'PYCODE'
+          import json
+          release = json.load(open('destination.json'))
+          assert release['isDraft']
+          assert not any(asset['name'] in ('release-manifest.json', 'build-linux.json') or asset['name'].endswith('.AppImage') for asset in release['assets'])
+          PYCODE
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          test "$(jq -r '.path' source-run.json)" = .github/workflows/build-appimage.yml
+          test "$(jq -r '.event' source-run.json)" = workflow_dispatch
+          SOURCE_SHA=$(jq -r '.head_sha' source-run.json)
+          git fetch --depth=1 origin "$SOURCE_SHA" "$GITHUB_SHA"
+          git diff --exit-code HEAD "$SOURCE_SHA" -- . ':!.github/workflows' ':!docs' ':!scripts/ci/verify_crs_runtime.py' ':!src/app/CMakeLists.txt'
+          SOURCE_SHA="$SOURCE_SHA" python3 - <<'PYCODE'
+          import os, subprocess
+          from pathlib import Path
+          original = Path('src/app/CMakeLists.txt').read_text().replace('target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)', 'target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)')
+          recipe = subprocess.check_output(['git', 'show', os.environ['SOURCE_SHA'] + ':src/app/CMakeLists.txt'], text=True)
+          def significant(text):
+              return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          assert significant(original) == significant(recipe)
+          PYCODE
+          for script in repair-appimage-python-runtime.sh verify_crs_runtime.py; do
+            git show "$GITHUB_SHA:scripts/ci/$script" > "scripts/ci/$script"
+          done
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          name: strata-appimage-x86_64
+          path: native-candidate
+      - name: Verify the native configuration receipt
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          patch = Path('native-candidate/candidate-build-configuration.patch').read_text()
+          assert '+  target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)' in patch
+          changed = [line for line in patch.splitlines() if line.startswith('diff --git ')]
+          assert changed and all(line.split(' b/')[-1] in ('src/app/CMakeLists.txt', 'scripts/ci/verify_crs_runtime.py') for line in changed)
+          PYCODE
+          sha256sum native-candidate/*.AppImage > native-candidate.sha256
+      - name: Complete the runtime and test the packaged desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gdal python3-numpy xvfb xauth libegl1 libopengl0 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0 file patchelf
+          bash scripts/ci/repair-appimage-python-runtime.sh native-candidate/Strata-*.AppImage "${RELEASE_TAG#strata-v}"
+      - name: Upload verified draft assets
+        run: node scripts/ci/release-assets.mjs upload "$RELEASE_TAG" linux Strata-*.AppImage
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: linux-runtime-packaging-evidence
+          path: |
+            source-run.json
+            native-candidate.sha256
+            native-candidate/candidate-build-configuration.patch
+            application-before.sha256
+            python-runtime-packages.txt
+            python-runtime-repair.json
+            packaging-tool.sha256
+            crs-runtime-linux.json

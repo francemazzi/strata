@@ -4372,8 +4372,14 @@ void QgsVectorLayer::setCoordinateSystem()
 {
   QGIS_PROTECT_QOBJECT_THREAD_ACCESS
 
-  // if layer is not spatial, it has not CRS!
-  setCrs( ( isSpatial() && mDataProvider ) ? mDataProvider->crs() : QgsCoordinateReferenceSystem() );
+  const QgsCoordinateReferenceSystem sourceCrs = ( isSpatial() && mDataProvider ) ? mDataProvider->crs() : QgsCoordinateReferenceSystem();
+  // A diagnosed PostGIS failure must remain visible. Applying the global
+  // unknown-CRS preference here could silently replace the source definition.
+  const bool shouldValidateCrs = mShouldValidateCrs;
+  if ( !sourceCrs.isValid() && mDataProvider && providerType() == "postgres"_L1 && mDataProvider->property( "crsResolution" ).toMap().contains( u"diagnostic"_s ) )
+    mShouldValidateCrs = false;
+  setCrs( sourceCrs );
+  mShouldValidateCrs = shouldValidateCrs;
 }
 
 QString QgsVectorLayer::displayField() const
