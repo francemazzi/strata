@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
       - name: Verify test suite matches immutable candidate
         run: |
-          test "$(git rev-parse strata-v1.6.3^{commit})" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
+          test "$(git rev-parse 'strata-v1.6.3^{commit}')" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
           git diff --exit-code strata-v1.6.3 -- tests/src/python/test_provider_postgres_crs.py
       - name: Download and verify candidate bytes
         env:
@@ -78,7 +78,7 @@ jobs:
       - name: Verify test suite matches immutable candidate
         shell: bash
         run: |
-          test "$(git rev-parse strata-v1.6.3^{commit})" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
+          test "$(git rev-parse 'strata-v1.6.3^{commit}')" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
           git diff --exit-code strata-v1.6.3 -- tests/src/python/test_provider_postgres_crs.py
       - name: Test candidate with isolated PostGIS
         shell: pwsh
