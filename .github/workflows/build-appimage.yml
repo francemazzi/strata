@@ -89,6 +89,34 @@ jobs:
           printf '[authentication]\nuse-password-helper=false\ngenerate-random-password-for-keychain=false\n' > "$RUNNER_TEMP/debug-profile/profiles/test/Strata/Strata.ini"
           QT_QPA_PLATFORM=xcb QTWEBENGINE_DISABLE_SANDBOX=1 timeout 90s xvfb-run -a gdb -batch -ex run -ex 'thread apply all bt' --args /bin/bash squashfs-root/AppRun --profiles-path "$RUNNER_TEMP/debug-profile" --profile test --noplugins --noversioncheck --nologo --code "$GITHUB_WORKSPACE/scripts/ci/smoke_pyqgis.py" > linux-startup-backtrace.txt 2>&1 || true
           tail -n 160 linux-startup-backtrace.txt
+          sudo apt-get install -y --no-install-recommends g++ qt6-base-dev qt6-declarative-dev
+          cat > /tmp/qt-style.cpp <<'CPP'
+          #include <QApplication>
+          #include <QQuickStyle>
+          #include <QDebug>
+          int main(int argc, char **argv) { QApplication app(argc, argv); qDebug() << qVersion(); QQuickStyle::setStyle(QStringLiteral("Material")); qDebug() << "style passed"; }
+          CPP
+          g++ /tmp/qt-style.cpp -o /tmp/qt-style $(pkg-config --cflags --libs Qt6Widgets Qt6QuickControls2)
+          for mode in system bundled controls_system core_system; do
+            (
+              export QT_QPA_PLATFORM=xcb
+              if [ "$mode" != system ]; then
+                export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/squashfs-root/usr/lib:$GITHUB_WORKSPACE/squashfs-root/usr/lib/x86_64-linux-gnu"
+                export QT_PLUGIN_PATH="$GITHUB_WORKSPACE/squashfs-root/usr/lib/qt6/plugins:$GITHUB_WORKSPACE/squashfs-root/usr/lib/x86_64-linux-gnu/qt6/plugins"
+              fi
+              if [ "$mode" = controls_system ]; then export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libQt6QuickControls2.so.6; fi
+              if [ "$mode" = core_system ]; then export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libQt6Core.so.6; fi
+              timeout 30s xvfb-run -a /tmp/qt-style
+            ) > "qt-probe-$mode.txt" 2>&1 && result=0 || result=$?
+            echo "$mode exit: $result"
+            cat "qt-probe-$mode.txt"
+          done
+          for name in Core QuickControls2 Qml Gui; do
+            for directory in squashfs-root/usr/lib /usr/lib/x86_64-linux-gnu; do
+              echo "$directory/libQt6$name.so.6"
+              readelf -n "$directory/libQt6$name.so.6" | head -n 6
+            done
+          done
       - name: Upload candidate evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -99,6 +127,7 @@ jobs:
             crs-runtime-linux.json
             source-artifact.json
             linux-startup-backtrace.txt
+            qt-probe-*.txt
           if-no-files-found: error
   candidate-postgis:
     if: inputs.platform != 'linux'
