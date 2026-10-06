@@ -122,28 +122,83 @@ artifacts. This is a development build, not the existing 1.6.2 package.
   (EPSG:3003) and unresolved SRID 0. The latter remains a valid layer; its
   Information page displays the source SRID and diagnostic and its attribute
   table opens with the synthetic record. Saving/reopening preserves CRS state.
-- The final GUI chat interaction with a loopback-only simulated provider is
-  pending because the Mac session was locked. The automated fake-provider
-  context/tool checks passed; no GUI chat answer is claimed.
+- The GUI chat interaction passed with a loopback-only simulated provider. The
+  actual `list_project_layers` payload contained custom WKT/source SRID 990091,
+  EPSG:3003 and the SRID 0 diagnostic; the checked response was visibly rendered.
+  This is development GUI evidence, distinct from package acceptance.
 
-See `postgis-crs-evidence.json` alongside this document for compact receipts.
+The frozen `postgis-crs-evidence.json` records the initial development run; its pending statuses are historical. The final candidate results and build recipes are recorded in `strata-1.6.3-package-evidence.json`.
 
-## Package and customer acceptance still required
+## Startup correction found during candidate acceptance
 
-The package workflows now test CRS validity, identifier and WKT explicitly.
-macOS/Linux run the packaged desktop through `scripts/ci/verify_crs_runtime.py`
-with an isolated profile and host data/library overrides removed. macOS/Linux
-retain the JSON receipt with workflow artifacts. Windows uses the expanded
-`scripts/ci/test-windows-runtime.ps1`. `--development-runtime` is only for developer
-builds and explicitly cannot validate a self-contained package.
+The Linux desktop runtime check exposed an existing ABI mismatch. The AI feature
+compile definition was private to `qgis_app`, while the separately compiled
+`main.cpp` allocates `QgisApp`, whose header conditionally contains AI members.
+The local compiler measured 3,976 bytes without the definition and 4,096 with it.
+Publishing the definition to all library consumers gives the executable and the
+library the same layout. Windows compiles `main.cpp` inside the library and
+already had a consistent layout. The rebuilt local desktop passes the CRS smoke. Native Linux Memcheck also
+confirms out-of-bounds writes in the original `QgisApp` constructor, immediately
+after the 3,920-byte allocation made by its executable (platform layouts differ).
+For that diagnostic only, malformed optional Qt-plugin debug metadata was
+removed from a disposable extraction; the main executable was unchanged.
 
-Before distribution, run the PostGIS matrix and the GUI Browser → properties →
-assistant → save/reopen flow on freshly built Windows, macOS and Linux candidates
-from the correction's commit. Record OS, artifact hash, source commit and results.
-The package catalog smoke alone does not validate a PostGIS connection. No
-three-platform candidate acceptance, signing, publication or rollout is claimed
-by the local evidence. Do not use the pre-existing 1.6.2 package as evidence for
-these changes.
+The immutable 1.6.3 tag is retained. Its Linux/macOS rebuilds use the corrected
+compile-definition propagation as an explicit build-configuration input; the
+workflow preserves `candidate-build-configuration.patch` with the artifacts.
+The tagged application `.cpp`/`.h` files remain unchanged. Reproducing those
+packages requires the recorded workflow recipe in addition to the source tag.
+
+## Packaging corrections found during acceptance
+
+The Linux AppImage originally omitted the `osgeo` Python bindings. The runtime
+now includes the distribution's matched GDAL/NumPy pair and verifies a raster
+array round trip before testing the desktop. The final 1.6.3 AppImage is completed
+from the corrected native artifact, retaining the exact Strata executable hash.
+Both its packaged CRS smoke and five PostGIS methods pass. Native Memcheck
+confirms that the corrected constructor no longer performs the original
+out-of-bounds writes; this is not a claim that every third-party diagnostic is
+clean.
+
+The macOS package records the Strata version in both bundle version fields.
+Launch Services receives `PYTHONDONTWRITEBYTECODE=1` through `LSEnvironment`, so
+normal Finder launches do not add Python cache files to the signed resources.
+Direct command-line launches of the bundle executable must also set this
+variable, as the package verification helpers do. See Apple's
+[Launch Services environment documentation](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/LaunchServicesKeys.html).
+The workflow verifies the bundle seal again after its packaged runtime check.
+
+## Final package validation, 2026-10-06
+
+The exact 1.6.3 Windows portable ZIP, Linux AppImage and macOS universal DMG pass
+all five synthetic PostGIS methods, without failures, errors or skips. The macOS
+DMG was exercised as both arm64 and x86_64 using Rosetta. Each receipt records the
+package SHA-256, source tag, test-file digest, architecture and bundled PyQGIS
+module path. Host Python/library/data overrides were removed from these checks.
+
+Windows native CI additionally verifies both installer and portable signing and
+runtime behavior. The macOS app/DMG signatures, Gatekeeper assessments, accepted
+Apple notarization and stapled DMG ticket pass. The bundled CRS smoke verifies
+validity, identifiers and WKT; a valid layer alone is never the acceptance test.
+Linux also passes the GDAL/NumPy array round trip and the constructor-allocation
+regression described above.
+
+See [final package evidence](strata-1.6.3-package-evidence.json) for exact hashes,
+CI run URLs, build recipes and the deployment receipt. The immutable source tag
+is `01ee92498993e2d8e3e0b375262d5f66f56a3a51`; the application C++/headers remain
+unchanged. Linux/macOS use the corrected build configuration at
+`2df694fc5a7422201ade0d917fd5e1307e00b12c`, plus the separately recorded final
+packaging revisions. The release records distinguish these inputs explicitly.
+No result from the pre-existing 1.6.2 package validates this release.
+
+The GUI Browser → properties → assistant → project reopen check passed earlier
+on the modified development build, using synthetic data and a loopback provider.
+An additional interactive check on the final DMG could not start because the Mac
+was locked and computer use required manual unlock. The final DMG's headless
+PostGIS and signed-runtime checks passed; a Finder-launch/post-GUI signature
+result is not claimed. Manual Windows 11 Smart App Control field acceptance also
+remains pending. Distribution uses the existing installer channel, without an
+in-app updater feed.
 
 Closing the original customer incident additionally requires their Strata
 version/platform, source SRID, connection characteristics and the affected layer.
