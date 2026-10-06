@@ -57,6 +57,8 @@ def main():
             # Run it under Xvfb in CI, using the same platform plugin as users.
             QT_QPA_PLATFORM="xcb" if sys.platform.startswith("linux") else "offscreen",
             QTWEBENGINE_DISABLE_SANDBOX="1",
+            # Importing modules must not add bytecode to a signed app bundle.
+            PYTHONDONTWRITEBYTECODE="1",
             STRATA_PYQGIS_SMOKE_OUT=str(result),
         )
         completed = subprocess.run(

@@ -32,6 +32,8 @@ jobs:
     if: ${{ !inputs.local_signing_check }}
     name: Create and upload macOS DMG
     runs-on: macos-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -51,7 +53,17 @@ jobs:
           node scripts/ci/release-assets.mjs draft "$RELEASE_TAG"
           SOURCE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')
           test "$SOURCE_SHA" = "$(git rev-parse HEAD)"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.conclusion')" = success
+          # Packaging can fail after both native builds succeeded. Reuse only
+          # those exact successful build jobs from the immutable source commit.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > source-jobs.json
+          python3 - <<'PYCODE'
+          import json
+          with open('source-jobs.json') as source:
+              jobs = [job for job in json.load(source)['jobs'] if job['name'].startswith('build (macos)')]
+          assert len(jobs) == 2 and all(job['conclusion'] == 'success' for job in jobs), jobs
+          assert any('arm64' in job['name'] for job in jobs)
+          assert any('x86_64' in job['name'] for job in jobs)
+          PYCODE
 
       - name: Prepare build env
         run: |
@@ -282,6 +294,7 @@ jobs:
         run: |
           APP_PATH=$(ls -d universal/*.app | head -n1)
           python3 scripts/ci/verify_crs_runtime.py "${APP_PATH}/Contents/MacOS/Strata" --output crs-runtime-macos.json
+          codesign --verify --strict --verbose=2 "${APP_PATH}"
 
       - name: Preserve CRS runtime evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -323,13 +336,29 @@ jobs:
             --team-id "$MACOS_APPLE_TEAM_ID" \
             --password "$MACOS_APPLE_APP_PASSWORD" \
             --wait --output-format json > notary-result.json
-          jq -e '.status == "Accepted"' notary-result.json
+          if ! jq -e '.status == "Accepted"' notary-result.json; then
+            SUBMISSION_ID=$(jq -r '.id' notary-result.json)
+            xcrun notarytool log "$SUBMISSION_ID" --apple-id "$MACOS_APPLE_ID" \
+              --team-id "$MACOS_APPLE_TEAM_ID" --password "$MACOS_APPLE_APP_PASSWORD" notary-log.json
+            cat notary-log.json
+            exit 1
+          fi
           for attempt in 1 2 3 4 5; do
             if xcrun stapler staple "$DMG_FILE"; then break; fi
             if [ "$attempt" -eq 5 ]; then exit 1; fi
             sleep 30
           done
           xcrun stapler validate "$DMG_FILE"
+
+      - name: Preserve notarization diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-notarization
+          path: |
+            notary-result.json
+            notary-log.json
+          if-no-files-found: ignore
 
       - name: Upload release assets
         if: ${{ success() }}

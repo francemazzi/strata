@@ -528,10 +528,13 @@ jobs:
 
       - name: 🐍 Verify PyQGIS runtime in signed app
         if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           APP_PATH=$(ls -d universal/*.app | head -n1)
           python3 scripts/ci/verify_pyqgis_bundle.py --platform macos "${APP_PATH}"
           python3 scripts/ci/verify_crs_runtime.py "${APP_PATH}/Contents/MacOS/Strata" --output crs-runtime-macos.json
+          codesign --verify --strict --verbose=2 "${APP_PATH}"
 
       - name: Create dmg
         run: |
