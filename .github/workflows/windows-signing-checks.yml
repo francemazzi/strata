@@ -51,10 +51,14 @@ jobs:
           assert asset['digest']=='sha256:'+digest
           PY
           chmod +x Strata-1.6.3-x86_64.AppImage
+      - name: Configure virtual display for the packaged desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
       - name: Test packaged desktop with isolated PostGIS
         env:
           STRATA_CRS_TEST_DB: host=127.0.0.1 port=55013 dbname=strata_crs_candidate user=postgres sslmode=disable
-        run: python3 scripts/ci/test_candidate_postgis.py ./Strata-1.6.3-x86_64.AppImage --asset Strata-1.6.3-x86_64.AppImage --output postgis-candidate-linux.json
+        run: xvfb-run -a python3 scripts/ci/test_candidate_postgis.py ./Strata-1.6.3-x86_64.AppImage --asset Strata-1.6.3-x86_64.AppImage --output postgis-candidate-linux.json
       - name: Upload candidate evidence
         if: always()
         uses: actions/upload-artifact@v4
