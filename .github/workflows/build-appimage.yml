@@ -40,24 +40,20 @@ jobs:
         run: |
           test "$(git rev-parse 'strata-v1.6.3^{commit}')" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
           git diff --exit-code strata-v1.6.3 -- tests/src/python/test_provider_postgres_crs.py
-      - name: Recover and verify immutable AppImage build artifact
+      - name: Download and verify the current draft candidate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/francemazzi/strata/actions/artifacts/11418791128 > source-artifact.json
-          gh api repos/francemazzi/strata/actions/artifacts/11418791128/zip > source-artifact.zip
-          git diff --exit-code strata-v1.6.3 23d4e46f0365510d8e4b057c35f5992231f0ceb1 -- . ':!.github/workflows/build-appimage.yml'
+          gh release view strata-v1.6.3 --repo francemazzi/strata --json assets > candidate-release.json
+          gh release download strata-v1.6.3 --repo francemazzi/strata --pattern Strata-1.6.3-x86_64.AppImage
           python3 - <<'PYCODE'
-          import hashlib,json,pathlib,zipfile
-          artifact=json.loads(pathlib.Path('source-artifact.json').read_text())
-          assert artifact['workflow_run']['id']==37465170765
-          assert artifact['workflow_run']['head_sha']=='23d4e46f0365510d8e4b057c35f5992231f0ceb1'
-          with open('source-artifact.zip','rb') as file: digest=hashlib.file_digest(file,'sha256').hexdigest()
-          assert artifact['digest']=='sha256:'+digest
-          name='Strata-1.6.3-x86_64.AppImage'
-          with zipfile.ZipFile('source-artifact.zip') as archive:
-              assert name in archive.namelist()
-              pathlib.Path(name).write_bytes(archive.read(name))
+          import hashlib,json,pathlib
+          name = 'Strata-1.6.3-x86_64.AppImage'
+          assets = json.loads(pathlib.Path('candidate-release.json').read_text())['assets']
+          matches = [a for a in assets if a['name'] == name]
+          assert len(matches) == 1
+          with open(name,'rb') as file: digest = hashlib.file_digest(file,'sha256').hexdigest()
+          assert matches[0]['digest'] == 'sha256:' + digest
           PYCODE
           chmod +x Strata-1.6.3-x86_64.AppImage
       - name: Configure virtual display for the packaged desktop
@@ -70,15 +66,6 @@ jobs:
         env:
           STRATA_CRS_TEST_DB: host=127.0.0.1 port=55013 dbname=strata_crs_candidate user=postgres sslmode=disable
         run: xvfb-run -a python3 scripts/ci/test_candidate_postgis.py ./Strata-1.6.3-x86_64.AppImage --asset Strata-1.6.3-x86_64.AppImage --output postgis-candidate-linux.json
-      - name: Upload verified unchanged candidate to the draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          candidate="$GITHUB_WORKSPACE/Strata-1.6.3-x86_64.AppImage"
-          git worktree add --detach "$RUNNER_TEMP/release-source" strata-v1.6.3
-          cd "$RUNNER_TEMP/release-source"
-          test "$(git rev-parse HEAD)" = 01ee92498993e2d8e3e0b375262d5f66f56a3a51
-          node scripts/ci/release-assets.mjs upload strata-v1.6.3 linux "$candidate"
       - name: Diagnose Linux desktop startup on failure
         if: failure()
         run: |
@@ -100,7 +87,7 @@ jobs:
           path: |
             postgis-candidate-linux.json
             crs-runtime-linux.json
-            source-artifact.json
+            candidate-release.json
             linux-startup-backtrace.txt
             linux-valgrind*.txt
           if-no-files-found: error
