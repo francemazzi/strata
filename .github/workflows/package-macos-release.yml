@@ -181,6 +181,24 @@ jobs:
             echo "Frameworks/lib not present or already a symlink, skipping."
           fi
 
+      - name: Remove broken symlinks from app bundle
+        if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
+        run: |
+          # The merged universal bundle can contain optional dependency symlinks
+          # from one architecture that are absent in the other. Broken symlinks
+          # make `codesign --verify --strict` fail with a generic
+          # "No such file or directory" against the top-level .app.
+          APP_PATH=$(ls -d universal/*.app | head -n1)
+          REMOVED=0
+          while IFS= read -r -d '' link; do
+            if [ ! -e "$link" ]; then
+              echo "Removing broken symlink $link -> $(readlink "$link")"
+              rm -f "$link"
+              REMOVED=$((REMOVED + 1))
+            fi
+          done < <(find "${APP_PATH}" -type l -print0)
+          echo "Removed ${REMOVED} broken symlink(s)."
+
       - name: Inventory Contents/MacOS (debug)
         if: ${{ inputs.sign_and_notarize && startsWith(inputs.release_tag, 'strata-v') }}
         run: |
@@ -198,17 +216,20 @@ jobs:
           APP_NAME=$(basename "${APP_PATH}" .app)
           MAIN_EXEC="${APP_PATH}/Contents/MacOS/${APP_NAME}"
           DEST="${APP_PATH}/Contents/Resources/python"
-          PYI_DEST="${APP_PATH}/Contents/Resources/python_stubs"
-          mkdir -p "${DEST}"
-          # PyQt typing stubs are not loaded at runtime.  Leaving them under
-          # Frameworks makes the outer bundle seal treat them as code objects.
-          # Keep their relative paths under Resources, outside the code seal.
+          SUPPORT_DEST="${APP_PATH}/Contents/Resources/python_support"
+          mkdir -p "${DEST}" "${SUPPORT_DEST}"
+          # PyQt and other Python deps ship typing stubs, utility scripts, and
+          # other non-Mach-O files under Frameworks/. codesign treats them as #spellok
+          # subcomponents of the outer bundle seal, so keep them under Resources.
           while IFS= read -r -d '' f; do
+            if file -bL "$f" 2>/dev/null | grep -qE 'Mach-O'; then #spellok
+              continue
+            fi
             rel="${f#${APP_PATH}/Contents/Frameworks/}"
-            target="${PYI_DEST}/${rel}"
+            target="${SUPPORT_DEST}/${rel}"
             mkdir -p "$(dirname "${target}")"
             mv "${f}" "${target}"
-          done < <(find "${APP_PATH}/Contents/Frameworks" -type f -name '*.pyi' -print0)
+          done < <(find "${APP_PATH}/Contents/Frameworks" -type f -print0)
           echo "Signing ${APP_PATH} (main executable: ${MAIN_EXEC})..."
 
           # Try to sign $1; if codesign refuses because the file is not a
