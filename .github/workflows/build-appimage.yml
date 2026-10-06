@@ -37,6 +37,29 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Configure AI class layout for an immutable draft rebuild
+        if: inputs.release_tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^strata-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # HAVE_AI_ASSISTANT affects QgisApp's size, so the desktop allocation
+          # must use the same definition as its library. This is a build setting;
+          # preserve the immutable tagged application sources and record the recipe.
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          path = Path('src/app/CMakeLists.txt')
+          content = path.read_text()
+          old = 'target_compile_definitions(qgis_app PRIVATE HAVE_AI_ASSISTANT)'
+          new = 'target_compile_definitions(qgis_app PUBLIC HAVE_AI_ASSISTANT)'
+          assert content.count(old) + content.count(new) == 1
+          path.write_text(content.replace(old, new))
+          PYCODE
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/ci/verify_crs_runtime.py" > scripts/ci/verify_crs_runtime.py
+          git diff -- src/app/CMakeLists.txt scripts/ci/verify_crs_runtime.py > candidate-build-configuration.patch
+
       - name: Resolve version
         id: version
         env:
@@ -80,6 +103,7 @@ jobs:
           path: |
             Strata-*.AppImage
             crs-runtime-linux.json
+            candidate-build-configuration.patch
 
       - name: Upload release assets
         if: ${{ startsWith(github.ref, 'refs/tags/strata-v') || startsWith(inputs.release_tag, 'strata-v') }}
