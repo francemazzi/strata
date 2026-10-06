@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import sys
 import traceback
 import unittest
@@ -19,6 +20,8 @@ report = {
     "source_sha": "01ee92498993e2d8e3e0b375262d5f66f56a3a51",
     "test_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
     "platform": sys.platform,
+    "architecture": platform.machine(),
+    "qgis_module": str(Path(sys.modules["qgis.core"].__file__).resolve()),
     "qgis_version": Qgis.QGIS_VERSION,
     "qgis_prefix": QgsApplication.prefixPath(),
     "runtime_mode": "package",
