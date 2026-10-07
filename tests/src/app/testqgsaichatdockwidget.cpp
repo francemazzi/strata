@@ -1281,12 +1281,16 @@ void TestQgsAiChatDockWidget::mapContextPillShowsWhatIsSent()
   dock.scheduleMapContextRefresh();
   QTRY_COMPARE( pill->text(), u"Trees"_s );
   QVERIFY( !pill->isHidden() );
+  // Included context reads as plain text: no strikeout while the pill is checked.
+  QVERIFY( !pill->font().strikeOut() );
 
   // A click leaves the map context out of the next messages; another brings it back.
   pill->click();
   QVERIFY( !manager.isMapContextIncluded() );
+  QVERIFY( pill->font().strikeOut() );
   pill->click();
   QVERIFY( manager.isMapContextIncluded() );
+  QVERIFY( !pill->font().strikeOut() );
 }
 
 void TestQgsAiChatDockWidget::toolCardShowsChangesOnMap()

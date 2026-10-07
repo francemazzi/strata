@@ -950,7 +950,7 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   mMapContextPill->setToolButtonStyle( Qt::ToolButtonTextOnly );
   mMapContextPill->setStyleSheet(
     u"QToolButton#aiMapContextPill { color: palette(window-text); background: palette(alternate-base); border: 0; border-radius: 9px; padding: 2px 8px; } "
-    "QToolButton#aiMapContextPill:!checked { color: palette(mid); background: transparent; text-decoration: line-through; }"_s
+    "QToolButton#aiMapContextPill:!checked { color: palette(mid); background: transparent; }"_s
   );
   mMapContextPill->setVisible( false );
   connect( mMapContextPill, &QToolButton::toggled, this, [this]( bool included ) {
@@ -3491,11 +3491,21 @@ void QgsAiChatDockWidget::refreshMapContextPill()
   if ( !mMapContextPill || !mSessionManager )
     return;
   const QString summary = mSessionManager->mapContextSummary();
+  const bool included = mSessionManager->isMapContextIncluded();
   mMapContextPill->setVisible( !summary.isEmpty() );
   mMapContextPill->setText( summary );
+  // Strike the text out only while the context is left out. Done on the font, not in the
+  // style sheet: Qt resolves font properties (text-decoration) once at polish time without
+  // the :checked state, so a ":!checked { text-decoration: line-through }" rule applies always.
+  QFont pillFont = mMapContextPill->font();
+  if ( pillFont.strikeOut() != !included )
+  {
+    pillFont.setStrikeOut( !included );
+    mMapContextPill->setFont( pillFont );
+  }
   mMapContextPill->setToolTip(
-    mSessionManager->isMapContextIncluded() ? tr( "Sent with your message: the map view, the active layer and its selection. Click to leave it out." )
-                                            : tr( "Not sent with your message. Click to send the map view, the active layer and its selection again." )
+    included ? tr( "Sent with your message: the map view, the active layer and its selection. Click to leave it out." )
+             : tr( "Not sent with your message. Click to send the map view, the active layer and its selection again." )
   );
 }
 
