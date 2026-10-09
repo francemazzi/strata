@@ -89,6 +89,8 @@
 #include <QNetworkRequest>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QScrollBar>
+#include <QToolButton>
 #include <QScreen>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -558,7 +560,7 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
   addSection( u"rules"_s, tr( "Rules & Skills" ), buildRulesSkillsPage() );
   addSection( u"gallery"_s, tr( "Gallery & Connectors" ), buildGalleryConnectorsPage() );
   addSection( u"indexing"_s, tr( "Indexing & Docs" ), buildIndexingPage() );
-  addSection( u"workspace"_s, tr( "Workspace" ), buildWorkspacePage() );
+  addSection( u"workspace"_s, tr( "Workspace and Cloud" ), buildWorkspacePage() );
   addSection( u"privacy"_s, tr( "Privacy & Telemetry" ), buildPrivacyPage() );
   addSection( u"updates"_s, tr( "Updates" ), new QgsUpdateWidget( this ) );
   addSection( u"onboarding"_s, tr( "Onboarding & Release" ), buildOnboardingPage() );
@@ -568,18 +570,14 @@ QgsAiSettingsDialog::QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManag
       refreshGalleryAndConnectors();
   } );
   connect( mSidebarList, &QListWidget::currentRowChanged, mStack, &QStackedWidget::setCurrentIndex );
+  connect( mSidebarList, &QListWidget::currentRowChanged, scrollArea, [scrollArea]() { QTimer::singleShot( 0, scrollArea, [scrollArea]() { scrollArea->verticalScrollBar()->setValue( 0 ); } ); } );
   mSidebarList->setCurrentRow( 0 );
 
   connect( mAccountWidget, &QgsAiAccountWidget::accountInfoChanged, this, &QgsAiSettingsDialog::refreshSidebarAccountHeader );
   connect( mAccountWidget, &QgsAiAccountWidget::authStateChanged, this, [this]() {
     refreshSidebarAccountHeader();
     refreshOnboardingStatus();
-    const bool hasPlanSession = mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty();
-    mSyncCloudContextButton->setEnabled( mSessionManager && mSessionManager->workspaceIndex() && hasPlanSession );
-    if ( mSyncRulesSkillsCloudButton )
-      mSyncRulesSkillsCloudButton->setEnabled( hasPlanSession );
-    if ( mImportRulesSkillsCloudButton )
-      mImportRulesSkillsCloudButton->setEnabled( hasPlanSession );
+    refreshCloudWorkspaceState();
     emit planAuthStateChanged();
   } );
   // Model enable/disable toggles should rebuild the chat model menu the same way an auth change does.
@@ -595,7 +593,7 @@ QListWidget#aiSettingsSidebar::item:selected { background: palette(midlight); co
 QLabel#aiSettingsSidebarAvatar { background: palette(highlight); color: palette(highlighted-text); border-radius: 14px; font-weight: 600; }
 QLabel[aiRole="pageTitle"] { font-weight: 700; }
 QLabel[aiRole="sectionHeader"] { font-weight: 600; margin-top: 8px; }
-QLabel[aiRole="rowDescription"] { color: palette(dark); }
+QLabel[aiRole="rowDescription"] { color: palette(window-text); }
 )css"_s );
 
   setMinimumSize( 720, 480 );
@@ -667,6 +665,7 @@ void QgsAiSettingsDialog::showSection( const QString &key )
     if ( mSidebarList->item( i )->data( Qt::UserRole ).toString() == key )
     {
       mSidebarList->setCurrentRow( i );
+      mSidebarList->setFocus( Qt::OtherFocusReason );
       return;
     }
   }
@@ -1190,24 +1189,9 @@ QWidget *QgsAiSettingsDialog::buildRulesSkillsPage()
   refreshSkillsList();
   refreshRulesSkillsTrustState();
 
-  QWidget *cloudButtons = new QWidget( page );
-  QHBoxLayout *cloudButtonsLayout = new QHBoxLayout( cloudButtons );
-  cloudButtonsLayout->setContentsMargins( 0, 0, 0, 0 );
-  mSyncRulesSkillsCloudButton = new QPushButton( tr( "Push to Strata Cloud" ), cloudButtons );
-  mSyncRulesSkillsCloudButton->setObjectName( u"aiSyncRulesSkillsCloudButton"_s );
-  mSyncRulesSkillsCloudButton->setEnabled( mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty() );
-  mImportRulesSkillsCloudButton = new QPushButton( tr( "Import from Strata Cloud…" ), cloudButtons );
-  mImportRulesSkillsCloudButton->setObjectName( u"aiImportRulesSkillsCloudButton"_s );
-  mImportRulesSkillsCloudButton->setEnabled( mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty() );
-  cloudButtonsLayout->addWidget( mSyncRulesSkillsCloudButton );
-  cloudButtonsLayout->addWidget( mImportRulesSkillsCloudButton );
-  contentLayout->addWidget( settingRow( tr( "Cloud copy (opt-in)" ), tr( "Explicit copy/upsert only: no automatic merge, tombstones, or deletion of local/cloud-only items." ), cloudButtons, page ) );
-  mRulesSkillsCloudStatusLabel = new QLabel( page );
-  mRulesSkillsCloudStatusLabel->setWordWrap( true );
-  mRulesSkillsCloudStatusLabel->setProperty( "aiRole", u"rowDescription"_s );
-  contentLayout->addWidget( mRulesSkillsCloudStatusLabel );
-  connect( mSyncRulesSkillsCloudButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::syncRulesSkillsToCloud );
-  connect( mImportRulesSkillsCloudButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::importRulesSkillsFromCloud );
+  QPushButton *cloudLink = new QPushButton( tr( "Manage transfers in Workspace and Cloud…" ), page );
+  connect( cloudLink, &QPushButton::clicked, this, [this]() { showSection( u"workspace"_s ); } );
+  contentLayout->addWidget( cloudLink );
 
   return page;
 }
@@ -1628,9 +1612,7 @@ void QgsAiSettingsDialog::setSkillDocumentInEditor( const QgsAiMarkdownDocument 
 
   for ( const QgsAiFrontmatterProperty &property : document.properties )
   {
-    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0
-         || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0
-         || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
+    if ( property.key.compare( u"name"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"description"_s, Qt::CaseInsensitive ) == 0 || property.key.compare( u"references"_s, Qt::CaseInsensitive ) == 0 )
       continue;
     addSkillPropertyRow( property.key, property.values, property.isList, false );
   }
@@ -1765,7 +1747,8 @@ void QgsAiSettingsDialog::saveCurrentSkill()
 
 void QgsAiSettingsDialog::syncRulesSkillsToCloud()
 {
-  if ( !mSessionManager || !mModelRouter || !mAccountWidget )
+  refreshCloudWorkspaceState();
+  if ( !mSessionManager || !mModelRouter || !mAccountWidget || mCloudTransfer || cloudSettingsPending() )
     return;
 
   const QString token = mModelRouter->planSessionToken().trimmed();
@@ -1820,13 +1803,15 @@ void QgsAiSettingsDialog::syncRulesSkillsToCloud()
   mRulesSkillsCloudStatusLabel->setText( tr( "Resolving cloud records before pushing %1 rule(s) and %2 skill(s)…" ).arg( localRules->size() ).arg( localSkills->size() ) );
 
   QgsAiRulesSkillsCloudClient *client = new QgsAiRulesSkillsCloudClient( this );
+  beginCloudTransfer( client );
 
-  auto maybeFinish = [this, client, progress, failures, totalExpected, cancelled]() { //#spellok
+  auto maybeFinish = [this, client, progress, failures, totalExpected, cancelled]() {
+    if ( !cloudTransferCurrent( client ) )
+      return; //#spellok
     if ( *progress < totalExpected )
       return;
     *cancelled = true; //#spellok
-    mSyncRulesSkillsCloudButton->setEnabled( true );
-    mImportRulesSkillsCloudButton->setEnabled( true );
+    finishCloudTransfer( client );
     mRulesSkillsCloudStatusLabel->setText(
       *failures == 0 ? tr( "Pushed %1 item(s) to Strata Cloud." ).arg( totalExpected ) : tr( "Push completed with %1 error(s); see the warning dialog." ).arg( *failures )
     );
@@ -1835,7 +1820,9 @@ void QgsAiSettingsDialog::syncRulesSkillsToCloud()
 
   auto maybeStartPush = std::make_shared<std::function<void()>>();
   *maybeStartPush =
-    [client, localRules, localSkills, cloudRules, cloudSkills, rulesFetched, skillsFetched, requestsStarted, cancelled, apiBase = mAccountWidget->planEndpoint(), token, maybeFinish, this]() { //#spellok
+    [this, client, localRules, localSkills, cloudRules, cloudSkills, rulesFetched, skillsFetched, requestsStarted, cancelled, apiBase = mAccountWidget->planEndpoint(), token, maybeFinish]() {
+      if ( !cloudTransferCurrent( client ) )
+        return;                                              //#spellok
       if ( *cancelled || !*rulesFetched || !*skillsFetched ) //#spellok
         return;
       for ( QgsAiRulesSkillsCloudClient::RemoteRule &local : *localRules )
@@ -1860,22 +1847,27 @@ void QgsAiSettingsDialog::syncRulesSkillsToCloud()
         maybeFinish();
     };
 
-  connect( client, &QgsAiRulesSkillsCloudClient::ruleSynced, this, [progress, maybeFinish]( const QgsAiRulesSkillsCloudClient::RemoteRule & ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::ruleSynced, this, [this, client, progress, maybeFinish]( const QgsAiRulesSkillsCloudClient::RemoteRule & ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     ++( *progress );
     maybeFinish();
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::skillSynced, this, [progress, maybeFinish]( const QgsAiRulesSkillsCloudClient::RemoteSkill & ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::skillSynced, this, [this, client, progress, maybeFinish]( const QgsAiRulesSkillsCloudClient::RemoteSkill & ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     ++( *progress );
     maybeFinish();
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::requestFailed, this, [this, client, progress, failures, requestsStarted, cancelled, totalExpected, maybeFinish]( const QString &message ) { //#spellok
-    if ( *cancelled )                                                                                                                                                                        //#spellok
+  connect( client, &QgsAiRulesSkillsCloudClient::requestFailed, this, [this, client, progress, failures, requestsStarted, cancelled, totalExpected, maybeFinish]( const QString &message ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;         //#spellok
+    if ( *cancelled ) //#spellok
       return;
     if ( !*requestsStarted )
     {
       *cancelled = true; //#spellok
-      mSyncRulesSkillsCloudButton->setEnabled( true );
-      mImportRulesSkillsCloudButton->setEnabled( true );
+      finishCloudTransfer( client );
       mRulesSkillsCloudStatusLabel->setText( tr( "Strata Cloud push failed before any item was written." ) );
       QMessageBox::warning( this, tr( "Strata Cloud push failed" ), message );
       client->deleteLater();
@@ -1887,17 +1879,23 @@ void QgsAiSettingsDialog::syncRulesSkillsToCloud()
       QMessageBox::warning( this, tr( "Strata Cloud push" ), tr( "Some items failed to push. Last error: %1" ).arg( message ) );
     maybeFinish();
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::workspaceReady, this, [client, apiBase = mAccountWidget->planEndpoint(), token]( const QString &workspaceId ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::workspaceReady, this, [this, client, apiBase = mAccountWidget->planEndpoint(), token]( const QString &workspaceId ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     client->setProperty( "workspaceId", workspaceId );
     client->fetchRules( apiBase, token, workspaceId );
     client->fetchSkills( apiBase, token, workspaceId );
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::rulesFetched, this, [cloudRules, rulesFetched, maybeStartPush]( const auto &items ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::rulesFetched, this, [this, client, cloudRules, rulesFetched, maybeStartPush]( const auto &items ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     *cloudRules = items;
     *rulesFetched = true;
     ( *maybeStartPush )();
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::skillsFetched, this, [cloudSkills, skillsFetched, maybeStartPush]( const auto &items ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::skillsFetched, this, [this, client, cloudSkills, skillsFetched, maybeStartPush]( const auto &items ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     *cloudSkills = items;
     *skillsFetched = true;
     ( *maybeStartPush )();
@@ -1908,7 +1906,8 @@ void QgsAiSettingsDialog::syncRulesSkillsToCloud()
 
 void QgsAiSettingsDialog::importRulesSkillsFromCloud()
 {
-  if ( !mSessionManager || !mModelRouter || !mAccountWidget )
+  refreshCloudWorkspaceState();
+  if ( !mSessionManager || !mModelRouter || !mAccountWidget || mCloudTransfer || cloudSettingsPending() )
     return;
   const QString token = mModelRouter->planSessionToken().trimmed();
   const QString workspaceRoot = mSessionManager->workspaceRoot();
@@ -1937,12 +1936,15 @@ void QgsAiSettingsDialog::importRulesSkillsFromCloud()
   auto skillsFetched = std::make_shared<bool>( false );
   auto finished = std::make_shared<bool>( false );
   QgsAiRulesSkillsCloudClient *client = new QgsAiRulesSkillsCloudClient( this );
+  beginCloudTransfer( client );
   mSyncRulesSkillsCloudButton->setEnabled( false );
   mImportRulesSkillsCloudButton->setEnabled( false );
   mRulesSkillsCloudStatusLabel->setText( tr( "Downloading Rules & Skills for import preview…" ) );
 
   auto showPreview = std::make_shared<std::function<void()>>();
   *showPreview = [this, client, cloudRules, cloudSkills, rulesFetched, skillsFetched, finished, localRuleMarkdown, localSkillMarkdown, workspaceRoot]() {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     if ( *finished || !*rulesFetched || !*skillsFetched )
       return;
     *finished = true;
@@ -2027,7 +2029,10 @@ void QgsAiSettingsDialog::importRulesSkillsFromCloud()
 
     int imported = 0;
     QStringList errors;
-    if ( preview.exec() == QDialog::Accepted )
+    const int previewResult = preview.exec();
+    if ( !cloudTransferCurrent( client ) )
+      return;
+    if ( previewResult == QDialog::Accepted )
     {
       if ( !QgsAiWorkspaceTrust::isTrusted( workspaceRoot ) )
         errors << tr( "Workspace trust was revoked before applying the import." );
@@ -2060,38 +2065,47 @@ void QgsAiSettingsDialog::importRulesSkillsFromCloud()
       refreshRulesList();
       refreshSkillsList();
     }
-    mSyncRulesSkillsCloudButton->setEnabled( true );
-    mImportRulesSkillsCloudButton->setEnabled( true );
+    finishCloudTransfer( client );
     if ( errors.isEmpty() )
       mRulesSkillsCloudStatusLabel->setText(
         preview.result() == QDialog::Accepted ? tr( "Imported %1 item(s); skipped items and local-only files were left untouched." ).arg( imported )
                                               : tr( "Cloud import cancelled; no local files were changed." ) //#spellok
       );
     else
+    {
+      mRulesSkillsCloudStatusLabel->setText( tr( "Imported %1 item(s), with %2 error(s)." ).arg( imported ).arg( errors.size() ) );
       QMessageBox::warning( this, tr( "Strata Cloud import" ), errors.join( '\n'_L1 ) );
+    }
     client->deleteLater();
   };
 
-  connect( client, &QgsAiRulesSkillsCloudClient::workspaceReady, this, [client, apiBase = mAccountWidget->planEndpoint(), token]( const QString &workspaceId ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::workspaceReady, this, [this, client, apiBase = mAccountWidget->planEndpoint(), token]( const QString &workspaceId ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     client->fetchRules( apiBase, token, workspaceId );
     client->fetchSkills( apiBase, token, workspaceId );
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::rulesFetched, this, [cloudRules, rulesFetched, showPreview]( const auto &items ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::rulesFetched, this, [this, client, cloudRules, rulesFetched, showPreview]( const auto &items ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     *cloudRules = items;
     *rulesFetched = true;
     ( *showPreview )();
   } );
-  connect( client, &QgsAiRulesSkillsCloudClient::skillsFetched, this, [cloudSkills, skillsFetched, showPreview]( const auto &items ) {
+  connect( client, &QgsAiRulesSkillsCloudClient::skillsFetched, this, [this, client, cloudSkills, skillsFetched, showPreview]( const auto &items ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     *cloudSkills = items;
     *skillsFetched = true;
     ( *showPreview )();
   } );
   connect( client, &QgsAiRulesSkillsCloudClient::requestFailed, this, [this, client, finished]( const QString &message ) {
+    if ( !cloudTransferCurrent( client ) )
+      return;
     if ( *finished )
       return;
     *finished = true;
-    mSyncRulesSkillsCloudButton->setEnabled( true );
-    mImportRulesSkillsCloudButton->setEnabled( true );
+    finishCloudTransfer( client );
     mRulesSkillsCloudStatusLabel->setText( tr( "Strata Cloud import failed; no local files were changed." ) );
     QMessageBox::warning( this, tr( "Strata Cloud import failed" ), message );
     client->deleteLater();
@@ -2130,6 +2144,8 @@ QWidget *QgsAiSettingsDialog::buildGalleryConnectorsPage()
     const bool enabled = item->checkState() == Qt::Checked;
     QgsAiGalleryCloudClient *client = new QgsAiGalleryCloudClient( this );
     connect( client, &QgsAiGalleryCloudClient::mcpServerUpdated, this, [this, client]( const QgsAiGalleryCloudClient::McpServer & ) {
+      if ( !cloudTransferCurrent( client ) )
+        return;
       QgsAiPlanClient *policyClient = new QgsAiPlanClient( this );
       connect( policyClient, &QgsAiPlanClient::agentPolicyReady, this, [this, policyClient]( const QgsAiManagedAgentPolicy &policy, bool ) {
         if ( mSessionManager )
@@ -2140,6 +2156,8 @@ QWidget *QgsAiSettingsDialog::buildGalleryConnectorsPage()
       client->deleteLater();
     } );
     connect( client, &QgsAiGalleryCloudClient::requestFailed, this, [this, client]( const QString &message ) {
+      if ( !cloudTransferCurrent( client ) )
+        return;
       mConnectorsStatusLabel->setText( message );
       client->deleteLater();
     } );
@@ -2534,94 +2552,9 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
   refreshIndexStatusLabel();
   contentLayout->addWidget( mIndexStatusLabel );
 
-  contentLayout->addWidget( sectionHeader( tr( "Strata Cloud sync" ), page ) );
-
-  mCloudContextOptIn = new QCheckBox( page );
-  mCloudContextOptIn->setObjectName( u"aiCloudContextOptInCheckBox"_s );
-  mCloudContextOptIn->setChecked( indexSettings.value( u"strata/index/cloud_context_opt_in"_s, false ).toBool() );
-  contentLayout->addWidget(
-    settingRow( tr( "Sync safe RAG context to Strata Cloud" ), tr( "Only metadata-safe layer summaries and opted-in rules/skills/PDF/image text are sent. Geometry, coordinates, WKT and datasource URIs are blocked before upload." ), mCloudContextOptIn, page )
-  );
-
-  mCloudIndexStatusLabel = new QLabel( page );
-  mCloudIndexStatusLabel->setObjectName( u"aiCloudIndexStatusLabel"_s );
-  mCloudIndexStatusLabel->setWordWrap( true );
-  refreshCloudIndexStatusLabel();
-  contentLayout->addWidget( mCloudIndexStatusLabel );
-
-  mSyncCloudContextButton = new QPushButton( tr( "Sync safe context now" ), page );
-  mSyncCloudContextButton->setObjectName( u"aiSyncCloudContextButton"_s );
-  mSyncCloudContextButton->setEnabled( mSessionManager && mSessionManager->workspaceIndex() && mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty() );
-  contentLayout->addWidget( settingRow( tr( "Cloud sync" ), QString(), mSyncCloudContextButton, page ) );
-
-  connect( mCloudContextOptIn, &QCheckBox::toggled, this, [this]( bool ) { refreshCloudIndexStatusLabel(); } );
-
-  connect( mSyncCloudContextButton, &QPushButton::clicked, this, [this]() {
-    if ( !mSessionManager || !mSessionManager->workspaceIndex() || !mModelRouter )
-      return;
-
-    if ( !mCloudContextOptIn->isChecked() )
-    {
-      QMessageBox::information( this, tr( "Cloud context sync" ), tr( "Enable the Strata Cloud context sync opt-in before uploading context." ) );
-      return;
-    }
-
-    const QString token = mModelRouter->planSessionToken().trimmed();
-    if ( token.isEmpty() )
-    {
-      QMessageBox::information( this, tr( "Cloud context sync" ), tr( "Sign in to Plan Account before syncing cloud context." ) );
-      return;
-    }
-
-    auto buildCloudContextItems = [this]() {
-      QList<QgsAiCloudIndexClient::ContextItem> items;
-      if ( mSessionManager && mSessionManager->workspaceIndex() )
-      {
-        mSessionManager->workspaceIndex()->ensureLoaded();
-        items += QgsAiCloudIndexClient::contextItemsFromChunks( mSessionManager->workspaceIndex()->chunks() );
-      }
-      if ( mSessionManager )
-      {
-        const QgsAiAgentBehaviorSettings behavior = mSessionManager->agentBehaviorSettings();
-        items += QgsAiCloudIndexClient::
-          contextItemsFromWorkspaceFolders( mSessionManager->workspaceRoot(), behavior.loadWorkspaceRules ? behavior.rulesPath : QString(), behavior.loadWorkspaceSkills ? behavior.skillsPath : QString() );
-      }
-      return QgsAiCloudIndexClient::deduplicateContextItems( items );
-    };
-
-    const QList<QgsAiCloudIndexClient::ContextItem> items = buildCloudContextItems();
-    QString validationError;
-    if ( !QgsAiCloudIndexClient::validateContextItems( items, &validationError ) )
-    {
-      QMessageBox::warning( this, tr( "Cloud context sync blocked" ), validationError );
-      refreshCloudIndexStatusLabel();
-      return;
-    }
-
-    const QString workspaceRoot = mSessionManager->workspaceRoot();
-    if ( workspaceRoot.trimmed().isEmpty() )
-    {
-      QMessageBox::warning( this, tr( "Cloud context sync" ), tr( "Workspace root is unset." ) );
-      return;
-    }
-
-    mSyncCloudContextButton->setEnabled( false );
-    mCloudIndexStatusLabel->setText( tr( "Cloud sync running..." ) );
-    QgsAiCloudIndexClient *client = new QgsAiCloudIndexClient( this );
-    connect( client, &QgsAiCloudIndexClient::contextSynced, this, [this, client]( const QgsAiCloudIndexClient::SyncResult &result ) {
-      mSyncCloudContextButton->setEnabled( true );
-      mCloudIndexStatusLabel->setText( tr( "Cloud sync queued %1 context items for workspace %2." ).arg( result.queued ).arg( result.workspaceId ) );
-      refreshCloudIndexStatusLabel();
-      client->deleteLater();
-    } );
-    connect( client, &QgsAiCloudIndexClient::requestFailed, this, [this, client]( const QString &message ) {
-      mSyncCloudContextButton->setEnabled( true );
-      mCloudIndexStatusLabel->setText( tr( "Cloud sync failed." ) );
-      QMessageBox::warning( this, tr( "Cloud context sync failed" ), message );
-      client->deleteLater();
-    } );
-    client->syncWorkspaceContext( mAccountWidget->planEndpoint(), token, workspaceRoot, QFileInfo( workspaceRoot ).fileName(), items, true );
-  } );
+  QPushButton *cloudLink = new QPushButton( tr( "Manage transfers in Workspace and Cloud…" ), page );
+  connect( cloudLink, &QPushButton::clicked, this, [this]() { showSection( u"workspace"_s ); } );
+  contentLayout->addWidget( cloudLink );
 
   contentLayout->addWidget( sectionHeader( tr( "Maintenance" ), page ) );
 
@@ -2652,9 +2585,11 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
   connect( mClearIndexButton, &QPushButton::clicked, this, [this, refreshIndexSize]() {
     if ( !mSessionManager || !mSessionManager->workspaceIndex() )
       return;
-    if ( QMessageBox::
-           question( this, tr( "Clear index" ), tr( "Delete the index of this workspace? The assistant finds files and layers again once they are indexed anew." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No )
-         != QMessageBox::Yes )
+    if (
+      QMessageBox::
+        question( this, tr( "Clear index" ), tr( "Delete the index of this workspace? The assistant finds files and layers again once they are indexed anew." ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No )
+      != QMessageBox::Yes
+    )
       return;
     mSessionManager->workspaceIndex()->clear();
     refreshIndexSize();
@@ -2777,8 +2712,32 @@ QWidget *QgsAiSettingsDialog::buildIndexingPage()
 QWidget *QgsAiSettingsDialog::buildWorkspacePage()
 {
   QVBoxLayout *contentLayout = nullptr;
-  QWidget *page = createPage( tr( "Workspace" ), tr( "Where the assistant reads and writes files." ), contentLayout );
+  QWidget *page = createPage( tr( "Workspace and Cloud" ), tr( "Choose where the assistant works and what you share with Strata Cloud." ), contentLayout );
 
+  QVBoxLayout *sectionsLayout = contentLayout;
+  sectionsLayout->setSpacing( 16 );
+  const auto group = [page, sectionsLayout]( const QString &title ) {
+    QFrame *frame = new QFrame( page );
+    frame->setObjectName( u"aiWorkspaceGroup"_s );
+    frame->setStyleSheet( u"QFrame#aiWorkspaceGroup { background: palette(base); border: 1px solid palette(midlight); border-radius: 10px; }"_s );
+    QVBoxLayout *body = new QVBoxLayout( frame );
+    body->setContentsMargins( 16, 12, 16, 16 );
+    body->setSpacing( 8 );
+    QLabel *heading = new QLabel( title, frame );
+    QFont font = heading->font();
+    font.setBold( true );
+    heading->setFont( font );
+    body->addWidget( heading );
+    sectionsLayout->addWidget( frame );
+    return body;
+  };
+  contentLayout = group( tr( "Local folder" ) );
+  mEffectiveWorkspaceLabel = new QLabel( page );
+  mEffectiveWorkspaceLabel->setObjectName( u"aiEffectiveWorkspaceLabel"_s );
+  mEffectiveWorkspaceLabel->setWordWrap( true );
+  mEffectiveWorkspaceLabel->setTextFormat( Qt::PlainText );
+  mEffectiveWorkspaceLabel->setTextInteractionFlags( Qt::TextSelectableByMouse );
+  contentLayout->addWidget( mEffectiveWorkspaceLabel );
   QgsSettings workspaceSettings;
   mWorkspaceRoot
     = new QLineEdit( settingValueWithLegacy( workspaceSettings, u"strata/workspace/root"_s, QStringList { u"geoai/workspace/root"_s, u"qgis_ai/workspace/root"_s }, QString() ).toString(), page );
@@ -2790,12 +2749,14 @@ QWidget *QgsAiSettingsDialog::buildWorkspacePage()
   workspaceRootLayout->setContentsMargins( 0, 0, 0, 0 );
   workspaceRootLayout->addWidget( mWorkspaceRoot, 1 );
   workspaceRootLayout->addWidget( browseWorkspaceRoot );
-  contentLayout->addWidget( settingRowFullWidth( tr( "AI workspace root" ), tr( "Used only when the current QGIS project has no home path." ), workspaceRootWidget, page ) );
+  contentLayout->addWidget(
+    settingRowFullWidth( tr( "Alternative folder" ), tr( "Used only when the current project has no home folder. Save changes with OK before transferring." ), workspaceRootWidget, page )
+  );
 
   // Workspace trust: gates rules/skills loading and the risky tools.
   mTrustWorkspace = new QCheckBox( page );
   mTrustWorkspace->setObjectName( u"aiTrustWorkspaceCheckBox"_s );
-  contentLayout->addWidget( settingRow( tr( "Trust this workspace" ), tr( "Enables rules/skills files and the run_python, install_python_package and download_file tools." ), mTrustWorkspace, page ) );
+  contentLayout->addWidget( settingRow( tr( "Trust this workspace" ), tr( "Allows workspace instructions and approved file operations." ), mTrustWorkspace, page ) );
   refreshTrustWorkspace();
 
   connect( browseWorkspaceRoot, &QPushButton::clicked, this, [this]() {
@@ -2805,6 +2766,93 @@ QWidget *QgsAiSettingsDialog::buildWorkspacePage()
   } );
   connect( mWorkspaceRoot, &QLineEdit::textChanged, this, [this]( const QString & ) { refreshTrustWorkspace(); } );
 
+  contentLayout = group( tr( "Strata Cloud account" ) );
+  mWorkspaceAccountLabel = new QLabel( page );
+  mWorkspaceAccountLabel->setObjectName( u"aiWorkspaceAccountLabel"_s );
+  mWorkspaceAccountLabel->setTextFormat( Qt::PlainText );
+  mWorkspaceAccountLabel->setWordWrap( true );
+  contentLayout->addWidget( mWorkspaceAccountLabel );
+  QPushButton *accountLink = new QPushButton( tr( "Open account…" ), page );
+  accountLink->setObjectName( u"aiWorkspaceAccountButton"_s );
+  connect( accountLink, &QPushButton::clicked, this, [this]() { showSection( u"account"_s ); } );
+  contentLayout->addWidget( accountLink, 0, Qt::AlignLeft );
+  mCloudPrerequisitesLabel = new QLabel( page );
+  mCloudPrerequisitesLabel->setObjectName( u"aiCloudPrerequisitesLabel"_s );
+  mCloudPrerequisitesLabel->setWordWrap( true );
+  contentLayout->addWidget( mCloudPrerequisitesLabel );
+
+  contentLayout = group( tr( "Shared content" ) );
+  QToolButton *sharingDetails = new QToolButton( page );
+  sharingDetails->setText( tr( "What will be shared?" ) );
+  sharingDetails->setAccessibleName( sharingDetails->text() );
+  sharingDetails->setToolButtonStyle( Qt::ToolButtonTextBesideIcon );
+  sharingDetails->setArrowType( Qt::RightArrow );
+  sharingDetails->setCheckable( true );
+  sharingDetails->setAutoRaise( true );
+  contentLayout->addWidget( sharingDetails, 0, Qt::AlignLeft );
+  QLabel *boundary = new QLabel(
+    tr(
+      "AI context includes safe layer summaries and opted-in rules, skills and extracted document text. Geometry, coordinates, WKT and datasource URIs are blocked. "
+      "Original GIS files remain on this computer. PDF-to-DXF folders in Strata Tavole are separate. "
+      "Rules and skills are copied explicitly; imports show conflicts and keep local files unless you choose otherwise."
+    ),
+    page
+  );
+  boundary->setWordWrap( true );
+  boundary->setProperty( "aiRole", u"rowDescription"_s );
+  boundary->hide();
+  connect( sharingDetails, &QToolButton::toggled, this, [sharingDetails, boundary]( bool expanded ) {
+    sharingDetails->setArrowType( expanded ? Qt::DownArrow : Qt::RightArrow );
+    boundary->setVisible( expanded );
+  } );
+  contentLayout->addWidget( boundary );
+  mCloudContextOptIn = new QCheckBox( tr( "Allow sending AI context" ), page );
+  mCloudContextOptIn->setObjectName( u"aiCloudContextOptInCheckBox"_s );
+  mCloudContextOptIn->setChecked( workspaceSettings.value( u"strata/index/cloud_context_opt_in"_s, false ).toBool() );
+  contentLayout->addWidget( settingRowFullWidth( tr( "AI context" ), tr( "This computer → Strata Cloud" ), mCloudContextOptIn, page ) );
+  mCloudIndexStatusLabel = new QLabel( page );
+  mCloudIndexStatusLabel->setObjectName( u"aiCloudIndexStatusLabel"_s );
+  mCloudIndexStatusLabel->setWordWrap( true );
+  contentLayout->addWidget( mCloudIndexStatusLabel );
+  QPushButton *refreshPreview = new QPushButton( tr( "Refresh preview" ), page );
+  refreshPreview->setObjectName( u"aiRefreshCloudPreviewButton"_s );
+  connect( refreshPreview, &QPushButton::clicked, this, &QgsAiSettingsDialog::refreshCloudIndexStatusLabel );
+  QHBoxLayout *contextActions = new QHBoxLayout();
+  contextActions->setSpacing( 8 );
+  contextActions->addWidget( refreshPreview );
+  mSyncCloudContextButton = new QPushButton( tr( "Send AI context" ), page );
+  mSyncCloudContextButton->setObjectName( u"aiSyncCloudContextButton"_s );
+  connect( mSyncCloudContextButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::syncCloudContext );
+  contextActions->addWidget( mSyncCloudContextButton );
+  contextActions->addStretch( 1 );
+  contentLayout->addLayout( contextActions );
+  mCloudTransferStatusLabel = new QLabel( page );
+  mCloudTransferStatusLabel->setObjectName( u"aiCloudTransferStatusLabel"_s );
+  mCloudTransferStatusLabel->setWordWrap( true );
+  mCloudTransferStatusLabel->setTextFormat( Qt::PlainText );
+  contentLayout->addWidget( mCloudTransferStatusLabel );
+  QWidget *cloudButtons = new QWidget( page );
+  QVBoxLayout *cloudButtonsLayout = new QVBoxLayout( cloudButtons );
+  cloudButtonsLayout->setContentsMargins( 0, 0, 0, 0 );
+  mSyncRulesSkillsCloudButton = new QPushButton( tr( "Send rules and skills" ), cloudButtons );
+  mSyncRulesSkillsCloudButton->setObjectName( u"aiSyncRulesSkillsCloudButton"_s );
+  mSyncRulesSkillsCloudButton->setEnabled( mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty() );
+  mImportRulesSkillsCloudButton = new QPushButton( tr( "Import rules and skills…" ), cloudButtons );
+  mImportRulesSkillsCloudButton->setObjectName( u"aiImportRulesSkillsCloudButton"_s );
+  mImportRulesSkillsCloudButton->setEnabled( mModelRouter && !mModelRouter->planSessionToken().trimmed().isEmpty() );
+  cloudButtonsLayout->addWidget( mSyncRulesSkillsCloudButton );
+  cloudButtonsLayout->addWidget( mImportRulesSkillsCloudButton );
+  QWidget *rulesCloudRow = settingRow( tr( "Rules and skills" ), tr( "%1 rules · %2 skills on this computer" ).arg( mRulesListWidget->count() ).arg( mSkillsListWidget->count() ), cloudButtons, page );
+  rulesCloudRow->setObjectName( u"aiRulesCloudRow"_s );
+  contentLayout->addWidget( rulesCloudRow );
+  mRulesSkillsCloudStatusLabel = new QLabel( page );
+  mRulesSkillsCloudStatusLabel->setWordWrap( true );
+  mRulesSkillsCloudStatusLabel->setProperty( "aiRole", u"rowDescription"_s );
+  contentLayout->addWidget( mRulesSkillsCloudStatusLabel );
+  connect( mSyncRulesSkillsCloudButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::syncRulesSkillsToCloud );
+  connect( mImportRulesSkillsCloudButton, &QPushButton::clicked, this, &QgsAiSettingsDialog::importRulesSkillsFromCloud );
+
+  initializeCloudWorkspace();
   return page;
 }
 
@@ -2974,7 +3022,7 @@ void QgsAiSettingsDialog::refreshTrustWorkspace()
     }
 
     const QString requestedWorkspaceRoot = mWorkspaceRoot->text().trimmed();
-    return requestedWorkspaceRoot.isEmpty() ? QString() : QDir( requestedWorkspaceRoot ).absolutePath();
+    return requestedWorkspaceRoot.isEmpty() ? ( mSessionManager ? mSessionManager->workspaceRoot() : QString() ) : QDir( requestedWorkspaceRoot ).absolutePath();
   };
 
   mTrustRootForCheckbox = trustRoot();
@@ -3070,52 +3118,6 @@ void QgsAiSettingsDialog::refreshIndexStatusLabel()
   }
 }
 
-void QgsAiSettingsDialog::refreshCloudIndexStatusLabel()
-{
-  QList<QgsAiCloudIndexClient::ContextItem> items;
-  if ( mSessionManager && mSessionManager->workspaceIndex() )
-  {
-    mSessionManager->workspaceIndex()->ensureLoaded();
-    items += QgsAiCloudIndexClient::contextItemsFromChunks( mSessionManager->workspaceIndex()->chunks() );
-  }
-  if ( mSessionManager )
-  {
-    const QgsAiAgentBehaviorSettings behavior = mSessionManager->agentBehaviorSettings();
-    items += QgsAiCloudIndexClient::
-      contextItemsFromWorkspaceFolders( mSessionManager->workspaceRoot(), behavior.loadWorkspaceRules ? behavior.rulesPath : QString(), behavior.loadWorkspaceSkills ? behavior.skillsPath : QString() );
-  }
-  items = QgsAiCloudIndexClient::deduplicateContextItems( items );
-
-  if ( items.isEmpty() )
-  {
-    mCloudIndexStatusLabel->setText( tr( "Cloud sync preview: no safe context items yet." ) );
-    return;
-  }
-  QString validationError;
-  if ( !QgsAiCloudIndexClient::validateContextItems( items, &validationError ) )
-  {
-    mCloudIndexStatusLabel->setText( tr( "Cloud sync preview blocked: %1" ).arg( validationError ) );
-    return;
-  }
-  int layerItems = 0;
-  int ruleItems = 0;
-  int skillItems = 0;
-  int documentItems = 0;
-  for ( const QgsAiCloudIndexClient::ContextItem &item : items )
-  {
-    if ( item.sourceType == "layer"_L1 )
-      ++layerItems;
-    else if ( item.sourceType == "rule"_L1 )
-      ++ruleItems;
-    else if ( item.sourceType == "skill"_L1 )
-      ++skillItems;
-    else if ( item.sourceType == "pdf"_L1 || item.sourceType == "image"_L1 )
-      ++documentItems;
-  }
-  mCloudIndexStatusLabel->setText(
-    tr( "Cloud sync preview: %1 items (%2 layer, %3 rule, %4 skill, %5 document)." ).arg( items.size() ).arg( layerItems ).arg( ruleItems ).arg( skillItems ).arg( documentItems )
-  );
-}
 
 QString QgsAiSettingsDialog::onboardingStatusText() const
 {

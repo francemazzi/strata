@@ -623,6 +623,11 @@ void QgsAiCloudIndexClient::postContextBatch(
   const QString &apiBase, const QString &sessionToken, const QString &workspaceId, const QList<ContextItem> &items, int offset, int accumulatedUpserted, int accumulatedQueued, bool contentOptIn
 )
 {
+  // A settings/account/workspace change invalidates the remaining batches even
+  // if a reply arrives before the dialog's deferred client deletion runs.
+  if ( property( "cloudTransferInvalidated" ).toBool() )
+    return;
+
   if ( offset >= items.size() )
   {
     emit contextSynced( SyncResult { workspaceId, accumulatedUpserted, accumulatedQueued } );

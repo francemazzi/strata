@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include "qgsaichatdockwidget.h"
+#include "qgsaiiconbutton.h"
 
 #include <algorithm>
 #include <utility>
@@ -762,7 +763,7 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   QWidget *container = new QWidget( this );
   QVBoxLayout *layout = new QVBoxLayout( container );
   layout->setContentsMargins( 8, 8, 8, 8 );
-  layout->setSpacing( 6 );
+  layout->setSpacing( 8 );
 
   QHBoxLayout *topBar = new QHBoxLayout();
   topBar->setContentsMargins( 0, 0, 0, 0 );
@@ -770,16 +771,12 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
 
   mNewChatButton = new QToolButton( container );
   mNewChatButton->setObjectName( u"aiNewChatButton"_s );
-  mNewChatButton->setText( tr( "+ New" ) );
-  mNewChatButton->setToolTip( tr( "Start a new chat" ) );
-  mNewChatButton->setAutoRaise( true );
+  QgsAiIconButton::configure( mNewChatButton, QgsAiIconButton::Symbol::NewChat, tr( "New chat" ) );
   topBar->addWidget( mNewChatButton );
 
   mHistoryButton = new QToolButton( container );
   mHistoryButton->setObjectName( u"aiHistoryButton"_s );
-  mHistoryButton->setText( tr( "History" ) + u" ▾"_s );
-  mHistoryButton->setToolTip( tr( "Past chats in this project" ) );
-  mHistoryButton->setAutoRaise( true );
+  QgsAiIconButton::configure( mHistoryButton, QgsAiIconButton::Symbol::History, tr( "Chat history" ), tr( "Past chats in this project" ) );
   mHistoryButton->setPopupMode( QToolButton::InstantPopup );
   mHistoryButton->setMenu( new QMenu( mHistoryButton ) );
   topBar->addWidget( mHistoryButton );
@@ -881,6 +878,24 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   retryButton->setObjectName( u"aiRequestErrorRetry"_s );
   retryButton->setToolTip( tr( "Resume the interrupted response without repeating completed tools." ) );
   connect( retryButton, &QPushButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
+  QTimer *resumeTimer = new QTimer( retryButton );
+  resumeTimer->setInterval( 250 );
+  const auto refreshResume = [this, retryButton]() {
+    qint64 retryAt = 0;
+    bool interrupted = false;
+    if ( mSessionManager && !mSessionManager->history().isEmpty() )
+    {
+      const auto last = mSessionManager->history().last();
+      interrupted = last.metadata.value( u"ui_kind"_s ).toString() == "request_error"_L1;
+      retryAt = last.metadata.value( u"retry_at_ms"_s ).toLongLong();
+    }
+    const qint64 seconds = std::max<qint64>( 0, ( retryAt - QDateTime::currentMSecsSinceEpoch() + 999 ) / 1000 );
+    retryButton->setText( seconds ? tr( "Resume in %1 s" ).arg( seconds ) : tr( "Resume" ) );
+    retryButton->setEnabled( interrupted && !mRequestRunning && seconds == 0 );
+  };
+  connect( resumeTimer, &QTimer::timeout, retryButton, refreshResume );
+  refreshResume();
+  resumeTimer->start();
   errorActions->addWidget( retryButton );
   errorActions->addStretch( 1 );
   QPushButton *dismissErrorButton = new QPushButton( tr( "Hide notice" ), mErrorBanner );
@@ -1051,7 +1066,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
 
   mRuntimeStatusLabel = new QLabel( container );
   mRuntimeStatusLabel->setObjectName( u"aiRuntimeStatusLabel"_s );
-  mRuntimeStatusLabel->setText( tr( "Provider state: idle - Ready." ) );
+  mRuntimeStatusLabel->setText( tr( "Ready" ) );
+  mRuntimeStatusLabel->hide();
 
   QHBoxLayout *statusRow = new QHBoxLayout();
   statusRow->setContentsMargins( 0, 0, 0, 0 );
@@ -1486,8 +1502,8 @@ void QgsAiChatDockWidget::applyPillStyling()
     "QToolButton:hover { background: palette(alternate-base); } "
     "QToolButton:pressed, QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
   );
-  mNewChatButton->setStyleSheet( pillStyle );
-  mHistoryButton->setStyleSheet( pillStyle );
+  QgsAiIconButton::configure( mNewChatButton, QgsAiIconButton::Symbol::NewChat, tr( "New chat" ) );
+  QgsAiIconButton::configure( mHistoryButton, QgsAiIconButton::Symbol::History, tr( "Chat history" ), tr( "Past chats in this project" ) );
   mModePill->setStyleSheet( pillStyle );
   mModelPill->setStyleSheet( pillStyle );
 
@@ -1602,18 +1618,7 @@ void QgsAiChatDockWidget::appendTranscriptMessage( const QgsAiChatMessage &messa
     if ( message.role == QgsAiChatRole::User )
     {
       QHBoxLayout *row = createMessageActionsRow( message, messageWidget );
-      // Shown once the turn has changes that can be undone (refreshUndoTurnButtons).
-      QPushButton *undoTurn = new QPushButton( tr( "Undo this turn" ), messageWidget );
-      undoTurn->setObjectName( u"aiUndoTurnButton"_s );
-      undoTurn->setToolTip( tr( "Undo every change the assistant made in answer to this message." ) );
-      undoTurn->setProperty( "message_id", message.id );
-      undoTurn->setVisible( false );
-      undoTurn->setStyleSheet( u"QPushButton#aiUndoTurnButton { background: palette(button); color: palette(window-text); border: 0; border-radius: 6px; padding: 3px 10px; }"_s );
-      const QString messageId = message.id;
-      connect( undoTurn, &QPushButton::clicked, this, [this, messageId]() { undoTurnFromChat( messageId ); } );
-      row->addWidget( undoTurn );
       cardLayout->addLayout( row );
-      mUndoTurnButtons << undoTurn;
     }
   }
 
@@ -1637,38 +1642,50 @@ QHBoxLayout *QgsAiChatDockWidget::createMessageActionsRow( const QgsAiChatMessag
 {
   QHBoxLayout *row = new QHBoxLayout();
   row->setContentsMargins( 0, 0, 0, 0 );
-  const QString buttonStyle = u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s;
-  const auto addAction = [&]( const QString &objectName, const QString &text, const QString &tip ) {
+  row->setSpacing( 4 );
+  const auto addAction = [&]( const QString &objectName, QgsAiIconButton::Symbol symbol, const QString &text, const QString &tip ) {
     QToolButton *button = new QToolButton( card );
     button->setObjectName( objectName );
-    button->setText( text );
-    button->setToolTip( tip );
-    button->setAutoRaise( true );
-    button->setStyleSheet( buttonStyle );
+    QgsAiIconButton::configure( button, symbol, text, tip );
     row->addWidget( button );
     return button;
   };
   const QString messageId = message.id;
   const QString text = message.content;
-  QToolButton *copy = addAction( u"aiCopyMessageButton"_s, tr( "Copy" ), tr( "Copy the message text." ) );
-  connect( copy, &QToolButton::clicked, this, [text]() { QApplication::clipboard()->setText( text ); } );
+  QToolButton *copy = addAction( u"aiCopyMessageButton"_s, QgsAiIconButton::Symbol::Copy, tr( "Copy" ), tr( "Copy the message text." ) );
+  connect( copy, &QToolButton::clicked, this, [text, copy]() {
+    QApplication::clipboard()->setText( text );
+    QgsAiIconButton::copied( copy );
+  } );
   if ( message.role == QgsAiChatRole::User )
   {
-    QToolButton *editButton = addAction( u"aiEditMessageButton"_s, tr( "Edit" ), tr( "Change this message and send it again; what came after it is undone and dropped." ) );
+    QToolButton *editButton = addAction( u"aiEditMessageButton"_s, QgsAiIconButton::Symbol::Edit, tr( "Edit" ), tr( "Change this message and send it again; what came after it is undone and dropped." ) );
     connect( editButton, &QToolButton::clicked, this, [this, messageId, text]() {
       bool ok = false;
       const QString edited = QInputDialog::getMultiLineText( this, tr( "Edit message" ), tr( "Message" ), text, &ok );
       if ( ok && !edited.trimmed().isEmpty() )
         editAndResendFromChat( messageId, edited );
     } );
-    QToolButton *retry = addAction( u"aiRetryMessageButton"_s, tr( "Restart this turn" ), tr( "Send this message again; what came after it is undone and dropped." ) );
-    connect( retry, &QToolButton::clicked, this, [this, messageId, text]() { editAndResendFromChat( messageId, text ); } );
+    QToolButton *more = addAction( u"aiMoreMessageButton"_s, QgsAiIconButton::Symbol::More, tr( "More actions" ), tr( "Restart or undo this turn" ) );
+    QMenu *menu = new QMenu( more );
+    more->setMenu( menu );
+    more->setPopupMode( QToolButton::InstantPopup );
+    QAction *restart = menu->addAction( tr( "Restart this turn…" ) );
+    restart->setObjectName( u"aiRetryMessageButton"_s );
+    restart->setToolTip( tr( "Send this message again; what came after it is undone and dropped." ) );
+    connect( restart, &QAction::triggered, this, [this, messageId, text]() { editAndResendFromChat( messageId, text ); } );
+    QAction *undo = menu->addAction( tr( "Undo this turn" ) );
+    undo->setObjectName( u"aiUndoTurnButton"_s );
+    undo->setProperty( "message_id", messageId );
+    undo->setEnabled( false );
+    mUndoTurnButtons << undo;
+    connect( undo, &QAction::triggered, this, [this, messageId]() { undoTurnFromChat( messageId ); } );
+    connect( menu, &QMenu::aboutToShow, this, [this, restart, undo, messageId]() {
+      restart->setEnabled( !mRequestRunning );
+      undo->setEnabled( !mRequestRunning && mSessionManager && !mSessionManager->undoableToolCallsInTurn( messageId ).isEmpty() );
+    } );
   }
-  if ( message.metadata.value( u"ui_kind"_s ).toString() == "request_error"_L1 )
-  {
-    QToolButton *resume = addAction( u"aiResumeMessageButton"_s, tr( "Resume" ), tr( "Resume without repeating completed tools." ) );
-    connect( resume, &QToolButton::clicked, this, &QgsAiChatDockWidget::retryFromChat );
-  }
+
   row->addStretch( 1 );
   return row;
 }
@@ -1689,7 +1706,7 @@ void QgsAiChatDockWidget::retryFromChat()
   hideRequestError();
   QString error;
   if ( !mSessionManager->resumeLastInterruptedTurn( &error ) )
-    QMessageBox::warning( this, tr( "Retry" ), error );
+    QMessageBox::warning( this, tr( "Resume" ), error );
 }
 
 bool QgsAiChatDockWidget::isTranscriptAtBottom() const
@@ -1763,11 +1780,11 @@ QWidget *QgsAiChatDockWidget::createToolResultActionsWidget( const QgsAiChatMess
 
 void QgsAiChatDockWidget::refreshUndoTurnButtons()
 {
-  for ( const QPointer<QPushButton> &button : std::as_const( mUndoTurnButtons ) )
+  for ( const QPointer<QAction> &button : std::as_const( mUndoTurnButtons ) )
   {
     if ( !button || !mSessionManager )
       continue;
-    button->setVisible( !mRequestRunning && !mSessionManager->undoableToolCallsInTurn( button->property( "message_id" ).toString() ).isEmpty() );
+    button->setEnabled( !mRequestRunning && !mSessionManager->undoableToolCallsInTurn( button->property( "message_id" ).toString() ).isEmpty() );
   }
 }
 
@@ -1973,15 +1990,15 @@ QWidget *QgsAiChatDockWidget::createMessageWidget( const QString &role, const QS
   {
     card->setStyleSheet( QStringLiteral(
       "QFrame#aiMessage { border: 0; border-radius: 0; background: palette(base); } "
-      "QLabel#aiMessageRole { color: palette(mid); font-weight: 600; } "
+      "QLabel#aiMessageRole { color: palette(window-text); font-weight: 600; } "
       "QLabel#aiMessageBody { color: palette(text); } "
       "QLabel#aiPlanStatusLabel, QLabel#aiQuestionsStatusLabel, QLabel#aiToolLimitStatusLabel { color: palette(highlight); font-weight: 600; }"
     ) );
   }
 
   QVBoxLayout *cardLayout = new QVBoxLayout( card );
-  cardLayout->setContentsMargins( 8, 6, 8, 8 );
-  cardLayout->setSpacing( 6 );
+  cardLayout->setContentsMargins( 12, 8, 12, 8 );
+  cardLayout->setSpacing( 8 );
 
   QHBoxLayout *headerLayout = new QHBoxLayout();
   headerLayout->setContentsMargins( 0, 0, 0, 0 );
@@ -2099,10 +2116,11 @@ QWidget *QgsAiChatDockWidget::createCollapsibleSection( const QString &title, co
   // Copy without opening the section first.
   QToolButton *copy = new QToolButton( section );
   copy->setObjectName( u"aiCopyCodeButton"_s );
-  copy->setText( tr( "Copy" ) );
-  copy->setAutoRaise( true );
-  copy->setStyleSheet( u"QToolButton { color: palette(mid); border: 0; padding: 1px 4px; } QToolButton:hover { color: palette(window-text); }"_s );
-  connect( copy, &QToolButton::clicked, section, [content]() { QApplication::clipboard()->setText( content ); } );
+  QgsAiIconButton::configure( copy, QgsAiIconButton::Symbol::Copy, tr( "Copy code" ) );
+  connect( copy, &QToolButton::clicked, section, [content, copy]() {
+    QApplication::clipboard()->setText( content );
+    QgsAiIconButton::copied( copy );
+  } );
   header->addWidget( copy );
   layout->addLayout( header );
 
@@ -3122,7 +3140,7 @@ void QgsAiChatDockWidget::appendStreamChunk( const QString &chunk )
     card->setFrameShape( QFrame::NoFrame );
     applyTranscriptWidthPolicy( card );
     card->setStyleSheet(
-      u"QFrame#aiStreamingMessage { border: 0; border-radius: 0; background: palette(base); } QLabel#aiMessageRole { color: palette(mid); font-weight: 600; } QTextEdit#aiStreamingTextEdit { color: palette(text); background: transparent; border: 0; }"_s
+      u"QFrame#aiStreamingMessage { border: 0; border-radius: 0; background: palette(base); } QLabel#aiMessageRole { color: palette(window-text); font-weight: 600; } QTextEdit#aiStreamingTextEdit { color: palette(text); background: transparent; border: 0; }"_s
     );
     QVBoxLayout *layout = new QVBoxLayout( card );
     layout->setContentsMargins( 8, 6, 8, 8 );
@@ -3198,6 +3216,7 @@ void QgsAiChatDockWidget::updateRuntimeState( const QString &state, const QStrin
 {
   const QString text = tr( "Provider state: %1 - %2" ).arg( state, detail );
   mRuntimeStatusLabel->setText( text );
+  mRuntimeStatusLabel->setVisible( mRequestRunning );
   if ( state == "sending"_L1 )
     hideRequestError();
   if ( mSendButton )
@@ -3307,7 +3326,8 @@ void QgsAiChatDockWidget::setRequestRunning( bool running )
   if ( !running && !mQueuedMessages.isEmpty() )
     QTimer::singleShot( 0, this, &QgsAiChatDockWidget::sendNextQueuedMessage );
   if ( mCancelButton )
-    mCancelButton->setEnabled( running );
+    mCancelButton->setVisible( false ); // Send/Stop and the live tool card already stop the same request.
+  mRuntimeStatusLabel->setVisible( running );
   // Tools pump the event loop: keep mode and model fixed until the turn ends, so approvals and
   // the provider chain stay those the turn started with.
   if ( mModePill )
@@ -4218,12 +4238,14 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
 
   // If the user already has a key for any of the standard providers, don't
   // bother them — just remember we've seen it and move on.
-  if ( mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi )
-       || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
-       || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
-       || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
-       || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
-       || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan ) )
+  if (
+    mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi )
+    || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
+    || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
+    || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
+    || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
+    || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan )
+  )
   {
     settings.setValue( u"strata/welcome_seen"_s, true );
     settings.remove( u"geoai/welcome_seen"_s );

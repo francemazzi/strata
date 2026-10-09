@@ -41,6 +41,10 @@
 - Gli ID tra parentesi (CTX/AGT/TAB/REV/WFL/ENT/MAP) sono gli ID dell'ex backlog dettagliato, ora inline
 - Il suffisso **(need: N)** indica in quanti dei 27 meeting utente (Granola, mag–lug 2026) è emerso quel bisogno
 
+## Aggiornamento desktop — 9 ottobre 2026
+
+Implementata sul branch `feat/desktop-ui-cloud` la semplificazione delle azioni chat a icona e la pagina centrale Workspace and Cloud, con anteprime asincrone, gestione delle impostazioni pendenti e isolamento dei trasferimenti al cambio di contesto. [Dettagli e verifiche](docs/implementation/desktop-ui-cloud.md). Restano da completare accettazione dei pacchetti macOS/Windows e smoke cloud reale prima della distribuzione; questo aggiornamento non modifica le attività o le percentuali delle fasi approvate.
+
 ## Vista d'insieme
 
 

@@ -287,7 +287,7 @@ class APP_EXPORT QgsAiChatDockWidget : public QgsDockWidget
     QTimer *mLiveToolTimer = nullptr;
     QElapsedTimer mLiveToolClock;
     QString mLiveToolCallId;
-    QList<QPointer<QPushButton>> mUndoTurnButtons;
+    QList<QPointer<QAction>> mUndoTurnButtons;
 };
 
 #endif // QGSAICHATDOCKWIDGET_H

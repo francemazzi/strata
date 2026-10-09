@@ -318,6 +318,9 @@ class APP_EXPORT QgsAiWorkspaceIndex : public QObject
      */
     bool ensureLoaded();
 
+    //! Copies only text metadata for Cloud preview; returns false instead of waiting on the cache.
+    bool tryCloudSnapshot( const QString &workspaceRoot, QList<Chunk> &snapshot ) const;
+
     //! Loads the cache in a background task if it is not loaded yet. Never blocks.
     void requestLoad();
 

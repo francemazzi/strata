@@ -361,6 +361,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaicredentialstore.cpp
     ai/qgsaicredentialdialog.cpp
     ai/qgsaisettingsdialog.cpp
+    ai/qgsaiworkspacecloud.cpp
     ai/qgsaivisualcontextutils.cpp
     ai/qgsaiworkspacetrust.cpp
     ai/tools/qgsaiattributetabletools.cpp

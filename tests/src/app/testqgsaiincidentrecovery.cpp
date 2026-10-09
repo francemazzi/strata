@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "ai/qgsaichatdockwidget.h"
+#include <QPushButton>
 #include "qgstest.h"
 #include "qgsapplication.h"
 #include "qgsrasterlayer.h"
@@ -174,11 +176,22 @@ class TestQgsAiIncidentRecovery : public QObject
       QTRY_VERIFY( !restored.history().isEmpty() );
       QVERIFY( !restored.hasActiveRequest() );
       QCOMPARE( restored.history().last().metadata.value( u"ui_kind"_s ).toString(), u"request_error"_s );
+      QgsAiChatDockWidget dock( &restored, &router, &review );
+      auto *resume = dock.findChild<QPushButton *>( u"aiRequestErrorRetry"_s );
+      QVERIFY( resume );
+      QTRY_VERIFY( resume->text().contains( u"Resume in"_s ) );
+      QVERIFY( !resume->isEnabled() );
+      resume->click();
       QString error;
       QVERIFY( !restored.resumeLastInterruptedTurn( &error ) );
       QVERIFY2( error.contains( u"wait ends"_s ), qPrintable( error ) );
       QTest::qWait( 300 );
-      QCOMPARE( server.requestCount, 1 );
+      // Opening the dock may fetch catalogs, but must never replay the chat POST.
+      int chatPosts = 0;
+      for ( const auto &request : server.rawRequests )
+        if ( request.startsWith( "POST " ) )
+          ++chatPosts;
+      QCOMPARE( chatPosts, 1 );
       restored.clearHistory();
       QgsAiAgentSessionManager cleared( &router, &files, &review );
       cleared.setHistoryStore( &store );

@@ -22,6 +22,7 @@
 #include "qgsaicodexoauthclient.h"
 #include "qgsaimodelrouter.h"
 #include "qgsairulesskillsstore.h"
+#include "index/qgsaicloudindexclient.h"
 
 #include <QDialog>
 #include <QPointer>
@@ -51,6 +52,7 @@ class QVBoxLayout;
 class APP_EXPORT QgsAiSettingsDialog : public QDialog
 {
     Q_OBJECT
+    friend class TestQgsAiWorkspaceCloud;
 
   public:
     QgsAiSettingsDialog( QgsAiAgentSessionManager *sessionManager, QgsAiModelRouter *modelRouter, QgsAiLayerIndexCoordinator *layerIndexCoordinator, QWidget *parent = nullptr );
@@ -127,6 +129,27 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     void refreshRemoteEmbeddingModelField();
     void refreshIndexStatusLabel();
     void refreshCloudIndexStatusLabel();
+    void initializeCloudWorkspace();
+    void refreshCloudWorkspaceState();
+    QString cloudScopeKey() const;
+    QString cloudConfiguration() const;
+    bool cloudSettingsPending() const;
+    void syncCloudContext();
+    void beginCloudTransfer( QObject *client );
+    bool cloudTransferCurrent( QObject *client );
+    void finishCloudTransfer( QObject *client );
+
+    QString mInitialCloudConfiguration;
+    QString mObservedCloudScope;
+    QString mPreviewCloudScope;
+    quint64 mCloudPreviewGeneration = 0;
+    bool mCloudPreviewRunning = false;
+    QPointer<QObject> mCloudTransfer;
+    QList<QgsAiCloudIndexClient::ContextItem> mCloudPreviewItems;
+    QLabel *mEffectiveWorkspaceLabel = nullptr;
+    QLabel *mWorkspaceAccountLabel = nullptr;
+    QLabel *mCloudPrerequisitesLabel = nullptr;
+    QLabel *mCloudTransferStatusLabel = nullptr;
     void refreshOnboardingStatus();
     QString onboardingStatusText() const;
     bool ensureEmbeddingProvider();
