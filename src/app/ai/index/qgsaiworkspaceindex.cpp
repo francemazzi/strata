@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <mutex>
 #include <utility>
 
 #include "ai/qgsaisecretstore.h"
@@ -55,6 +56,7 @@
 #include <QStringList>
 #include <QThread>
 #include <QThreadPool>
+#include <QTimer>
 #include <QUuid>
 #include <QVariant>
 
@@ -626,7 +628,12 @@ void QgsAiWorkspaceIndex::requestLoad()
     } );
   }
   {
-    const QMutexLocker<QRecursiveMutex> locker( &mMutex );
+    const std::unique_lock<QRecursiveMutex> lock( mMutex, std::try_to_lock );
+    if ( !lock.owns_lock() )
+    {
+      QTimer::singleShot( 50, this, &QgsAiWorkspaceIndex::requestLoad );
+      return;
+    }
     if ( mLoaded )
       return;
   }
@@ -826,6 +833,22 @@ QgsAiWorkspaceIndex::Status QgsAiWorkspaceIndex::status() const
 bool QgsAiWorkspaceIndex::cacheHoldsRoot( const QString &workspaceRoot ) const
 {
   return QDir::cleanPath( mCacheRoot ) == QDir::cleanPath( workspaceRoot );
+}
+
+bool QgsAiWorkspaceIndex::tryCloudSnapshot( const QString &root, QList<Chunk> &snapshot ) const
+{
+  snapshot.clear();
+  const std::unique_lock<QRecursiveMutex> lock( mMutex, std::try_to_lock );
+  if ( !lock.owns_lock() || !mLoaded || !cacheHoldsRoot( root ) )
+    return false;
+  snapshot.reserve( mCache.size() );
+  for ( const CachedChunk &cached : mCache )
+  {
+    Chunk chunk = cached.chunk;
+    chunk.wktBlob.clear();
+    snapshot.append( std::move( chunk ) );
+  }
+  return true;
 }
 
 QList<QgsAiWorkspaceIndex::Chunk> QgsAiWorkspaceIndex::chunks( ReplaceScope scope, const QString &layerId ) const

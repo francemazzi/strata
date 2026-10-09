@@ -23,6 +23,16 @@ from qgis.testing import start_app
 
 APP = start_app()
 
+# spatial_ref_sys row for SRID 3003 as shipped by PostGIS (3.4 included): WKT1 with an
+# embedded TOWGS84 datum shift and AUTHORITY tags.
+LEGACY_WKT = (
+    'PROJCS["Monte Mario / Italy zone 1",GEOGCS["Monte Mario",DATUM["Monte_Mario",SPHEROID["International 1924",6378388,297,AUTHORITY["EPSG","7022"]],TOWGS84[-104.1,-49.1,-9.9,0.971,-2.917,0.714,-11.68],AUTHORITY["EPSG","6265"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4265"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",9],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",1500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["X",EAST],AXIS["Y",NORTH],AUTHORITY["EPSG","3003"]]'
+)
+LEGACY_PROJ = (
+    "+proj=tmerc +lat_0=0 +lon_0=9 +k=0.9996 +x_0=1500000 +y_0=0 +ellps=intl "
+    "+towgs84=-104.1,-49.1,-9.9,0.971,-2.917,0.714,-11.68 +units=m +no_defs"
+)
+
 
 @unittest.skipUnless(
     os.environ.get("STRATA_CRS_TEST_DB"), "Requires an isolated STRATA_CRS_TEST_DB"
@@ -36,7 +46,7 @@ class TestPostgresCrs(unittest.TestCase):
         cls.schema = "crs_" + uuid.uuid4().hex
         # Never overwrite a pre-existing definition, even in a test database.
         if cls.conn.executeSql(
-            "SELECT srid FROM spatial_ref_sys WHERE srid BETWEEN 990051 AND 990057"
+            "SELECT srid FROM spatial_ref_sys WHERE srid BETWEEN 990051 AND 990059"
         ):
             raise RuntimeError(
                 "CRS test SRIDs already exist; use a fresh disposable database"
@@ -69,12 +79,19 @@ class TestPostgresCrs(unittest.TestCase):
             + esri.toProj().replace("'", "''")
             + "')"
         )
+        # Legacy rows: without a usable authority and with the EPSG authority declared.
+        cls.conn.executeSql(
+            f"INSERT INTO spatial_ref_sys VALUES (990058, NULL, NULL, '{LEGACY_WKT}', '{LEGACY_PROJ}')"
+        )
+        cls.conn.executeSql(
+            f"INSERT INTO spatial_ref_sys VALUES (990059, 'EPSG', 3003, '{LEGACY_WKT}', '{LEGACY_PROJ}')"
+        )
 
     @classmethod
     def tearDownClass(cls):
         cls.conn.executeSql(f"DROP SCHEMA {cls.schema} CASCADE")
         cls.conn.executeSql(
-            "DELETE FROM spatial_ref_sys WHERE srid BETWEEN 990051 AND 990057"
+            "DELETE FROM spatial_ref_sys WHERE srid BETWEEN 990051 AND 990059"
         )
         cls.conn = None
 
@@ -153,6 +170,23 @@ class TestPostgresCrs(unittest.TestCase):
                         next(iter(project.mapLayers().values())).crs(), layer.crs()
                     )
                     project.clear()
+
+    def test_legacy_towgs84_definitions(self):
+        for srid, definition in [(990058, "legacy_bound"), (990059, "authority")]:
+            with self.subTest(srid=srid):
+                name = f"legacy_{srid}"
+                self.create_table(name, srid)
+                layer = self.layer(name)
+                self.assertEqual(layer.crs().authid(), "EPSG:3003")
+                self.assertEqual(layer.crs(), QgsCoordinateReferenceSystem("EPSG:3003"))
+                resolution = layer.dataProvider().property("crsResolution")
+                self.assertEqual(resolution["status"], "valid")
+                self.assertEqual(resolution["source_srid"], srid)
+                self.assertEqual(resolution["definition"], definition)
+                if definition == "legacy_bound":
+                    self.assertEqual(resolution["definition_authid"], "EPSG:3003")
+                info = self.conn.table(self.schema, name).info()["crs_details"]
+                self.assertEqual(info[0]["status"], "valid")
 
     def test_missing_invalid_and_recovery(self):
         for name, srid, code in [

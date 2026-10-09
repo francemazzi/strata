@@ -5272,6 +5272,17 @@ QString QgsPostgresProvider::htmlMetadata() const
   const QVariantMap diagnostic = mCrsResolution.value( u"diagnostic"_s ).toMap();
   if ( !diagnostic.isEmpty() )
     additionalInformation.insert( tr( "Coordinate reference system" ), diagnostic.value( u"message"_s ).toString().toHtmlEscaped() );
+  if ( mCrsResolution.value( u"definition"_s ).toString() == "legacy_bound"_L1 )
+    additionalInformation.insert(
+      tr( "CRS definition" ),
+      tr( "spatial_ref_sys stores a legacy definition with an embedded TOWGS84 datum shift; the declared %1 is used." ).arg( mCrsResolution.value( u"definition_authid"_s ).toString().toHtmlEscaped() )
+    );
+  else if ( mCrsResolution.contains( u"identified_authid"_s ) )
+    additionalInformation
+      .insert( tr( "CRS definition" ), tr( "Custom definition equivalent to %1 with an embedded datum shift." ).arg( mCrsResolution.value( u"identified_authid"_s ).toString().toHtmlEscaped() ) );
+  const QVariantMap projDatabase = mCrsResolution.value( u"proj_database"_s ).toMap();
+  if ( !projDatabase.isEmpty() && !projDatabase.value( u"available"_s ).toBool() )
+    additionalInformation.insert( tr( "PROJ database" ), tr( "Not usable by this application: %1" ).arg( projDatabase.value( u"error"_s ).toString().toHtmlEscaped() ) );
   return QgsVariantUtils::variantToHtml( additionalInformation, tr( "Additional information" ) );
 }
 

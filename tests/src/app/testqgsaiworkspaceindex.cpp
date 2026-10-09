@@ -233,6 +233,7 @@ class TestQgsAiWorkspaceIndex : public QObject
     void cleanupTestCase();
 
     void schemaRoundTripPreservesAllFields();
+    void cloudSnapshotDropsGeometryAndRejectsOtherRoots();
     void replaceScopeAllFilesPreservesLayerChunks();
     void replaceScopeSingleLayerOnlyTouchesThatLayer();
     void removeLayerDropsOnlyMatchingChunks();
@@ -1680,6 +1681,24 @@ void TestQgsAiWorkspaceIndex::projectChangeDuringAReindexKeepsProjectsApart()
   QgsAiWorkspaceIndex firstIndex( &firstProvider, &provider );
   QVERIFY( firstIndex.ensureLoaded() );
   QCOMPARE( firstIndex.chunks( QgsAiWorkspaceIndex::ReplaceScope::AllFiles ).size(), 5 * QgsAiWorkspaceIndex::EMBEDDING_BATCH );
+}
+
+void TestQgsAiWorkspaceIndex::cloudSnapshotDropsGeometryAndRejectsOtherRoots()
+{
+  QTemporaryDir root, other;
+  QgsAiFileContextProvider files( root.path() );
+  QgsAiWorkspaceIndex index( &files, nullptr );
+  const QByteArray geometry = qCompress( QByteArrayLiteral( "POINT(0 0)" ) );
+  const auto layer = makeLayerChunk( u"synthetic"_s, u"Synthetic"_s, 0, 1, 0, u"Safe layer summary"_s, geometry );
+  QString error;
+  QVERIFY( index.persistChunks( { layer }, { dummyEmbedding( 0.1f ) }, QgsAiWorkspaceIndex::ReplaceScope::All, QString(), &error ) );
+  QList<QgsAiWorkspaceIndex::Chunk> snapshot;
+  QVERIFY( index.tryCloudSnapshot( root.path(), snapshot ) );
+  QCOMPARE( snapshot.size(), 1 );
+  QVERIFY( snapshot.first().wktBlob.isEmpty() );
+  QCOMPARE( index.chunks().first().wktBlob, geometry );
+  QVERIFY( !index.tryCloudSnapshot( other.path(), snapshot ) );
+  QVERIFY( snapshot.isEmpty() );
 }
 
 QGSTEST_MAIN( TestQgsAiWorkspaceIndex )

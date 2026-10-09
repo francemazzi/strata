@@ -34,6 +34,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDialog>
@@ -243,6 +244,7 @@ class TestQgsAiChatDockWidget : public QObject
   private slots:
     void init() { installTestSecretBackend(); }
     void hasRuntimeWidgets();
+    void messageIconsCopyAndExposeNamedActions();
     void planLoginModelPickerListsManagedAndByoModels();
     void emptyModelMenuOffersCloudSignIn();
     void unavailableSelectedProviderIsNotReplacedInModelPill();
@@ -367,7 +369,8 @@ void TestQgsAiChatDockWidget::hasRuntimeWidgets()
   QVERIFY( runtimeLabel );
   QVERIFY( cancelButton );
   QVERIFY( !cancelButton->isEnabled() );
-  QVERIFY( runtimeLabel->text().contains( u"idle"_s, Qt::CaseInsensitive ) );
+  QVERIFY( runtimeLabel->isHidden() );
+  QVERIFY( cancelButton->isHidden() );
 }
 
 void TestQgsAiChatDockWidget::planLoginModelPickerListsManagedAndByoModels()
@@ -689,7 +692,7 @@ void TestQgsAiChatDockWidget::usesPaletteBasedCursorStyling()
   QFrame *message = dock.findChild<QFrame *>( u"aiMessage"_s );
   QVERIFY( message );
   QVERIFY( message->styleSheet().contains( u"palette(base)"_s ) );
-  QVERIFY( message->styleSheet().contains( u"palette(mid)"_s ) );
+  QVERIFY( message->styleSheet().contains( u"palette(window-text)"_s ) );
   static const QRegularExpression hexColorRe( u"#[0-9a-fA-F]{3,8}\\b"_s );
   QVERIFY( !hexColorRe.match( message->styleSheet() ).hasMatch() );
 }
@@ -1123,12 +1126,12 @@ void TestQgsAiChatDockWidget::toolCardsShowLiveStateAndUndo()
   // Messages have their actions: Copy on the answer, Copy, Edit and Retry on the question.
   QCOMPARE( dock.findChildren<QToolButton *>( u"aiCopyMessageButton"_s ).size(), 2 );
   QVERIFY( dock.findChild<QToolButton *>( u"aiEditMessageButton"_s ) );
-  QVERIFY( dock.findChild<QToolButton *>( u"aiRetryMessageButton"_s ) );
+  QVERIFY( dock.findChild<QAction *>( u"aiRetryMessageButton"_s ) );
   QVERIFY( dock.findChild<QPushButton *>( u"aiRequestErrorRetry"_s ) );
-  QPushButton *undoTurn = dock.findChild<QPushButton *>( u"aiUndoTurnButton"_s );
-  QVERIFY( undoTurn && !undoTurn->isHidden() );
+  QAction *undoTurn = dock.findChild<QAction *>( u"aiUndoTurnButton"_s );
+  QVERIFY( undoTurn && undoTurn->isEnabled() );
 
-  undoTurn->click();
+  undoTurn->trigger();
   QCOMPARE( undone, QStringList( { u"tok_1"_s } ) );
   QTRY_VERIFY( dock.findChild<QLabel *>( u"aiToolUndoneLabel"_s ) );
   QTRY_VERIFY( !dock.findChild<QPushButton *>( u"aiUndoToolButton"_s ) );
@@ -2160,6 +2163,78 @@ void TestQgsAiChatDockWidget::emptyModelMenuOffersCloudSignIn()
   QVERIFY( connectIndex >= 0 );
   QVERIFY( settingsIndex > connectIndex );
   QVERIFY( !menu->findChild<QAction *>( u"aiConnectClaudeCodeAction"_s ) );
+}
+
+void TestQgsAiChatDockWidget::messageIconsCopyAndExposeNamedActions()
+{
+  QTemporaryDir root;
+  QgsAiModelRouter router;
+  QgsAiFileContextProvider context( root.path() );
+  QgsAiReviewPatchEngine review;
+  QgsAiAgentSessionManager manager( nullptr, &context, &review );
+  QgsAiChatDockWidget dock( &manager, &router, &review );
+  QgsAiChatMessage message;
+  message.id = u"icon-message"_s;
+  message.role = QgsAiChatRole::User;
+  message.content = u"Copy this exact text."_s;
+  manager.messageAdded( message );
+  for ( const QString &name : { u"aiNewChatButton"_s, u"aiHistoryButton"_s, u"aiCopyMessageButton"_s, u"aiEditMessageButton"_s, u"aiMoreMessageButton"_s } )
+  {
+    auto *button = dock.findChild<QToolButton *>( name );
+    QVERIFY2( button, qPrintable( name ) );
+    QCOMPARE( button->toolButtonStyle(), Qt::ToolButtonIconOnly );
+    QVERIFY( !button->icon().isNull() );
+    QVERIFY( !button->icon().pixmap( 18, 18 ).isNull() );
+    QVERIFY( !button->accessibleName().isEmpty() );
+    QVERIFY( !button->toolTip().isEmpty() );
+    QCOMPARE( button->focusPolicy(), Qt::StrongFocus );
+    QVERIFY( button->minimumWidth() >= 28 );
+  }
+  auto *copy = dock.findChild<QToolButton *>( u"aiCopyMessageButton"_s );
+  const qint64 iconBefore = copy->icon().cacheKey();
+  copy->click();
+  QCOMPARE( QApplication::clipboard()->text(), message.content );
+  QVERIFY( copy->icon().cacheKey() != iconBefore );
+  auto *more = dock.findChild<QToolButton *>( u"aiMoreMessageButton"_s );
+  QCOMPARE( more->menu()->actions().size(), 2 );
+  QVERIFY( more->menu()->actions().first()->text().contains( u"Restart"_s ) );
+  QVERIFY( !dock.findChild<QToolButton *>( u"aiRetryMessageButton"_s ) );
+  message.id = u"code-message"_s;
+  message.role = QgsAiChatRole::Assistant;
+  message.content = u"```python\nprint(42)\n```"_s;
+  manager.messageAdded( message );
+  auto *codeCopy = dock.findChild<QToolButton *>( u"aiCopyCodeButton"_s );
+  QVERIFY( codeCopy );
+  codeCopy->click();
+  QVERIFY( QApplication::clipboard()->text().contains( u"print(42)"_s ) );
+  const QString screenshots = qEnvironmentVariable( "STRATA_UI_SCREENSHOTS" );
+  if ( !screenshots.isEmpty() )
+  {
+    dock.resize( 420, 760 );
+    dock.show();
+    QTest::qWait( 100 );
+    QVERIFY( dock.grab().save( screenshots + u"/chat.png"_s ) );
+    const QPalette original = QApplication::palette();
+    QPalette dark = original;
+    dark.setColor( QPalette::Window, QColor( 30, 30, 32 ) );
+    dark.setColor( QPalette::Base, QColor( 40, 40, 43 ) );
+    dark.setColor( QPalette::AlternateBase, QColor( 48, 48, 51 ) );
+    dark.setColor( QPalette::Button, QColor( 48, 48, 51 ) );
+    dark.setColor( QPalette::Text, QColor( 235, 235, 238 ) );
+    dark.setColor( QPalette::WindowText, QColor( 235, 235, 238 ) );
+    dark.setColor( QPalette::ButtonText, QColor( 235, 235, 238 ) );
+    dark.setColor( QPalette::Mid, QColor( 130, 130, 135 ) );
+    dark.setColor( QPalette::Midlight, QColor( 65, 65, 69 ) );
+    QApplication::setPalette( dark );
+    QgsAiChatDockWidget darkDock( &manager, &router, &review );
+    manager.messageAdded( message );
+    darkDock.resize( 420, 760 );
+    darkDock.show();
+    QTest::qWait( 100 );
+    const bool darkSaved = darkDock.grab().save( screenshots + u"/chat-dark.png"_s );
+    QApplication::setPalette( original );
+    QVERIFY( darkSaved );
+  }
 }
 
 QGSTEST_MAIN( TestQgsAiChatDockWidget )
