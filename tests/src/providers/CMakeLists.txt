@@ -47,6 +47,7 @@ if (POSTGRES_FOUND)
   add_qgis_test(testqgspostgresexpressioncompiler.cpp MODULE provider LINKEDLIBRARIES provider_postgres_a qgis_core)
   add_qgis_test(testqgspostgresprovider.cpp MODULE provider LINKEDLIBRARIES provider_postgres_a qgis_core LABELS "POSTGRES")
   add_qgis_test(testqgspostgresconn.cpp MODULE provider LINKEDLIBRARIES provider_postgres_a qgis_core LABELS "POSTGRES")
+  add_qgis_test(testqgspostgrescrsdefinition.cpp MODULE provider LINKEDLIBRARIES provider_postgres_a qgis_core)
 endif()
 
 set(ENABLE_MSSQLTEST_CPP FALSE CACHE BOOL "Enable MSSQL provider C++ tests")

@@ -582,6 +582,21 @@ void QgsApplication::init( QString profileFolder )
     qputenv( "PROJ_DATA", projData.toUtf8() );
     currentProjSearchPaths.append( projData );
   }
+#elif defined( Q_OS_WIN )
+  // Prefer the bundled PROJ database over machine-wide PROJ_DATA/PROJ_LIB values left by other
+  // installers (for example the PostGIS bundle). PROJ refuses a proj.db built by another PROJ
+  // version, and every authority lookup then fails silently. The env var also covers GDAL and
+  // Python subprocesses; the search path entry comes first so proj.db is found there.
+  for ( const QString &candidate : { QDir::cleanPath( pkgDataPath() + u"/share/proj"_s ), QDir::cleanPath( pkgDataPath() + u"/proj"_s ) } )
+  {
+    if ( QFile::exists( candidate + u"/proj.db"_s ) )
+    {
+      qputenv( "PROJ_DATA", candidate.toUtf8() );
+      currentProjSearchPaths.removeAll( candidate );
+      currentProjSearchPaths.prepend( candidate );
+      break;
+    }
+  }
 #endif // Q_OS_MACOS
 
   char **newPaths = new char *[currentProjSearchPaths.length()];

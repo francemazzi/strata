@@ -502,6 +502,28 @@ class QgsPostgresConn : public QObject
     CrsResolution resolveCrs( int srid, QgsFeedback *feedback = nullptr );
     QgsCoordinateReferenceSystem sridToCrs( int srsId );
 
+    /**
+     * Builds a CRS from a spatial_ref_sys row (authority, authority code, WKT and PROJ
+     * definitions) without touching the database connection.
+     *
+     * \a details receives how the definition was interpreted: \c definition is one of
+     * \c authority, \c wkt, \c proj or \c legacy_bound. PostGIS rows store a WKT with an
+     * embedded TOWGS84 datum shift, which PROJ reads as a BoundCRS that is never matched
+     * to an authority code; in that case the authority declared by the definition itself is
+     * used and recorded in \c definition_authid. When that authority cannot be loaded, the
+     * bound CRS is kept and the identified code is recorded in \c identified_authid.
+     */
+    static QgsCoordinateReferenceSystem crsFromCatalogDefinition( const QString &authName, const QString &authSrid, const QString &wkt, const QString &proj4, QVariantMap &details );
+
+    /**
+     * Returns whether PROJ's own database (proj.db) is usable in this process.
+     *
+     * The map contains \c available and, when unavailable, the first PROJ \c error. QGIS
+     * resolves authority codes from its bundled srs.db when PROJ cannot, so a valid
+     * EPSG:4326 does not prove that proj.db works. The result is computed once per process.
+     */
+    static QVariantMap projDatabaseStatus();
+
     int crsToSrid( const QgsCoordinateReferenceSystem &crs );
 
     /**
@@ -616,6 +638,9 @@ class QgsPostgresConn : public QObject
 
     /* Cache of SRID to CRS */
     mutable QMap<int, QgsCoordinateReferenceSystem> mCrsCache;
+
+    /* How each cached SRID definition was interpreted, see crsFromCatalogDefinition() */
+    mutable QMap<int, QVariantMap> mCrsDefinitionCache;
 };
 
 // clazy:excludeall=qstring-allocations

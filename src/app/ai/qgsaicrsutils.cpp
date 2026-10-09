@@ -33,8 +33,24 @@ QJsonObject qgsAiCrsDetails( const QgsCoordinateReferenceSystem &crs, bool spati
                                               : u"CRS not specified"_s;
   if ( valid && !portable && !crs.description().isEmpty() && crs.description() != "unknown"_L1 )
     label += u" — %1"_s.arg( crs.description() );
+  const QString definition = resolution.value( u"definition"_s ).toString();
+  const QString identifiedAuthId = resolution.value( u"identified_authid"_s ).toString();
+  if ( valid && definition == "legacy_bound"_L1 )
+    label += u" (legacy spatial_ref_sys definition with TOWGS84)"_s;
+  else if ( valid && !portable && !identifiedAuthId.isEmpty() )
+    label += u" — equivalent to %1 with an embedded datum shift"_s.arg( identifiedAuthId );
   QJsonObject result { { u"is_valid"_s, valid }, { u"authid"_s, authid }, { u"description"_s, crs.description() }, { u"status"_s, status }, { u"label"_s, label } };
   result.insert( u"label"_s, qgsAiCrsLabel( result ) );
+  if ( valid && definition == "legacy_bound"_L1 )
+  {
+    result.insert( u"definition"_s, definition );
+    result.insert( u"definition_authid"_s, resolution.value( u"definition_authid"_s ).toString() );
+  }
+  else if ( valid && !portable && !identifiedAuthId.isEmpty() )
+    result.insert( u"identified_authid"_s, identifiedAuthId );
+  const QVariantMap projDatabase = resolution.value( u"proj_database"_s ).toMap();
+  if ( spatial && !projDatabase.isEmpty() && !projDatabase.value( u"available"_s ).toBool() )
+    result.insert( u"proj_database"_s, QJsonObject { { u"available"_s, false }, { u"message"_s, u"The application's PROJ database is not usable; check the PROJ_DATA and PROJ_LIB environment variables."_s } } );
   if ( valid && !portable )
     result.insert( u"wkt"_s, crs.toWkt( Qgis::CrsWktVariant::Preferred ) );
   if ( spatial && resolution.contains( u"source_srid"_s ) )

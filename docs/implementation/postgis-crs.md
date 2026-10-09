@@ -32,6 +32,25 @@ cache. A per-catalog-operation map avoids repeating failed lookups for each tabl
 The provider's read-only Qt `crsResolution` property returns the cached diagnostic
 snapshot without querying. Layer properties and AI tools consume that snapshot.
 
+`crsFromCatalogDefinition()` interprets the row without the connection, in this
+order: the declared EPSG/ESRI authority through `createFromOgcWmsCrs()` (PROJ
+database, then the bundled `srs.db`), the WKT through `createFromWkt()`, then the
+PROJ string. `createFromUserInput()` is only a second attempt, because it goes
+through GDAL, needs `proj.db` and has no fallback. The snapshot records how the
+row was read in `definition`:
+
+| `definition` | Meaning |
+| --- | --- |
+| `authority` | Declared EPSG/ESRI code resolved |
+| `wkt` | WKT definition, identified by PROJ when possible |
+| `proj` | PROJ string definition |
+| `legacy_bound` | WKT with an embedded TOWGS84 datum shift, as PostGIS ships for EPSG:3003 (3.4 included). PROJ reads it as a BoundCRS that the WKT path never identifies; the authority declared by the definition itself is used and recorded in `definition_authid` |
+
+When the declared authority of a bound definition cannot be loaded, the bound CRS is
+kept and `identified_authid` records the equivalent code. `proj_database` is added
+whenever PROJ cannot open its own database; `projDatabaseStatus()` probes it once
+per process, because `fromEpsgId()` succeeds through `srs.db` even then.
+
 `TableProperty::info()["crs_details"]` retains raw SRIDs, geometry columns and
 geometry types, including distinct source SRIDs which resolve to equivalent CRSs.
 The public `geometryColumnTypes()` list retains its existing deduplication.
@@ -49,7 +68,7 @@ geometry columns retain catalog metadata when type detection yields no samples.
 | `unresolved` / `definition_invalid` | Authority, WKT and PROJ could not resolve |
 | `unresolved` / `connection_error` | Connection could not read the definition |
 | `unresolved` / `catalog_query_failed` | Other catalog query failure |
-| `unresolved` / `local_catalog_unavailable` | Definition failed and local EPSG:4326 resolution also failed |
+| `unresolved` / `local_catalog_unavailable` | Definition failed and PROJ cannot open its database; `proj_database` carries the PROJ error |
 | `unresolved` / `operation_canceled` | CRS lookup canceled; never cached |
 | `not_applicable` | Non-spatial table/layer |
 
@@ -203,3 +222,42 @@ in-app updater feed.
 Closing the original customer incident additionally requires their Strata
 version/platform, source SRID, connection characteristics and the affected layer.
 No customer data has been used in this regression suite.
+
+## Legacy catalog definitions and PROJ database, 2026-10-07
+
+A customer layer (Windows, SRID 3003, loaded from the Browser) still showed a custom
+CRS after 1.6.3: a valid BoundCRS "Monte Mario / Italy zone 1" with the TOWGS84 shift
+-104.1, -49.1, -9.9, 0.971, -2.917, 0.714, -11.68 and `ID["EPSG",3003]` inside its
+source CRS. PROJ 9 does not export TOWGS84 for EPSG:3003, but the PostGIS catalog
+`srtext` still carries it (verified on PostGIS 3.4.3), so that CRS is the WKT fallback
+of `spatial_ref_sys`, reached only when the declared authority was not resolved. The
+1.6.3 diagnostics only cover invalid CRSs; this CRS was valid with an empty
+authority, so no diagnostic fired, and the regression suite only exercised rows whose
+EPSG authority resolves.
+
+Two conditions lead there, and the correction covers both:
+
+- The row declares no EPSG/ESRI authority. The WKT path gives the bound CRS and
+  `setWktString()` skips BoundCRS candidates during identification (only the PROJ
+  string path uses `FlagMatchBoundCrsToUnderlyingSourceCrs`). The provider now uses
+  the authority declared inside the definition (`legacy_bound`), consistently with
+  what QGIS already does for `+towgs84` PROJ strings and with the existing behaviour
+  for rows that declare EPSG, where the TOWGS84 of the WKT was already ignored.
+  Decision recorded here: the embedded Helmert shift is not used for datum
+  transformations; QGIS selects transformations from the PROJ database as for any
+  EPSG:3003 layer. Keeping the bound CRS instead is a one-line change in
+  `crsFromCatalogDefinition()`.
+- PROJ cannot open `proj.db` in the Strata process. `createFromUserInput("EPSG:3003")`
+  goes through GDAL and fails, while the CRS dialog and the project CRS still show
+  EPSG names through the `srs.db` fallback. On Windows the usual cause is a
+  machine-wide `PROJ_LIB`/`PROJ_DATA` variable left by other installers (the PostGIS
+  Stack Builder bundle, see PostGIS tickets 4766 and 5689) pointing to a `proj.db` of
+  another PROJ version, which PROJ rejects ("It comes from another PROJ
+  installation"). The authority is now resolved through `createFromOgcWmsCrs()`, the
+  probe result is attached as `proj_database`, and on Windows `QgsApplication::init()`
+  exports the bundled `share/proj` as `PROJ_DATA` and puts it first in the PROJ
+  search paths, as the macOS build already did.
+
+Local reproduction without a database: `PROJ_DATA` pointing to a copy of `proj.db`
+whose `DATABASE.LAYOUT.VERSION.MINOR` metadata was lowered makes `projinfo EPSG:3003`
+fail with the PROJ error above and `--identify` of the legacy WKT return no match.
