@@ -20,6 +20,7 @@
 #include <climits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <proj.h>
 
 #include "qgsapplication.h"
 #include "qgscredentials.h"
@@ -32,6 +33,7 @@
 #include "qgsmessagelog.h"
 #include "qgspostgresconnpool.h"
 #include "qgspostgresstringutils.h"
+#include "qgsprojutils.h"
 #include "qgssettings.h"
 #include "qgsvariantutils.h"
 #include "qgsvectordataprovider.h"
@@ -2947,21 +2949,26 @@ QgsPostgresConn::CrsResolution QgsPostgresConn::resolveCrs( int srid, QgsFeedbac
     const QString authName = result.PQgetvalue( 0, 0 );
     const QString authSrid = result.PQgetvalue( 0, 1 );
     const QString wkt = result.PQgetvalue( 0, 2 );
-    bool ok = false;
-    if ( authName.compare( "EPSG"_L1, Qt::CaseInsensitive ) == 0 || authName.compare( "ESRI"_L1, Qt::CaseInsensitive ) == 0 )
-      ok = resolved.crs.createFromUserInput( authName + ':' + authSrid );
-    if ( !ok && !wkt.isEmpty() )
-      ok = resolved.crs.createFromUserInput( wkt );
-    if ( !ok )
-      resolved.crs = QgsCoordinateReferenceSystem::fromProj( result.PQgetvalue( 0, 3 ) );
+    const QString proj4 = result.PQgetvalue( 0, 3 );
+    QVariantMap definition;
+    resolved.crs = crsFromCatalogDefinition( authName, authSrid, wkt, proj4, definition );
+    const QVariantMap projDatabase = projDatabaseStatus();
+    if ( !projDatabase.value( u"available"_s ).toBool() )
+      definition.insert( u"proj_database"_s, projDatabase );
     if ( !resolved.crs.isValid() )
     {
-      if ( !QgsCoordinateReferenceSystem::fromEpsgId( 4326 ).isValid() )
-        return fail( u"local_catalog_unavailable"_s, tr( "The local CRS catalog cannot resolve even EPSG:4326. Check the application's PROJ installation." ) );
+      resolved.details.insert( definition );
+      if ( !projDatabase.value( u"available"_s ).toBool() )
+        return fail(
+          u"local_catalog_unavailable"_s,
+          tr( "The application's PROJ database is not usable, so the spatial reference definition for SRID %1 could not be resolved. Check the PROJ_DATA and PROJ_LIB environment variables." ).arg( srid )
+        );
       return fail( u"definition_invalid"_s, tr( "The spatial reference definition for SRID %1 could not be interpreted." ).arg( srid ) );
     }
     mCrsCache.insert( srid, resolved.crs );
+    mCrsDefinitionCache.insert( srid, definition );
   }
+  resolved.details.insert( mCrsDefinitionCache.value( srid ) );
   resolved.details.insert( u"status"_s, u"valid"_s );
   return resolved;
 }
@@ -2969,6 +2976,94 @@ QgsPostgresConn::CrsResolution QgsPostgresConn::resolveCrs( int srid, QgsFeedbac
 QgsCoordinateReferenceSystem QgsPostgresConn::sridToCrs( int srid )
 {
   return resolveCrs( srid ).crs;
+}
+
+// Authority code declared by the source CRS of a BoundCRS, e.g. the AUTHORITY["EPSG","3003"] of a
+// legacy PostGIS srtext with TOWGS84. Falls back to PROJ identification, which needs proj.db.
+static QString postgresConnBoundCrsAuthId( const QgsCoordinateReferenceSystem &crs )
+{
+  PJ *pj = crs.projObject();
+  if ( !pj || proj_get_type( pj ) != PJ_TYPE_BOUND_CRS )
+    return QString();
+  QString authName;
+  QString authCode;
+  if ( const QgsProjUtils::proj_pj_unique_ptr source { proj_get_source_crs( QgsProjContext::get(), pj ) } )
+  {
+    authName = QString::fromUtf8( proj_get_id_auth_name( source.get(), 0 ) );
+    authCode = QString::fromUtf8( proj_get_id_code( source.get(), 0 ) );
+  }
+  if ( ( authName.isEmpty() || authCode.isEmpty() ) && !QgsProjUtils::identifyCrs( pj, authName, authCode, QgsProjUtils::FlagMatchBoundCrsToUnderlyingSourceCrs ) )
+    return QString();
+  return authName + ':' + authCode;
+}
+
+QgsCoordinateReferenceSystem QgsPostgresConn::crsFromCatalogDefinition( const QString &authName, const QString &authSrid, const QString &wkt, const QString &proj4, QVariantMap &details )
+{
+  QgsCoordinateReferenceSystem crs;
+  const QString authority = authName.trimmed().toUpper();
+  const QString code = authSrid.trimmed();
+  if ( ( authority == "EPSG"_L1 || authority == "ESRI"_L1 ) && !code.isEmpty() )
+  {
+    // createFromOgcWmsCrs reads proj.db and falls back to the bundled srs.db; createFromUserInput
+    // goes through GDAL, which needs proj.db and has no fallback.
+    const QString authId = authority + ':' + code;
+    if ( crs.createFromOgcWmsCrs( authId ) || crs.createFromUserInput( authId ) )
+    {
+      details.insert( u"definition"_s, u"authority"_s );
+      return crs;
+    }
+    crs = QgsCoordinateReferenceSystem();
+  }
+  if ( !wkt.trimmed().isEmpty() && ( crs.createFromWkt( wkt ) || crs.createFromUserInput( wkt ) ) )
+    details.insert( u"definition"_s, u"wkt"_s );
+  else
+    crs = QgsCoordinateReferenceSystem();
+  if ( !crs.isValid() && !proj4.trimmed().isEmpty() )
+  {
+    crs = QgsCoordinateReferenceSystem::fromProj( proj4 );
+    if ( crs.isValid() )
+      details.insert( u"definition"_s, u"proj"_s );
+  }
+  if ( !crs.isValid() || !crs.authid().isEmpty() )
+    return crs;
+
+  // PostGIS catalog rows still embed a TOWGS84 datum shift in their WKT (PostGIS 3.4 does for
+  // EPSG:3003). PROJ reads such a WKT as a BoundCRS, which the WKT path never matches to an
+  // authority. Use the authority the definition declares, as QGIS already does for +towgs84 PROJ strings.
+  const QString boundAuthId = postgresConnBoundCrsAuthId( crs );
+  if ( boundAuthId.isEmpty() )
+    return crs;
+  QgsCoordinateReferenceSystem declared;
+  if ( declared.createFromOgcWmsCrs( boundAuthId ) )
+  {
+    details.insert( u"definition"_s, u"legacy_bound"_s );
+    details.insert( u"definition_authid"_s, boundAuthId );
+    return declared;
+  }
+  details.insert( u"identified_authid"_s, boundAuthId );
+  return crs;
+}
+
+QVariantMap QgsPostgresConn::projDatabaseStatus()
+{
+  static QMutex sMutex;
+  static QVariantMap sStatus;
+  const QMutexLocker locker( &sMutex );
+  if ( sStatus.isEmpty() )
+  {
+    QgsScopedProjCollectingLogger projLogger;
+    const char *path = proj_context_get_database_path( QgsProjContext::get() );
+    const bool available = path && *path;
+    sStatus.insert( u"available"_s, available );
+    if ( available )
+      sStatus.insert( u"path"_s, QString::fromUtf8( path ) );
+    else
+    {
+      const QStringList errors = projLogger.errors();
+      sStatus.insert( u"error"_s, errors.isEmpty() ? tr( "PROJ could not open its database (proj.db)." ) : errors.constFirst().left( 500 ) );
+    }
+  }
+  return sStatus;
 }
 
 int QgsPostgresConn::crsToSrid( const QgsCoordinateReferenceSystem &crs )
