@@ -30,6 +30,7 @@
 #include "qgsaifilecontextprovider.h"
 #include "qgsaitaskrunner.h"
 #include "qgsaitoolschemautil.h"
+#include "qgsaivisualcontextutils.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
 #include "qgsclassificationcustom.h"
@@ -159,6 +160,8 @@ namespace
       //! Earlier items moved up to make room for a new footer note, by uuid.
       QHash<QString, QPointF> movedItems;
       QString filePath;
+      //! Copy of the file export_map replaced, put back by rollback.
+      QString backupPath;
       QString description;
       //! Layers a Processing run loaded into the project.
       QStringList layerIds;
@@ -1276,19 +1279,24 @@ namespace
     if ( entry.type != RollbackType::DeleteFile )
       return QgsAiToolResult::error( u"Rollback token does not belong to an export-file operation."_s );
 
+    if ( !entry.backupPath.isEmpty() && !QFileInfo::exists( entry.backupPath ) )
+      return QgsAiToolResult::error( u"The copy of the replaced file is gone (%1); %2 was left as exported."_s.arg( entry.backupPath, entry.filePath ) );
     const bool existed = QFileInfo::exists( entry.filePath );
     bool removed = true;
     if ( existed )
       removed = QFile::remove( entry.filePath );
     if ( !removed )
       return QgsAiToolResult::error( u"Could not remove exported file: %1"_s.arg( entry.filePath ) );
+    const bool restored = !entry.backupPath.isEmpty() && QFile::rename( entry.backupPath, entry.filePath );
+    if ( !entry.backupPath.isEmpty() && !restored )
+      return QgsAiToolResult::error( u"Removed the exported file but could not restore the previous one from %1"_s.arg( entry.backupPath ) );
 
     QJsonObject diff;
-    diff.insert( u"summary"_s, u"Removed exported file created by AI tool."_s );
+    diff.insert( u"summary"_s, restored ? u"Restored the file that the AI export replaced."_s : u"Removed exported file created by AI tool."_s );
     diff.insert( u"path"_s, entry.filePath );
 
     QJsonObject output;
-    output.insert( u"status"_s, existed ? u"rolled_back"_s : u"already_removed"_s );
+    output.insert( u"status"_s, restored ? u"restored_previous"_s : existed ? u"rolled_back"_s : u"already_removed"_s );
     output.insert( u"rollback_token"_s, token );
     output.insert( u"diff"_s, diff );
     return QgsAiToolResult::ok( output );
@@ -3103,7 +3111,10 @@ QString QgsAiExportMapTool::description() const
 {
   return QStringLiteral(
     "Exports a named print layout to PDF/PNG, or the current map canvas to PNG, writing inside the workspace. "
-    "Use create_print_layout first when a layout does not already exist. This requires approval because it writes files."
+    "Use create_print_layout first when a layout does not already exist. An existing file is replaced only with overwrite=true; "
+    "rollback then restores it. For a layout the result includes an image of its first page, so you can check the sheet "
+    "before reporting it done (the image is shared only if the user allowed sending images to AI). "
+    "This requires approval because it writes files."
   );
 }
 
@@ -3116,6 +3127,7 @@ QJsonObject QgsAiExportMapTool::schema() const
   properties.insert( u"width"_s, prop( u"integer"_s, u"Optional canvas export width in pixels, max 4096."_s ) );
   properties.insert( u"height"_s, prop( u"integer"_s, u"Optional canvas export height in pixels, max 4096."_s ) );
   properties.insert( u"dpi"_s, prop( u"integer"_s, u"Optional layout export DPI. Default 300."_s ) );
+  properties.insert( u"overwrite"_s, prop( u"boolean"_s, u"Replace an existing file at path. Default false. Rollback restores the previous file."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous export_map call. If set, deletes that exported file."_s ) );
   return schemaObject( properties );
 }
@@ -3144,20 +3156,48 @@ QgsAiToolResult QgsAiExportMapTool::execute( const QJsonObject &args )
     format = u"png"_s;
   if ( format != "png"_L1 && format != "pdf"_L1 )
     return QgsAiToolResult::error( u"Unsupported export format '%1'. Use 'png' or 'pdf'."_s.arg( format ) );
-  if ( QFileInfo::exists( outputPath ) )
-    return QgsAiToolResult::error( u"Output file already exists: %1. Choose a new path so rollback can safely delete only files created by this tool."_s.arg( outputPath ) );
+  const bool existed = QFileInfo::exists( outputPath );
+  if ( existed && !args.value( u"overwrite"_s ).toBool( false ) )
+    return QgsAiToolResult::error( u"Output file already exists: %1. Pass overwrite=true to replace it (rollback restores it), or choose another path."_s.arg( outputPath ) );
+
+  QgsProject *project = mProject ? mProject : QgsProject::instance();
+  const QString layoutName = args.value( u"layout_name"_s ).toString().trimmed();
+  QgsPrintLayout *layout = nullptr;
+  if ( !layoutName.isEmpty() )
+  {
+    layout = printLayoutByName( project, layoutName );
+    if ( !layout )
+      return QgsAiToolResult::error( u"No print layout named: %1"_s.arg( layoutName ) );
+  }
+  else if ( format == "pdf"_L1 )
+    return QgsAiToolResult::error( u"Canvas export supports PNG only. Create a print layout first for PDF export."_s );
+  else if ( !mCanvas )
+    return QgsAiToolResult::error( u"No map canvas available."_s );
 
   if ( !QDir().mkpath( QFileInfo( outputPath ).absolutePath() ) )
     return QgsAiToolResult::error( u"Could not create output directory: %1"_s.arg( QFileInfo( outputPath ).absolutePath() ) );
 
-  QgsProject *project = mProject ? mProject : QgsProject::instance();
-  const QString layoutName = args.value( u"layout_name"_s ).toString().trimmed();
-  if ( !layoutName.isEmpty() )
+  // keep the replaced file until rollback, outside the workspace
+  // ponytail: copies stay in the OS temp dir until it cleans them; delete them with expired tokens if disk use matters
+  QString backupPath;
+  if ( existed )
   {
-    QgsPrintLayout *layout = printLayoutByName( project, layoutName );
-    if ( !layout )
-      return QgsAiToolResult::error( u"No print layout named: %1"_s.arg( layoutName ) );
+    backupPath = QDir( QDir::tempPath() ).filePath( u"strata-export-%1.%2"_s.arg( QUuid::createUuid().toString( QUuid::Id128 ), QFileInfo( outputPath ).suffix() ) );
+    if ( !QFile::copy( outputPath, backupPath ) )
+      return QgsAiToolResult::error( u"Could not keep a copy of %1 before replacing it; nothing was exported."_s.arg( outputPath ) );
+  }
+  const auto failed = [&outputPath, &backupPath]( const QString &message ) {
+    if ( !backupPath.isEmpty() )
+    {
+      QFile::remove( outputPath );
+      QFile::rename( backupPath, outputPath );
+    }
+    return QgsAiToolResult::error( message );
+  };
 
+  QJsonObject previewJson;
+  if ( layout )
+  {
     QgsLayoutExporter exporter( layout );
     QgsLayoutExporter::ExportResult result = QgsLayoutExporter::Success;
     const int dpi = std::clamp( args.value( u"dpi"_s ).toInt( 300 ), 36, 1200 );
@@ -3175,15 +3215,28 @@ QgsAiToolResult QgsAiExportMapTool::execute( const QJsonObject &args )
     }
 
     if ( result != QgsLayoutExporter::Success )
-      return QgsAiToolResult::error( u"Layout export failed: %1"_s.arg( exportResultMessage( result ) ) );
+      return failed( u"Layout export failed: %1"_s.arg( exportResultMessage( result ) ) );
+
+    // the first page as the model will see it, long side 1200 px, sent like capture_map_canvas
+    const QgsLayoutItemPage *firstPage = layout->pageCollection()->page( 0 );
+    const QSizeF pageMm = firstPage ? firstPage->rect().size() : QSizeF();
+    const double scale = pageMm.isEmpty() ? 0.0 : 1200.0 / std::max( pageMm.width(), pageMm.height() );
+    const QImage preview = pageMm.isEmpty() ? QImage() : exporter.renderPageToImage( 0, QSize( std::round( pageMm.width() * scale ), std::round( pageMm.height() * scale ) ) );
+    const QString previewDir = QgsAiVisualContextUtils::visualContextDirectory();
+    QgsAiVisualContextUtils::cleanupOldVisualContextFiles( previewDir );
+    const QString previewPath = QDir( previewDir ).filePath( u"layout_%1.png"_s.arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) ) );
+    if ( !preview.isNull() && preview.save( previewPath, "PNG" ) )
+    {
+      previewJson.insert( u"path"_s, previewPath );
+      previewJson.insert( u"mime_type"_s, u"image/png"_s );
+      previewJson.insert( u"width"_s, preview.width() );
+      previewJson.insert( u"height"_s, preview.height() );
+      previewJson.insert( u"page"_s, 1 );
+      previewJson.insert( u"shared_with_ai"_s, QgsAiVisualContextUtils::hasVisualConsent() );
+    }
   }
   else
   {
-    if ( format == "pdf"_L1 )
-      return QgsAiToolResult::error( u"Canvas export supports PNG only. Create a print layout first for PDF export."_s );
-    if ( !mCanvas )
-      return QgsAiToolResult::error( u"No map canvas available."_s );
-
     QgsMapSettings settings = mCanvas->mapSettings();
     settings.setDevicePixelRatio( 1.0 );
     settings.setExtent( mCanvas->extent() );
@@ -3195,23 +3248,24 @@ QgsAiToolResult QgsAiExportMapTool::execute( const QJsonObject &args )
     job.waitForFinished();
     const QImage image = job.renderedImage();
     if ( image.isNull() )
-      return QgsAiToolResult::error( u"Map canvas render produced an empty image."_s );
+      return failed( u"Map canvas render produced an empty image."_s );
     if ( !image.save( outputPath, "PNG" ) )
-      return QgsAiToolResult::error( u"Failed to save map export: %1"_s.arg( outputPath ) );
+      return failed( u"Failed to save map export: %1"_s.arg( outputPath ) );
   }
 
   QJsonObject output;
   RollbackEntry rollback;
   rollback.type = RollbackType::DeleteFile;
   rollback.filePath = outputPath;
-  rollback.description = u"Delete file exported by AI tool."_s;
+  rollback.backupPath = backupPath;
+  rollback.description = existed ? u"Restore the file replaced by AI export."_s : u"Delete file exported by AI tool."_s;
   const QString token = storeRollback( rollback );
 
   QJsonObject diff;
-  diff.insert( u"summary"_s, u"Created exported map file."_s );
+  diff.insert( u"summary"_s, existed ? u"Replaced an existing file with the exported map."_s : u"Created exported map file."_s );
   diff.insert( u"path"_s, outputPath );
-  diff.insert( u"existed_before"_s, false );
-  diff.insert( u"before_size_bytes"_s, 0 );
+  diff.insert( u"existed_before"_s, existed );
+  diff.insert( u"before_size_bytes"_s, existed ? static_cast<qint64>( QFileInfo( backupPath ).size() ) : 0 );
   diff.insert( u"after_size_bytes"_s, static_cast<qint64>( QFileInfo( outputPath ).size() ) );
 
   output.insert( u"path"_s, mContextProvider->workspaceRoot().isEmpty() ? outputPath : QDir( mContextProvider->workspaceRoot() ).relativeFilePath( outputPath ) );
@@ -3221,6 +3275,8 @@ QgsAiToolResult QgsAiExportMapTool::execute( const QJsonObject &args )
   output.insert( u"size_bytes"_s, static_cast<qint64>( QFileInfo( outputPath ).size() ) );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
-  output.insert( u"rollback"_s, rollbackJson( token, u"delete_exported_file"_s ) );
+  output.insert( u"rollback"_s, rollbackJson( token, existed ? u"restore_replaced_file"_s : u"delete_exported_file"_s ) );
+  if ( !previewJson.isEmpty() )
+    output.insert( u"image"_s, previewJson );
   return QgsAiToolResult::ok( output );
 }

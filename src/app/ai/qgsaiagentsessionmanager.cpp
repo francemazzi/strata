@@ -3422,7 +3422,8 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
     toolMessage.metadata.insert( u"tool_description"_s, call.args.value( u"description"_s ).toString() );
     toolMessage.metadata.insert( u"tool_code"_s, call.args.value( u"code"_s ).toString() );
   }
-  if ( result.success && call.name == "capture_map_canvas"_L1 && result.output.isObject() )
+  // tools that return an image the model should see: a map capture, or the first page of an exported layout
+  if ( result.success && ( call.name == "capture_map_canvas"_L1 || call.name == "export_map"_L1 ) && result.output.isObject() )
   {
     const QJsonObject image = result.output.toObject().value( u"image"_s ).toObject();
     const QString imagePath = image.value( u"path"_s ).toString();

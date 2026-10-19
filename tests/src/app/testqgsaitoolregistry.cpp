@@ -1317,6 +1317,33 @@ void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
   QVERIFY( QFileInfo::exists( layoutPath ) );
   QVERIFY( QFileInfo( layoutPath ).size() > 0 );
 
+  // the model gets the first page as an image, long side 1200 px
+  const QJsonObject preview = layoutExport.output.toObject().value( u"image"_s ).toObject();
+  QVERIFY( QFileInfo::exists( preview.value( u"path"_s ).toString() ) );
+  QCOMPARE( std::max( preview.value( u"width"_s ).toInt(), preview.value( u"height"_s ).toInt() ), 1200 );
+
+  // an existing file is replaced only on request, and rollback brings it back
+  QFile firstFile( layoutPath );
+  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
+  const QByteArray firstBytes = firstFile.readAll();
+  firstFile.close();
+  const QgsAiToolResult refused = exportTool.execute( layoutExportArgs );
+  QVERIFY( !refused.success );
+  QVERIFY( refused.errorMessage.contains( u"overwrite=true"_s ) );
+  QJsonObject overwriteArgs = layoutExportArgs;
+  overwriteArgs.insert( u"overwrite"_s, true );
+  overwriteArgs.insert( u"dpi"_s, 72 );
+  const QgsAiToolResult overwritten = exportTool.execute( overwriteArgs );
+  QVERIFY2( overwritten.success, qPrintable( overwritten.errorMessage ) );
+  QVERIFY( overwritten.output.toObject().value( u"diff"_s ).toObject().value( u"existed_before"_s ).toBool() );
+  QVERIFY( QFileInfo( layoutPath ).size() != firstBytes.size() );
+  const QgsAiToolResult restored = exportTool.execute( { { u"rollback_token"_s, overwritten.output.toObject().value( u"rollback_token"_s ).toString() } } );
+  QVERIFY2( restored.success, qPrintable( restored.errorMessage ) );
+  QCOMPARE( restored.output.toObject().value( u"status"_s ).toString(), u"restored_previous"_s );
+  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
+  QCOMPARE( firstFile.readAll(), firstBytes );
+  firstFile.close();
+
   QJsonObject canvasRollbackArgs;
   canvasRollbackArgs.insert( u"rollback_token"_s, canvasRollbackToken );
   const QgsAiToolResult canvasRollback = exportTool.execute( canvasRollbackArgs );
