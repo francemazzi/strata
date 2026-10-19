@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <memory>
+#include <numeric>
 
 #include "ai/qgsaiagentpolicy.h"
 #include "ai/qgsaiauditlog.h"
@@ -68,6 +69,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QSize>
@@ -195,6 +197,7 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
+    void advancedStyleGraduatedClassesAreReadable();
     void createPrintLayoutAndExportMap();
     void printLayoutItemsFitThePage();
     void processingToolReportsMissingAlgorithm();
@@ -1331,6 +1334,89 @@ void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
   const QgsAiToolResult layoutRollback = createTool.execute( layoutRollbackArgs );
   QVERIFY2( layoutRollback.success, qPrintable( layoutRollback.errorMessage ) );
   QVERIFY( !project.layoutManager()->layoutByName( u"AI Layout"_s ) );
+}
+
+void TestQgsAiToolRegistry::advancedStyleGraduatedClassesAreReadable()
+{
+  // skewed values like a flood-prone share per municipality: many zeros, a long tail
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:32632&field=share:double"_s, u"Shares"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  const QList<QVariant> values { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.4, 1.25, 2.5, 3.3, 5.1, 8.7, 13.9, 21.33, 40.02, 52.17, 99.8, QVariant() };
+  for ( const QVariant &value : values )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, value );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+  QgsAiAdvancedStyleTool tool( &project );
+
+  const auto countsOf = []( const QgsAiToolResult &result ) {
+    QList<int> counts;
+    const QJsonArray classes = result.output.toObject().value( u"classes"_s ).toArray();
+    for ( const QJsonValue &value : classes )
+      counts << value.toObject().value( u"feature_count"_s ).toInt();
+    return counts;
+  };
+  const QRegularExpression longDecimals( u"\\d[.,]\\d{3,}"_s );
+
+  // default: natural breaks, white to red, short labels, every feature counted once
+  const QgsAiToolResult jenks = tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s } } );
+  QVERIFY2( jenks.success, qPrintable( jenks.errorMessage ) );
+  QCOMPARE( jenks.output.toObject().value( u"mode"_s ).toString(), u"jenks"_s );
+  const QList<int> jenksCounts = countsOf( jenks );
+  QCOMPARE( jenksCounts.size(), 5 );
+  QCOMPARE( std::accumulate( jenksCounts.begin(), jenksCounts.end(), 0 ), 21 );
+  QCOMPARE( jenks.output.toObject().value( u"unclassified_feature_count"_s ).toInt(), 1 );
+  const QJsonArray jenksClasses = jenks.output.toObject().value( u"classes"_s ).toArray();
+  QCOMPARE( jenksClasses.first().toObject().value( u"color"_s ).toString(), u"#ffffff"_s );
+  QCOMPARE( jenksClasses.last().toObject().value( u"color"_s ).toString(), u"#ff0000"_s );
+  for ( const QJsonValue &value : jenksClasses )
+    QVERIFY2( !longDecimals.match( value.toObject().value( u"label"_s ).toString() ).hasMatch(), qPrintable( value.toObject().value( u"label"_s ).toString() ) );
+
+  // equal intervals put most features in the first class: the counts show it
+  const QgsAiToolResult equal = tool.execute(
+    { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"mode"_s, u"equal_interval"_s }, { u"class_count"_s, 5 } }
+  );
+  QVERIFY2( equal.success, qPrintable( equal.errorMessage ) );
+  QVERIFY( countsOf( equal ).first() >= 17 );
+
+  // the older way of passing the count still works
+  const QgsAiToolResult legacy = tool.execute(
+    { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"mode"_s, u"equal_interval"_s }, { u"classes"_s, QJsonObject { { u"count"_s, 4 } } } }
+  );
+  QVERIFY2( legacy.success, qPrintable( legacy.errorMessage ) );
+  QCOMPARE( countsOf( legacy ).size(), 4 );
+
+  // named ramp, explicit classes with own labels and colors, fixed precision
+  const QgsAiToolResult blues = tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"color_ramp"_s, u"Blues"_s }, { u"class_count"_s, 3 } } );
+  QVERIFY2( blues.success, qPrintable( blues.errorMessage ) );
+  const QJsonArray explicitClasses {
+    QJsonObject { { u"lower"_s, 0 }, { u"upper"_s, 20 }, { u"label"_s, u"low"_s }, { u"color"_s, u"#00ff00"_s } },
+    QJsonObject { { u"lower"_s, 20 }, { u"upper"_s, 100 } },
+  };
+  const QgsAiToolResult manual = tool.execute(
+    { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"classes"_s, explicitClasses }, { u"label_precision"_s, 0 } }
+  );
+  QVERIFY2( manual.success, qPrintable( manual.errorMessage ) );
+  const QJsonArray manualClasses = manual.output.toObject().value( u"classes"_s ).toArray();
+  QCOMPARE( manualClasses.at( 0 ).toObject().value( u"label"_s ).toString(), u"low"_s );
+  QCOMPARE( manualClasses.at( 0 ).toObject().value( u"color"_s ).toString(), u"#00ff00"_s );
+  QCOMPARE( manualClasses.at( 1 ).toObject().value( u"label"_s ).toString(), u"20 - 100"_s );
+  QCOMPARE( countsOf( manual ), QList<int>( { 17, 4 } ) );
+
+  QVERIFY( !tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"mode"_s, u"random"_s } } ).success );
+  // a table without geometry has nothing to color: an error, not a crash
+  QgsVectorLayer *table = new QgsVectorLayer( u"None?field=share:double"_s, u"Table"_s, u"memory"_s );
+  QgsFeature row( table->fields() );
+  row.setAttribute( 0, 1.0 );
+  QVERIFY( table->dataProvider()->addFeature( row ) );
+  project.addMapLayer( table );
+  QVERIFY( !tool.execute( { { u"layer_id"_s, table->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s } } ).success );
+  QVERIFY( !tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"color_ramp"_s, u"NoSuchRamp"_s } } ).success );
 }
 
 void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()

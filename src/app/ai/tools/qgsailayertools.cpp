@@ -32,6 +32,10 @@
 #include "qgsaitoolschemautil.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
+#include "qgsclassificationcustom.h"
+#include "qgsclassificationmethod.h"
+#include "qgsclassificationmethodregistry.h"
+#include "qgscolorrampimpl.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
 #include "qgsfeature.h"
@@ -75,6 +79,7 @@
 #include "qgsprocessingregistry.h"
 #include "qgsprocessingutils.h"
 #include "qgsproject.h"
+#include "qgsprojectstylesettings.h"
 #include "qgsproperty.h"
 #include "qgsprovidermetadata.h"
 #include "qgsproviderregistry.h"
@@ -83,12 +88,14 @@
 #include "qgsrectangle.h"
 #include "qgsrenderer.h"
 #include "qgssinglesymbolrenderer.h"
+#include "qgsstyle.h"
 #include "qgssymbol.h"
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerfeatureiterator.h"
 #include "qgstextformat.h"
 #include "qgsvectorlayerlabeling.h"
+#include "qgsvariantutils.h"
 
 #include <QColor>
 #include <QDateTime>
@@ -2333,8 +2340,12 @@ QString QgsAiAdvancedStyleTool::description() const
 {
   return QStringLiteral(
     "Applies advanced native vector styling: categorized and graduated renderers, "
-    "plus basic field labeling. Returns a rollback token that restores the previous "
-    "renderer, labeling and layer visual settings."
+    "plus basic field labeling. Graduated classes come from a QGIS classification mode (default jenks, "
+    "natural breaks, which suits skewed values; equal_interval suits evenly spread values) and are colored "
+    "with a color ramp, light to dark by default. Class labels are rounded to readable precision. "
+    "The result lists each graduated class with its label, color and feature_count: check the counts, "
+    "since a class holding almost every feature makes the map hard to read. "
+    "Returns a rollback token that restores the previous renderer, labeling and layer visual settings."
   );
 }
 
@@ -2344,7 +2355,12 @@ QJsonObject QgsAiAdvancedStyleTool::schema() const
   properties.insert( u"layer_id"_s, prop( u"string"_s, u"Target vector layer id."_s ) );
   properties.insert( u"renderer"_s, prop( u"string"_s, u"Renderer type: categorized or graduated."_s ) );
   properties.insert( u"field"_s, prop( u"string"_s, u"Attribute field used by the renderer."_s ) );
-  properties.insert( u"classes"_s, prop( u"object"_s, u"Optional class count for graduated renderer, or an array of class objects."_s ) );
+  properties.insert( u"class_count"_s, prop( u"integer"_s, u"Optional number of graduated classes, 1 to 32. Default 5."_s ) );
+  properties.insert( u"mode"_s, prop( u"string"_s, u"Optional graduated classification mode: jenks (default), quantile, equal_interval, pretty, stddev or logarithmic."_s ) );
+  properties.insert( u"classes"_s, propArray( prop( u"object"_s, u"Graduated: {lower, upper, label?, color?}. Categorized: {value, label?, color?}. Color as #RRGGBB."_s ), u"Optional explicit classes, instead of computing them from mode and class_count."_s ) );
+  properties.insert( u"color_ramp"_s, prop( u"string"_s, u"Optional QGIS color ramp name, e.g. Reds, Blues, YlOrRd, Viridis, RdYlGn. Graduated default: the project default ramp, else white to red. Categorized default: distinct colors."_s ) );
+  properties.insert( u"invert_ramp"_s, prop( u"boolean"_s, u"Optional: reverse the color ramp."_s ) );
+  properties.insert( u"label_precision"_s, prop( u"integer"_s, u"Optional decimal places in graduated class labels. Default: chosen from the class widths, trailing zeros trimmed."_s ) );
   properties.insert( u"labels"_s, prop( u"object"_s, u"Optional labeling config, e.g. {\"enabled\":true,\"field\":\"name\"}."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous style_layer_advanced call. If set, restores the previous style."_s ) );
   return schemaObject( properties );
@@ -2399,6 +2415,40 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
     }
   }
 
+  const QJsonValue classesValue = args.value( u"classes"_s );
+  const QJsonArray classArray = classesValue.toArray();
+  // older callers pass the class count as classes, as a number or {"count": n}
+  const int legacyClassCount = classesValue.isDouble() ? classesValue.toInt() : classesValue.toObject().value( u"count"_s ).toInt( 5 );
+  const int classCount = std::clamp( args.value( u"class_count"_s ).toInt( legacyClassCount ), 1, 32 );
+  const QJsonValue precisionValue = args.value( u"label_precision"_s );
+
+  static const QMap<QString, QString>
+    modeIds { { u"jenks"_s, u"Jenks"_s }, { u"quantile"_s, u"Quantile"_s }, { u"equal_interval"_s, u"EqualInterval"_s }, { u"pretty"_s, u"Pretty"_s }, { u"stddev"_s, u"StdDev"_s }, { u"logarithmic"_s, u"Logarithmic"_s } };
+  QString mode = args.value( u"mode"_s ).toString().trimmed().toLower();
+  if ( mode.isEmpty() )
+    mode = u"jenks"_s;
+  if ( renderer == "graduated"_L1 && !modeIds.contains( mode ) )
+    return QgsAiToolResult::error( u"Unsupported mode '%1'. Use one of: %2."_s.arg( mode, QStringList( modeIds.keys() ).join( ", "_L1 ) ) );
+
+  // graduated default as in the QGIS layer styling panel: the project default ramp, else white to red
+  std::unique_ptr<QgsColorRamp> ramp;
+  const QString rampName = args.value( u"color_ramp"_s ).toString().trimmed();
+  if ( !rampName.isEmpty() )
+  {
+    ramp = QgsStyle::defaultStyle()->colorRamp( rampName );
+    if ( !ramp )
+      return QgsAiToolResult::error( u"Unknown color ramp '%1'. Available ramps: %2."_s.arg( rampName, QgsStyle::defaultStyle()->colorRampNames().join( ", "_L1 ) ) );
+  }
+  else if ( renderer == "graduated"_L1 )
+  {
+    ramp.reset( project->styleSettings()->defaultColorRamp() );
+    if ( !ramp )
+      ramp = std::make_unique<QgsGradientColorRamp>( QColor( 255, 255, 255 ), QColor( 255, 0, 0 ) );
+  }
+  if ( ramp && args.value( u"invert_ramp"_s ).toBool( false ) )
+    ramp->invert();
+  const auto explicitColor = [&classArray]( int index ) { return QColor( classArray.at( index ).toObject().value( u"color"_s ).toString() ); };
+
   QgsLayerTreeLayer *treeNode = project->layerTreeRoot() ? project->layerTreeRoot()->findLayer( layerId ) : nullptr;
   const QJsonObject beforeVisual = layerVisualSummary( layer, treeNode );
   QgsMapLayerStyle beforeStyle;
@@ -2412,13 +2462,13 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   rollback.description = u"Restore layer style before AI advanced styling."_s;
 
   QJsonArray changes;
+  QJsonArray classesJson;
+  long long unclassifiedCount = 0;
   if ( renderer == "categorized"_L1 )
   {
     QgsCategoryList categories;
-    const QJsonValue classesValue = args.value( u"classes"_s );
-    if ( classesValue.isArray() )
+    if ( !classArray.isEmpty() )
     {
-      const QJsonArray classArray = classesValue.toArray();
       for ( int i = 0; i < classArray.size(); ++i )
       {
         const QJsonObject classObject = classArray.at( i ).toObject();
@@ -2427,9 +2477,6 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
           return QgsAiToolResult::error( u"Could not create a default symbol for categorized renderer."_s );
         const QVariant value = classObject.value( u"value"_s ).toVariant();
         const QString label = classObject.value( u"label"_s ).toString( value.toString() );
-        const QColor color( classObject.value( u"color"_s ).toString() );
-        if ( color.isValid() )
-          symbol->setColor( color );
         categories.append( QgsRendererCategory( value, symbol.release(), label ) );
       }
     }
@@ -2446,16 +2493,41 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
       }
     }
 
-    layer->setRenderer( new QgsCategorizedSymbolRenderer( field, categories ) );
+    auto categorized = std::make_unique<QgsCategorizedSymbolRenderer>( field, categories );
+    if ( ramp )
+      categorized->updateColorRamp( ramp.release() );
+    for ( int i = 0; i < classArray.size(); ++i )
+    {
+      if ( !explicitColor( i ).isValid() )
+        continue;
+      std::unique_ptr<QgsSymbol> symbol( categorized->categories().at( i ).symbol()->clone() );
+      symbol->setColor( explicitColor( i ) );
+      categorized->updateCategorySymbol( i, symbol.release() );
+    }
+    layer->setRenderer( categorized.release() );
     changes.append( u"categorized_renderer"_s );
   }
   else if ( renderer == "graduated"_L1 )
   {
-    QgsRangeList ranges;
-    const QJsonValue classesValue = args.value( u"classes"_s );
-    if ( classesValue.isArray() )
+    std::unique_ptr<QgsSymbol> baseSymbol( QgsSymbol::defaultSymbol( layer->geometryType() ) );
+    if ( !baseSymbol )
+      return QgsAiToolResult::error( u"Could not create a default symbol for graduated renderer."_s );
+    auto graduated = std::make_unique<QgsGraduatedSymbolRenderer>( field );
+    graduated->setSourceSymbol( baseSymbol->clone() );
+    graduated->setSourceColorRamp( ramp.release() );
+    std::unique_ptr<QgsClassificationMethod> method = QgsApplication::classificationMethodRegistry()->method( classArray.isEmpty() ? modeIds.value( mode ) : QgsClassificationCustom::METHOD_ID );
+    method->setLabelTrimTrailingZeroes( true );
+    graduated->setClassificationMethod( method.release() );
+
+    if ( classArray.isEmpty() )
     {
-      const QJsonArray classArray = classesValue.toArray();
+      QString classError;
+      graduated->updateClasses( layer, classCount, classError );
+      if ( graduated->ranges().isEmpty() )
+        return QgsAiToolResult::error( u"Could not compute graduated classes for field %1%2"_s.arg( field, classError.isEmpty() ? u": it has no numeric values."_s : u": "_s + classError ) );
+    }
+    else
+    {
       for ( int i = 0; i < classArray.size(); ++i )
       {
         const QJsonObject classObject = classArray.at( i ).toObject();
@@ -2463,40 +2535,59 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
         const double upper = classObject.value( u"upper"_s ).toDouble();
         if ( upper < lower )
           return QgsAiToolResult::error( u"Graduated class upper value cannot be less than lower value."_s );
-        std::unique_ptr<QgsSymbol> symbol( defaultSymbolWithColor( layer->geometryType(), i ) );
-        if ( !symbol )
-          return QgsAiToolResult::error( u"Could not create a default symbol for graduated renderer."_s );
-        const QColor color( classObject.value( u"color"_s ).toString() );
-        if ( color.isValid() )
-          symbol->setColor( color );
-        const QString label = classObject.value( u"label"_s ).toString( u"%1 - %2"_s.arg( lower ).arg( upper ) );
-        ranges.append( QgsRendererRange( lower, upper, symbol.release(), label ) );
+        graduated->addClass( QgsRendererRange( lower, upper, baseSymbol->clone(), QString() ) );
       }
+      graduated->updateColorRamp();
     }
+
+    if ( precisionValue.isDouble() )
+      graduated->classificationMethod()->setLabelPrecision( std::clamp( precisionValue.toInt(), 0, 10 ) );
     else
+      graduated->calculateLabelPrecision( false );
+    graduated->updateRangeLabels();
+    for ( int i = 0; i < classArray.size(); ++i )
     {
-      bool minOk = false;
-      bool maxOk = false;
-      const double min = layer->minimumValue( fieldIndex ).toDouble( &minOk );
-      const double max = layer->maximumValue( fieldIndex ).toDouble( &maxOk );
-      if ( !minOk || !maxOk )
-        return QgsAiToolResult::error( u"Graduated renderer field must contain numeric values: %1"_s.arg( field ) );
-
-      const int classCount = std::clamp( classesValue.isDouble() ? classesValue.toInt( 5 ) : 5, 1, 32 );
-      const double span = max - min;
-      const double step = classCount == 1 || span == 0.0 ? 0.0 : span / classCount;
-      for ( int i = 0; i < classCount; ++i )
+      const QString label = classArray.at( i ).toObject().value( u"label"_s ).toString();
+      if ( !label.isEmpty() )
+        graduated->updateRangeLabel( i, label );
+      if ( explicitColor( i ).isValid() )
       {
-        const double lower = step == 0.0 ? min : min + ( step * i );
-        const double upper = step == 0.0 || i == classCount - 1 ? max : min + ( step * ( i + 1 ) );
-        std::unique_ptr<QgsSymbol> symbol( defaultSymbolWithColor( layer->geometryType(), i ) );
-        if ( !symbol )
-          return QgsAiToolResult::error( u"Could not create a default symbol for graduated renderer."_s );
-        ranges.append( QgsRendererRange( lower, upper, symbol.release(), u"%1 - %2"_s.arg( lower ).arg( upper ) ) );
+        std::unique_ptr<QgsSymbol> symbol( graduated->ranges().at( i ).symbol()->clone() );
+        symbol->setColor( explicitColor( i ) );
+        graduated->updateRangeSymbol( i, symbol.release() );
       }
     }
 
-    layer->setRenderer( new QgsGraduatedSymbolRenderer( field, ranges ) );
+    // count features per class with the renderer's own lookup, so the counts match what the map draws
+    const QgsRangeList &ranges = graduated->ranges();
+    QVector<long long> counts( ranges.size(), 0 );
+    QgsFeatureRequest request;
+    request.setFlags( Qgis::FeatureRequestFlag::NoGeometry ).setSubsetOfAttributes( QgsAttributeList() << fieldIndex );
+    QgsFeatureIterator featureIt = layer->getFeatures( request );
+    QgsFeature feature;
+    while ( featureIt.nextFeature( feature ) )
+    {
+      const QVariant value = feature.attribute( fieldIndex );
+      bool ok = false;
+      const double number = QgsVariantUtils::isNull( value ) ? 0.0 : value.toDouble( &ok );
+      const QgsRendererRange *range = ok ? graduated->rangeForValue( number ) : nullptr;
+      if ( range )
+        ++counts[static_cast<int>( range - ranges.constData() )];
+      else
+        ++unclassifiedCount;
+    }
+    for ( int i = 0; i < ranges.size(); ++i )
+    {
+      QJsonObject classJson;
+      classJson.insert( u"lower"_s, ranges.at( i ).lowerValue() );
+      classJson.insert( u"upper"_s, ranges.at( i ).upperValue() );
+      classJson.insert( u"label"_s, ranges.at( i ).label() );
+      classJson.insert( u"color"_s, ranges.at( i ).symbol()->color().name() );
+      classJson.insert( u"feature_count"_s, counts.at( i ) );
+      classesJson.append( classJson );
+    }
+
+    layer->setRenderer( graduated.release() );
     changes.append( u"graduated_renderer"_s );
   }
 
@@ -2525,6 +2616,12 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"restore_layer_style"_s ) );
+  if ( renderer == "graduated"_L1 )
+  {
+    output.insert( u"mode"_s, classArray.isEmpty() ? mode : u"explicit"_s );
+    output.insert( u"classes"_s, classesJson );
+    output.insert( u"unclassified_feature_count"_s, unclassifiedCount );
+  }
   return QgsAiToolResult::ok( output );
 }
 
