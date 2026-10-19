@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -45,6 +46,7 @@
 #include "qgslayertreeregistrybridge.h"
 #include "qgslayoutexporter.h"
 #include "qgslayoutitemlabel.h"
+#include "qgslayoutitemgroup.h"
 #include "qgslayoutitemlegend.h"
 #include "qgslayoutitemmap.h"
 #include "qgslayoutitempage.h"
@@ -85,6 +87,7 @@
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerfeatureiterator.h"
+#include "qgstextformat.h"
 #include "qgsvectorlayerlabeling.h"
 
 #include <QColor>
@@ -98,7 +101,9 @@
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPainter>
 #include <QPointer>
+#include <QRectF>
 #include <QSet>
 #include <QSize>
 #include <QString>
@@ -133,6 +138,19 @@ namespace
       QString layoutName;
       QStringList itemUuids;
       int pageCountBefore = 0;
+      //! Map item resized by edit_print_layout to make room for legend/scale bar/north arrow.
+      QString mapUuid;
+      QRectF mapRect;
+      QgsRectangle mapExtent;
+      //! Note and legend that edit_print_layout changed in place.
+      QString noteUuid;
+      QString noteText;
+      QRectF noteRect;
+      QString legendUuid;
+      Qgis::LegendSyncMode legendModeBefore = Qgis::LegendSyncMode::Manual;
+      QVariantMap legendLabelsBefore;
+      //! Earlier items moved up to make room for a new footer note, by uuid.
+      QHash<QString, QPointF> movedItems;
       QString filePath;
       QString description;
       //! Layers a Processing run loaded into the project.
@@ -850,6 +868,69 @@ namespace
     return maps.empty() ? nullptr : maps.constFirst();
   }
 
+  QRectF sceneRect( const QgsLayoutItem *item )
+  {
+    return item->mapRectToScene( item->rect() );
+  }
+
+  QRectF pageRectAt( QgsLayout *layout, QPointF point )
+  {
+    QgsLayoutPageCollection *pages = layout->pageCollection();
+    const QgsLayoutItemPage *page = pages->page( std::max( 0, pages->pageNumberForPoint( point ) ) );
+    return page ? QRectF( page->pos(), page->rect().size() ) : QRectF();
+  }
+
+  // What the layout looks like, in mm relative to each page, plus the problems a person would see
+  // on paper: items cut by the page edge or covering each other. The model cannot see the layout.
+  QJsonObject layoutSummary( QgsPrintLayout *layout )
+  {
+    QJsonObject summary;
+    if ( !layout || !layout->pageCollection() || layout->pageCollection()->pageCount() == 0 )
+      return summary;
+
+    const QgsLayoutItemPage *firstPage = layout->pageCollection()->page( 0 );
+    const QSizeF pageSize = layout->convertToLayoutUnits( firstPage->pageSize() );
+    QJsonObject page;
+    page.insert( u"width_mm"_s, std::round( pageSize.width() ) );
+    page.insert( u"height_mm"_s, std::round( pageSize.height() ) );
+    page.insert( u"orientation"_s, firstPage->orientation() == QgsLayoutItemPage::Landscape ? u"landscape"_s : u"portrait"_s );
+    page.insert( u"page_count"_s, layout->pageCollection()->pageCount() );
+    summary.insert( u"page"_s, page );
+
+    QList<QgsLayoutItem *> items;
+    layout->layoutItems( items );
+    items.erase( std::remove_if( items.begin(), items.end(), []( QgsLayoutItem *item ) { return qobject_cast<QgsLayoutItemPage *>( item ) || qobject_cast<QgsLayoutItemGroup *>( item ); } ), items.end() );
+
+    QJsonArray itemArray;
+    QJsonArray issues;
+    for ( int i = 0; i < items.size(); ++i )
+    {
+      const QRectF rect = sceneRect( items.at( i ) );
+      const QRectF pageRect = pageRectAt( layout, rect.center() );
+      const QString name = items.at( i )->displayName();
+      QJsonObject item;
+      item.insert( u"name"_s, name );
+      item.insert( u"x_mm"_s, std::round( rect.x() - pageRect.x() ) );
+      item.insert( u"y_mm"_s, std::round( rect.y() - pageRect.y() ) );
+      item.insert( u"width_mm"_s, std::round( rect.width() ) );
+      item.insert( u"height_mm"_s, std::round( rect.height() ) );
+      itemArray.append( item );
+
+      // half a millimetre of tolerance for frame strokes and rounding
+      if ( !pageRect.adjusted( -0.5, -0.5, 0.5, 0.5 ).contains( rect ) )
+        issues.append( u"'%1' extends outside the page."_s.arg( name ) );
+      for ( int j = i + 1; j < items.size(); ++j )
+      {
+        const QRectF overlap = rect.intersected( sceneRect( items.at( j ) ) );
+        if ( overlap.width() > 0.5 && overlap.height() > 0.5 )
+          issues.append( u"'%1' overlaps '%2'."_s.arg( name, items.at( j )->displayName() ) );
+      }
+    }
+    summary.insert( u"items"_s, itemArray );
+    summary.insert( u"issues"_s, issues );
+    return summary;
+  }
+
   QSize exportRenderSize( const QSize &requested, const QSize &fallback )
   {
     QSize size = requested.isValid() ? requested : fallback;
@@ -1053,6 +1134,57 @@ namespace
     return QgsAiToolResult::ok( output );
   }
 
+  // Manual mode owns a copy of the tree, so labels set on it leave the project's layer names alone.
+  // The copy starts from the current tree: start from all project layers, keep the legend ones.
+  void makeLegendManual( QgsLayoutItemLegend *legend, const QStringList &keepIds )
+  {
+    legend->setSyncMode( Qgis::LegendSyncMode::AllProjectLayers );
+    legend->setSyncMode( Qgis::LegendSyncMode::Manual );
+    QgsLayerTreeGroup *root = legend->model()->rootGroup();
+    const QList<QgsLayerTreeLayer *> nodes = root->findLayers();
+    for ( QgsLayerTreeLayer *node : nodes )
+    {
+      if ( !keepIds.contains( node->layerId() ) )
+        QgsLayerTree::toGroup( node->parent() )->removeChildNode( node );
+    }
+    root->removeChildrenGroupWithoutLayers();
+  }
+
+  void setLegendLabels( QgsLayoutItemLegend *legend, const QVariantMap &labels, QVariantMap *before = nullptr )
+  {
+    QgsLayerTreeGroup *root = legend->model()->rootGroup();
+    for ( auto it = labels.constBegin(); it != labels.constEnd(); ++it )
+    {
+      QgsLayerTreeLayer *node = root->findLayer( it.key() );
+      if ( !node )
+        continue;
+      if ( before )
+        before->insert( it.key(), node->customProperty( u"legend/title-label"_s ) );
+      if ( it.value().isValid() )
+        node->setCustomProperty( u"legend/title-label"_s, it.value().toString() );
+      else
+        node->removeCustomProperty( u"legend/title-label"_s );
+      legend->model()->clearCachedData( node );
+    }
+  }
+
+  // a legend measures itself on its first paint: paint once so its position and the summary use the real size
+  void fitLegendToContent( QgsLayoutItemLegend *legend )
+  {
+    QImage scratch( 1, 1, QImage::Format_ARGB32 );
+    QPainter painter( &scratch );
+    legend->paint( &painter, nullptr, nullptr );
+    painter.end();
+    legend->adjustBoxSize();
+  }
+
+  // the label wraps long text to its width: one text height per wrapped line
+  double wrappedTextHeight( const QgsLayoutItemLabel *label, double width )
+  {
+    const QSizeF natural = label->sizeForText();
+    return natural.height() * std::max( 1.0, std::ceil( natural.width() / width ) );
+  }
+
   QgsAiToolResult rollbackLayoutEdit( QgsProject *project, const QString &token )
   {
     if ( !rollbackStore().contains( token ) )
@@ -1075,6 +1207,35 @@ namespace
         layout->removeLayoutItem( item );
         ++removedItems;
       }
+    }
+
+    if ( QgsLayoutItemMap *map = qobject_cast<QgsLayoutItemMap *>( layout->itemByUuid( entry.mapUuid ) ) )
+    {
+      map->attemptMove( QgsLayoutPoint( entry.mapRect.topLeft() ) );
+      map->attemptResize( QgsLayoutSize( entry.mapRect.size() ) );
+      map->zoomToExtent( entry.mapExtent );
+    }
+
+    if ( QgsLayoutItemLegend *legend = qobject_cast<QgsLayoutItemLegend *>( layout->itemByUuid( entry.legendUuid ) ) )
+    {
+      if ( entry.legendModeBefore != Qgis::LegendSyncMode::Manual )
+        legend->setSyncMode( entry.legendModeBefore );
+      else
+        setLegendLabels( legend, entry.legendLabelsBefore );
+      fitLegendToContent( legend );
+    }
+
+    for ( auto it = entry.movedItems.constBegin(); it != entry.movedItems.constEnd(); ++it )
+    {
+      if ( QgsLayoutItem *item = layout->itemByUuid( it.key() ) )
+        item->attemptMove( QgsLayoutPoint( it.value() ) );
+    }
+
+    if ( QgsLayoutItemLabel *note = qobject_cast<QgsLayoutItemLabel *>( layout->itemByUuid( entry.noteUuid ) ) )
+    {
+      note->setText( entry.noteText );
+      note->attemptMove( QgsLayoutPoint( entry.noteRect.topLeft() ) );
+      note->attemptResize( QgsLayoutSize( entry.noteRect.size() ) );
     }
 
     int removedPages = 0;
@@ -2379,8 +2540,10 @@ QgsAiCreatePrintLayoutTool::QgsAiCreatePrintLayoutTool( QgsProject *project, Qgs
 QString QgsAiCreatePrintLayoutTool::description() const
 {
   return QStringLiteral(
-    "Creates a simple native QGIS print layout with a map frame and optional title. "
-    "The map uses the current canvas extent and rendered layers when a canvas is available. "
+    "Creates a native QGIS print layout with a map frame and optional title. "
+    "The page is A4 landscape unless page_size/orientation say otherwise; the map fills the page inside the margins "
+    "and shows the whole current canvas extent with its rendered layers. "
+    "The result describes the page and item positions in mm, with an issues list (items outside the page or overlapping). "
     "Use this before export_map when the user asks for a report/map layout."
   );
 }
@@ -2390,6 +2553,8 @@ QJsonObject QgsAiCreatePrintLayoutTool::schema() const
   QJsonObject properties;
   properties.insert( u"name"_s, prop( u"string"_s, u"Optional layout name. Defaults to 'Strata Layout' and is made unique."_s ) );
   properties.insert( u"title"_s, prop( u"string"_s, u"Optional title label to place above the map."_s ) );
+  properties.insert( u"page_size"_s, prop( u"string"_s, u"Optional page size known to QGIS, e.g. A4, A3, A0, Letter. Defaults to A4."_s ) );
+  properties.insert( u"orientation"_s, prop( u"string"_s, u"Optional page orientation: landscape or portrait. Defaults to landscape."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous create_print_layout call. If set, removes that layout."_s ) );
   return schemaObject( properties );
 }
@@ -2409,18 +2574,29 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   const int beforeLayoutCount = project->layoutManager()->layouts().size();
   const QString layoutName = uniqueLayoutName( project, args.value( u"name"_s ).toString() );
   const QString title = args.value( u"title"_s ).toString().trimmed();
+  const QString pageSizeName = args.value( u"page_size"_s ).toString( u"A4"_s ).trimmed();
+  const QString orientationName = args.value( u"orientation"_s ).toString( u"landscape"_s ).trimmed().toLower();
+  if ( orientationName != "landscape"_L1 && orientationName != "portrait"_L1 )
+    return QgsAiToolResult::error( u"Unsupported orientation '%1'. Use landscape or portrait."_s.arg( orientationName ) );
 
   auto layout = std::make_unique<QgsPrintLayout>( project );
   layout->initializeDefaults();
   layout->setName( layoutName );
+  QgsLayoutItemPage *page = layout->pageCollection()->page( 0 );
+  if ( !page->setPageSize( pageSizeName, orientationName == "portrait"_L1 ? QgsLayoutItemPage::Portrait : QgsLayoutItemPage::Landscape ) )
+    return QgsAiToolResult::error( u"Unknown page size '%1'. Use a size known to QGIS, e.g. A4, A3 or Letter."_s.arg( pageSizeName ) );
+  const QSizeF pageSize = layout->convertToLayoutUnits( page->pageSize() );
 
+  const double margin = 10.0;
   const double titleHeight = title.isEmpty() ? 0.0 : 15.0;
   QgsLayoutItemMap *map = new QgsLayoutItemMap( layout.get() );
-  map->attemptMove( QgsLayoutPoint( 10, 10 + titleHeight ) );
-  map->attemptResize( QgsLayoutSize( 190, 277 - titleHeight ) );
+  map->setId( u"AI Map"_s );
+  map->attemptMove( QgsLayoutPoint( margin, margin + titleHeight ) );
+  map->attemptResize( QgsLayoutSize( pageSize.width() - 2 * margin, pageSize.height() - 2 * margin - titleHeight ) );
   if ( mCanvas )
   {
-    map->setExtent( mCanvas->extent() );
+    // zoomToExtent keeps the frame size; setExtent would stretch the frame to the extent ratio, off the page
+    map->zoomToExtent( mCanvas->extent() );
     map->setLayers( mCanvas->mapSettings().layers( true ) );
     map->setKeepLayerSet( true );
   }
@@ -2435,13 +2611,23 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   if ( !title.isEmpty() )
   {
     QgsLayoutItemLabel *label = new QgsLayoutItemLabel( layout.get() );
+    label->setId( u"AI Title"_s );
     label->setText( title );
-    label->attemptMove( QgsLayoutPoint( 10, 8 ) );
-    label->attemptResize( QgsLayoutSize( 190, 12 ) );
+    // a title, not body text: 20 pt bold on A4 landscape, scaled with the page width
+    QgsTextFormat format = label->textFormat();
+    QFont font = format.font();
+    font.setBold( true );
+    format.setFont( font );
+    format.setSize( std::round( 20.0 * pageSize.width() / 297.0 ) );
+    format.setSizeUnit( Qgis::RenderUnit::Points );
+    label->setTextFormat( format );
+    label->attemptMove( QgsLayoutPoint( margin, 8 ) );
+    label->attemptResize( QgsLayoutSize( pageSize.width() - 2 * margin, 12 ) );
     label->adjustSizeToText();
     layout->addLayoutItem( label );
   }
 
+  QgsPrintLayout *createdLayout = layout.get();
   if ( !project->layoutManager()->addLayout( layout.release() ) )
     return QgsAiToolResult::error( u"Could not add print layout to the project."_s );
 
@@ -2462,6 +2648,7 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   output.insert( u"title"_s, title );
   output.insert( u"has_map"_s, true );
   output.insert( u"uses_canvas_extent"_s, mCanvas != nullptr );
+  output.insert( u"layout"_s, layoutSummary( createdLayout ) );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"remove_created_layout"_s ) );
@@ -2480,8 +2667,15 @@ QString QgsAiEditPrintLayoutTool::description() const
 {
   return QStringLiteral(
     "Edits an existing QGIS print layout by adding common composer items: legend, "
-    "scale bar, north arrow and an additional page. The tool returns a rollback token "
-    "which removes the newly added items/pages."
+    "scale bar, north arrow and an additional page. Legend, scale bar and north arrow are placed "
+    "in a panel beside the map (right on landscape pages, bottom on portrait pages, or as set by placement); "
+    "the map shrinks to make room and keeps its extent. The scale bar uses QGIS defaults for units and length. "
+    "The legend shows the layers visible in the map unless legend_layers is given, e.g. to leave out a basemap; "
+    "legend_labels replaces technical layer names with readable ones. note adds a footer line with text the user gave, "
+    "e.g. data source and date: never make up a source; add it in the same call as the other items so they are laid out together. "
+    "Called again with note or legend_labels and without add_legend, it updates the existing note and legend instead of adding new ones. "
+    "The result describes item positions in mm with an issues list (items outside the page or overlapping). "
+    "The tool returns a rollback token which removes the newly added items/pages and restores the map size."
   );
 }
 
@@ -2493,6 +2687,10 @@ QJsonObject QgsAiEditPrintLayoutTool::schema() const
   properties.insert( u"add_scalebar"_s, prop( u"boolean"_s, u"Add a scale bar linked to the first map item."_s ) );
   properties.insert( u"add_north_arrow"_s, prop( u"boolean"_s, u"Add a north arrow picture linked to the first map item."_s ) );
   properties.insert( u"add_page"_s, prop( u"boolean"_s, u"Append a new page to the layout."_s ) );
+  properties.insert( u"placement"_s, prop( u"string"_s, u"Optional side of the map for legend, scale bar and north arrow: right or bottom. Defaults to right on landscape pages, bottom on portrait pages."_s ) );
+  properties.insert( u"legend_layers"_s, propArray( prop( u"string"_s, u"Layer id."_s ), u"Optional layer ids to show in the legend, in project order. Leave it out to show the layers visible in the map, which is usually right; pass it only to leave some of those out, e.g. a basemap. Layers the map does not show are left out and listed in legend_layers_not_in_map."_s ) );
+  properties.insert( u"legend_labels"_s, prop( u"object"_s, u"Optional legend names by layer id, e.g. {\"<layer_id>\": \"Flood-prone area (%)\"}. Applies to the legend added by this call, or without add_legend to the layout's existing legend. The project layer names do not change."_s ) );
+  properties.insert( u"note"_s, prop( u"string"_s, u"Optional footer text at the bottom of the page, only when the user asks for it, e.g. the data source and date they give. Replaces the text of a note added earlier."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous edit_print_layout call. If set, removes added items/pages."_s ) );
   return schemaObject( properties );
 }
@@ -2521,31 +2719,215 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
   const bool addScaleBar = args.value( u"add_scalebar"_s ).toBool( false );
   const bool addNorthArrow = args.value( u"add_north_arrow"_s ).toBool( false );
   const bool addPage = args.value( u"add_page"_s ).toBool( false );
-  if ( !addLegend && !addScaleBar && !addNorthArrow && !addPage )
+  const QString note = args.value( u"note"_s ).toString().trimmed();
+  QJsonObject legendLabels = args.value( u"legend_labels"_s ).toObject();
+  if ( !addLegend && !addScaleBar && !addNorthArrow && !addPage && note.isEmpty() && legendLabels.isEmpty() )
     return QgsAiToolResult::error( u"No layout edit requested."_s );
 
   QgsLayoutItemMap *map = firstLayoutMap( layout );
   if ( ( addLegend || addScaleBar || addNorthArrow ) && !map )
     return QgsAiToolResult::error( u"Layout has no map item to link legend/scale/north arrow: %1"_s.arg( layoutName ) );
 
+  // without add_legend, legend_labels renames the existing legend: the one linked to the map, else the first
+  QgsLayoutItemLegend *existingLegend = nullptr;
+  if ( !legendLabels.isEmpty() && !addLegend )
+  {
+    QList<QgsLayoutItemLegend *> legends;
+    layout->layoutItems( legends );
+    for ( QgsLayoutItemLegend *legend : std::as_const( legends ) )
+    {
+      if ( !existingLegend || ( legend->linkedMap() == map && existingLegend->linkedMap() != map ) )
+        existingLegend = legend;
+    }
+    if ( !existingLegend )
+      return QgsAiToolResult::error( u"The layout has no legend to rename: pass add_legend=true to add one."_s );
+  }
+
+  const QString placement = args.value( u"placement"_s ).toString().trimmed().toLower();
+  if ( !placement.isEmpty() && placement != "right"_L1 && placement != "bottom"_L1 )
+    return QgsAiToolResult::error( u"Unsupported placement '%1'. Use right or bottom."_s.arg( placement ) );
+
+  // A legend explains what the map draws: layers the map does not show are left out and reported.
+  QStringList legendLayerIds;
+  QJsonArray skippedLegendLayers;
+  QStringList shownIds;
+  if ( map )
+  {
+    const QList<QgsMapLayer *> shown = map->layersToRender();
+    for ( const QgsMapLayer *layer : shown )
+      shownIds.append( layer->id() );
+  }
+  const QJsonArray legendLayers = args.value( u"legend_layers"_s ).toArray();
+  if ( !legendLayers.isEmpty() && map )
+  {
+    for ( const QJsonValue &value : legendLayers )
+    {
+      const QString layerId = value.toString().trimmed();
+      if ( !project->mapLayer( layerId ) )
+        return QgsAiToolResult::error( u"No layer with id: %1"_s.arg( layerId ) );
+      if ( shownIds.contains( layerId ) )
+        legendLayerIds.append( layerId );
+      else
+        skippedLegendLayers.append( layerId );
+    }
+    if ( legendLayerIds.isEmpty() )
+      return QgsAiToolResult::error( u"None of legend_layers is visible in the map; the legend would be empty."_s );
+  }
+  const QStringList legendIds = existingLegend && existingLegend->syncMode() == Qgis::LegendSyncMode::Manual ? existingLegend->model()->rootGroup()->findLayerIds()
+                                : legendLayerIds.isEmpty()                                                   ? shownIds
+                                                                                                             : legendLayerIds;
+  // like legend_layers: names for layers the legend does not show are left out and reported
+  QJsonArray skippedLegendLabels;
+  for ( const QString &layerId : legendLabels.keys() )
+  {
+    if ( !legendIds.contains( layerId ) )
+    {
+      legendLabels.remove( layerId );
+      skippedLegendLabels.append( layerId );
+    }
+  }
+
   RollbackEntry rollback;
   rollback.type = RollbackType::RestoreLayoutEdit;
   rollback.layoutName = layoutName;
   rollback.pageCountBefore = layout->pageCollection()->pageCount();
   rollback.description = u"Remove layout items and pages added by AI layout edit."_s;
-
   QJsonArray changes;
+
+  // Footer note and the panel for legend, scale bar and north arrow are sized from the page,
+  // so any page size or orientation works. The map shrinks to make room, keeping its extent.
+  const double margin = 10.0;
+  const double gap = 5.0;
+  const double northArrowSize = 15.0;
+  const QRectF mapRect = map ? sceneRect( map ) : QRectF();
+  const QRectF pageRect = pageRectAt( layout, map ? mapRect.center() : QPointF() );
+  QRectF newMapRect = mapRect;
+  double contentBottom = pageRect.bottom() - margin;
+
+  QgsLayoutItemLabel *existingNote = qobject_cast<QgsLayoutItemLabel *>( layout->itemById( u"AI Note"_s ) );
+  if ( !note.isEmpty() && existingNote )
+  {
+    const QRectF before = sceneRect( existingNote );
+    rollback.noteUuid = existingNote->uuid();
+    rollback.noteText = existingNote->text();
+    rollback.noteRect = before;
+    existingNote->setText( note );
+    const double height = wrappedTextHeight( existingNote, before.width() );
+    existingNote->attemptMove( QgsLayoutPoint( before.left(), before.bottom() - height ) );
+    existingNote->attemptResize( QgsLayoutSize( before.width(), height ) );
+    changes.append( u"note_updated"_s );
+  }
+  if ( existingNote )
+    contentBottom = std::min( contentBottom, sceneRect( existingNote ).top() - gap );
+  else if ( !note.isEmpty() )
+  {
+    QgsLayoutItemLabel *noteLabel = new QgsLayoutItemLabel( layout );
+    noteLabel->setId( u"AI Note"_s );
+    noteLabel->setText( note );
+    // footnote size: 8 pt on A4, scaled with the page
+    QgsTextFormat format = noteLabel->textFormat();
+    format.setSize( std::max( 8.0, std::round( 8.0 * std::max( pageRect.width(), pageRect.height() ) / 297.0 ) ) );
+    format.setSizeUnit( Qgis::RenderUnit::Points );
+    noteLabel->setTextFormat( format );
+    layout->addLayoutItem( noteLabel );
+    const double width = pageRect.width() - 2 * margin;
+    const double height = wrappedTextHeight( noteLabel, width );
+    noteLabel->attemptMove( QgsLayoutPoint( pageRect.left() + margin, contentBottom - height ) );
+    noteLabel->attemptResize( QgsLayoutSize( width, height ) );
+    contentBottom -= height + gap;
+    if ( map )
+      newMapRect.setBottom( std::min( newMapRect.bottom(), contentBottom ) );
+    // items an earlier call put at the bottom of the page (scale bar, a bottom panel) move up above the note
+    const QList<QGraphicsItem *> sceneItems = layout->items();
+    for ( QGraphicsItem *sceneItem : sceneItems )
+    {
+      QgsLayoutItem *item = dynamic_cast<QgsLayoutItem *>( sceneItem );
+      if ( !item || item == noteLabel || item == map || qobject_cast<QgsLayoutItemPage *>( item ) || qobject_cast<QgsLayoutItemGroup *>( item ) )
+        continue;
+      const QRectF r = sceneRect( item );
+      if ( r.bottom() <= contentBottom + 0.01 || !pageRect.intersects( r ) )
+        continue;
+      rollback.movedItems.insert( item->uuid(), r.topLeft() );
+      const double top = r.top() - ( r.bottom() - contentBottom );
+      item->attemptMove( QgsLayoutPoint( r.left(), top ) );
+      if ( map && r.left() < newMapRect.right() && r.right() > newMapRect.left() )
+        newMapRect.setBottom( std::min( newMapRect.bottom(), top - gap ) );
+    }
+    rollback.itemUuids.append( noteLabel->uuid() );
+    changes.append( u"note"_s );
+  }
+
+  QRectF panel;
+  bool panelOnRight = true;
+  QgsLayoutItem *panelItem = layout->itemById( u"AI Legend"_s );
+  if ( !panelItem )
+    panelItem = layout->itemById( u"AI Scale Bar"_s );
+  if ( !panelItem )
+    panelItem = layout->itemById( u"AI North Arrow"_s );
+  if ( ( addLegend || addScaleBar || addNorthArrow ) && panelItem && map )
+  {
+    // a panel from an earlier call: the new items go in it and the map keeps its size
+    panelOnRight = sceneRect( panelItem ).left() >= newMapRect.right();
+    panel = panelOnRight ? QRectF( newMapRect.right() + gap, newMapRect.top(), pageRect.right() - margin - newMapRect.right() - gap, newMapRect.height() )
+                         : QRectF( newMapRect.left(), newMapRect.bottom() + gap, newMapRect.width(), contentBottom - newMapRect.bottom() - gap );
+  }
+  else if ( addLegend || addScaleBar || addNorthArrow )
+  {
+    panelOnRight = placement.isEmpty() ? pageRect.width() >= pageRect.height() : placement == "right"_L1;
+    if ( panelOnRight )
+    {
+      const double width = std::clamp( pageRect.width() * 0.25, 45.0, 80.0 );
+      panel = QRectF( pageRect.right() - margin - width, newMapRect.top(), width, newMapRect.height() );
+      newMapRect.setRight( std::min( newMapRect.right(), panel.left() - gap ) );
+    }
+    else
+    {
+      const double height = std::clamp( pageRect.height() * 0.2, 35.0, 70.0 );
+      panel = QRectF( newMapRect.left(), contentBottom - height, newMapRect.width(), height );
+      newMapRect.setBottom( std::min( newMapRect.bottom(), panel.top() - gap ) );
+    }
+  }
+
+  if ( map && newMapRect != mapRect )
+  {
+    rollback.mapUuid = map->uuid();
+    rollback.mapRect = mapRect;
+    rollback.mapExtent = map->extent();
+    map->attemptResize( QgsLayoutSize( newMapRect.size() ) );
+    map->zoomToExtent( rollback.mapExtent );
+    changes.append( u"map_resized"_s );
+  }
+
   if ( addLegend )
   {
     QgsLayoutItemLegend *legend = new QgsLayoutItemLegend( layout );
     legend->setId( u"AI Legend"_s );
     legend->setLinkedMap( map );
-    legend->attemptMove( QgsLayoutPoint( 145, 18 ) );
-    legend->attemptResize( QgsLayoutSize( 50, 55 ) );
     layout->addLayoutItem( legend );
-    legend->adjustBoxSize();
+    if ( legendLayerIds.isEmpty() && legendLabels.isEmpty() )
+    {
+      legend->setSyncMode( Qgis::LegendSyncMode::VisibleLayers );
+    }
+    else
+    {
+      makeLegendManual( legend, legendIds );
+      setLegendLabels( legend, legendLabels.toVariantMap() );
+    }
+    fitLegendToContent( legend );
+    legend->attemptMove( QgsLayoutPoint( panel.topLeft() ) );
     rollback.itemUuids.append( legend->uuid() );
     changes.append( u"legend"_s );
+  }
+
+  if ( existingLegend && !legendLabels.isEmpty() )
+  {
+    rollback.legendUuid = existingLegend->uuid();
+    rollback.legendModeBefore = existingLegend->syncMode();
+    if ( existingLegend->syncMode() != Qgis::LegendSyncMode::Manual )
+      makeLegendManual( existingLegend, legendIds );
+    setLegendLabels( existingLegend, legendLabels.toVariantMap(), &rollback.legendLabelsBefore );
+    fitLegendToContent( existingLegend );
+    changes.append( u"legend_labels"_s );
   }
 
   if ( addScaleBar )
@@ -2553,13 +2935,13 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     QgsLayoutItemScaleBar *scaleBar = new QgsLayoutItemScaleBar( layout );
     scaleBar->setId( u"AI Scale Bar"_s );
     scaleBar->setLinkedMap( map );
-    scaleBar->setStyle( u"Single Box"_s );
-    scaleBar->setUnits( Qgis::DistanceUnit::Meters );
-    scaleBar->setNumberOfSegments( 2 );
-    scaleBar->setNumberOfSegmentsLeft( 0 );
-    scaleBar->attemptMove( QgsLayoutPoint( 15, 270 ) );
-    scaleBar->attemptResize( QgsLayoutSize( 55, 10 ) );
     layout->addLayoutItem( scaleBar );
+    // same defaults as the QGIS layout designer: units and segment length chosen from the map
+    scaleBar->setMethod( project->scaleMethod() );
+    scaleBar->applyDefaultSize( scaleBar->guessUnits() );
+    const QRectF bar = sceneRect( scaleBar );
+    const double x = panelOnRight ? panel.left() : panel.right() - northArrowSize - gap - bar.width();
+    scaleBar->attemptMove( QgsLayoutPoint( x, panel.bottom() - bar.height() ) );
     rollback.itemUuids.append( scaleBar->uuid() );
     changes.append( u"scalebar"_s );
   }
@@ -2571,8 +2953,10 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     northArrow->setPicturePath( u":/images/north_arrows/layout_default_north_arrow.svg"_s, Qgis::PictureFormat::SVG );
     northArrow->setLinkedMap( map );
     northArrow->setNorthMode( QgsLayoutItemPicture::GridNorth );
-    northArrow->attemptMove( QgsLayoutPoint( 175, 235 ) );
-    northArrow->attemptResize( QgsLayoutSize( 18, 18 ) );
+    // on the right panel it sits above the scale bar slot, on the bottom panel in the top-right corner
+    const QPointF position = panelOnRight ? QPointF( panel.left(), panel.bottom() - 3 * northArrowSize ) : QPointF( panel.right() - northArrowSize, panel.top() );
+    northArrow->attemptMove( QgsLayoutPoint( position ) );
+    northArrow->attemptResize( QgsLayoutSize( northArrowSize, northArrowSize ) );
     layout->addLayoutItem( northArrow );
     rollback.itemUuids.append( northArrow->uuid() );
     changes.append( u"north_arrow"_s );
@@ -2596,6 +2980,11 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
   QJsonObject output;
   output.insert( u"layout_name"_s, layoutName );
   output.insert( u"page_count"_s, layout->pageCollection()->pageCount() );
+  output.insert( u"layout"_s, layoutSummary( layout ) );
+  if ( !skippedLegendLayers.isEmpty() )
+    output.insert( u"legend_layers_not_in_map"_s, skippedLegendLayers );
+  if ( !skippedLegendLabels.isEmpty() )
+    output.insert( u"legend_labels_not_in_legend"_s, skippedLegendLabels );
   output.insert( u"added_item_count"_s, rollback.itemUuids.size() );
   output.insert( u"diff"_s, diff );
   output.insert( u"rollback_token"_s, token );

@@ -30,7 +30,9 @@
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
 #include "qgslayertreelayer.h"
+#include "qgslayoutitemlabel.h"
 #include "qgslayoutitemlegend.h"
+#include "qgslayoutitemmap.h"
 #include "qgslayoutitempicture.h"
 #include "qgslayoutitemscalebar.h"
 #include "qgslayoutmanager.h"
@@ -63,6 +65,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
 #include <QScopeGuard>
@@ -193,6 +196,7 @@ class TestQgsAiToolRegistry : public QObject
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
     void createPrintLayoutAndExportMap();
+    void printLayoutItemsFitThePage();
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
     void processingToolRunsNoThreadingOnMainThread();
@@ -1043,6 +1047,167 @@ void TestQgsAiToolRegistry::advancedStyleLayerAppliesRenderersLabelsAndRollback(
   const QgsAiToolResult graduatedRollback = tool.execute( graduatedRollbackArgs );
   QVERIFY2( graduatedRollback.success, qPrintable( graduatedRollback.errorMessage ) );
   QVERIFY( dynamic_cast<QgsSingleSymbolRenderer *>( graduatedLayer->renderer() ) );
+}
+
+void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
+{
+  // A province taller than wide, in metres: the case where the map used to run off an A4 landscape page.
+  QgsProject project;
+  QgsVectorLayer *shown = new QgsVectorLayer( u"Polygon?crs=EPSG:32632&field=value:double"_s, u"Shown"_s, u"memory"_s );
+  QgsVectorLayer *hidden = new QgsVectorLayer( u"Polygon?crs=EPSG:32632"_s, u"Hidden"_s, u"memory"_s );
+  QVERIFY( shown->isValid() && hidden->isValid() );
+  project.addMapLayers( { shown, hidden } );
+  project.layerTreeRoot()->findLayer( hidden->id() )->setItemVisibilityChecked( false );
+
+  QgsMapCanvas canvas;
+  canvas.resize( 400, 600 );
+  canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:32632"_s ) );
+  canvas.setLayers( { shown } );
+  canvas.setExtent( QgsRectangle( 565000, 5000000, 643000, 5140000 ) );
+
+  auto issuesOf = []( const QgsAiToolResult &result ) { return result.output.toObject().value( u"layout"_s ).toObject().value( u"issues"_s ).toArray(); };
+  auto dump = []( const QgsAiToolResult &result ) { return QJsonDocument( result.output.toObject().value( u"layout"_s ).toObject() ).toJson( QJsonDocument::Compact ); };
+
+  QgsAiCreatePrintLayoutTool createTool( &project, &canvas );
+  const QgsAiToolResult created = createTool.execute( { { u"name"_s, u"Fit"_s }, { u"title"_s, u"A title"_s } } );
+  QVERIFY2( created.success, qPrintable( created.errorMessage ) );
+  QVERIFY2( issuesOf( created ).isEmpty(), dump( created ).constData() );
+  const QJsonObject page = created.output.toObject().value( u"layout"_s ).toObject().value( u"page"_s ).toObject();
+  QCOMPARE( page.value( u"width_mm"_s ).toInt(), 297 );
+  QCOMPARE( page.value( u"height_mm"_s ).toInt(), 210 );
+
+  QgsPrintLayout *layout = dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Fit"_s ) );
+  QVERIFY( layout );
+  QList<QgsLayoutItemMap *> maps;
+  layout->layoutItems( maps );
+  QgsLayoutItemMap *map = maps.constFirst();
+  const QRectF mapBefore = map->mapRectToScene( map->rect() );
+  QVERIFY( map->extent().contains( QgsRectangle( 565010, 5000010, 642990, 5139990 ) ) );
+
+  QgsAiEditPrintLayoutTool editTool( &project );
+  const QgsAiToolResult edited = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_legend"_s, true }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true } } );
+  QVERIFY2( edited.success, qPrintable( edited.errorMessage ) );
+  QVERIFY2( issuesOf( edited ).isEmpty(), dump( edited ).constData() );
+
+  QList<QgsLayoutItemScaleBar *> scaleBars;
+  layout->layoutItems( scaleBars );
+  QCOMPARE( scaleBars.constFirst()->units(), Qgis::DistanceUnit::Kilometers );
+  QVERIFY( scaleBars.constFirst()->unitsPerSegment() > 0 );
+  QVERIFY( map->extent().contains( QgsRectangle( 565010, 5000010, 642990, 5139990 ) ) );
+
+  // a legend limited to chosen layers: a layer the map does not draw is left out and reported
+  const QgsAiToolResult chosen = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_legend"_s, true }, { u"legend_layers"_s, QJsonArray { shown->id(), hidden->id() } } } );
+  QVERIFY2( chosen.success, qPrintable( chosen.errorMessage ) );
+  QCOMPARE( chosen.output.toObject().value( u"legend_layers_not_in_map"_s ).toArray(), QJsonArray { hidden->id() } );
+  QList<QgsLayoutItemLegend *> legends;
+  layout->layoutItems( legends );
+  QgsLayoutItemLegend *manual = legends.constFirst()->syncMode() == Qgis::LegendSyncMode::Manual ? legends.constFirst() : legends.constLast();
+  QCOMPARE( manual->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
+  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_legend"_s, true }, { u"legend_layers"_s, QJsonArray { u"nope"_s } } } ).success );
+  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_legend"_s, true }, { u"legend_layers"_s, QJsonArray { hidden->id() } } } ).success );
+
+  // rollback puts the map back to its full size
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, chosen.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, edited.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( map->mapRectToScene( map->rect() ), mapBefore );
+
+  // readable legend names and a footer note, laid out with the panel without overlaps
+  const QgsAiToolResult labelled = editTool.execute(
+    { { u"layout_name"_s, u"Fit"_s },
+      { u"add_legend"_s, true },
+      { u"add_scalebar"_s, true },
+      { u"add_north_arrow"_s, true },
+      { u"legend_labels"_s, QJsonObject { { shown->id(), u"Readable name (%)"_s } } },
+      { u"note"_s, u"Source: test data, October 2026"_s } }
+  );
+  QVERIFY2( labelled.success, qPrintable( labelled.errorMessage ) );
+  QVERIFY2( issuesOf( labelled ).isEmpty(), dump( labelled ).constData() );
+  layout->layoutItems( legends );
+  QCOMPARE( legends.size(), 1 );
+  QgsLayerTreeLayer *legendNode = legends.constFirst()->model()->rootGroup()->findLayer( shown->id() );
+  QVERIFY( legendNode );
+  QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
+  QCOMPARE( legends.constFirst()->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
+  QCOMPARE( shown->name(), u"Shown"_s );
+  QgsLayoutItemLabel *note = qobject_cast<QgsLayoutItemLabel *>( layout->itemById( u"AI Note"_s ) );
+  QVERIFY( note );
+  const QRectF noteRect = note->mapRectToScene( note->rect() );
+  QVERIFY( noteRect.bottom() <= 200.01 );
+  QVERIFY( map->mapRectToScene( map->rect() ).bottom() < noteRect.top() );
+  const QgsAiToolResult hiddenLabel = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_legend"_s, true }, { u"legend_labels"_s, QJsonObject { { hidden->id(), u"x"_s } } } } );
+  QVERIFY2( hiddenLabel.success, qPrintable( hiddenLabel.errorMessage ) );
+  QCOMPARE( hiddenLabel.output.toObject().value( u"legend_labels_not_in_legend"_s ).toArray(), QJsonArray { hidden->id() } );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, hiddenLabel.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+
+  // a later call changes the note and the legend names in place; its rollback brings them back
+  const QgsAiToolResult renamed = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"legend_labels"_s, QJsonObject { { shown->id(), u"Other name"_s } } }, { u"note"_s, u"Source: updated"_s } } );
+  QVERIFY2( renamed.success, qPrintable( renamed.errorMessage ) );
+  QVERIFY2( issuesOf( renamed ).isEmpty(), dump( renamed ).constData() );
+  layout->layoutItems( legends );
+  QCOMPARE( legends.size(), 1 );
+  QList<QgsLayoutItemLabel *> labels;
+  layout->layoutItems( labels );
+  QCOMPARE( labels.size(), 2 );
+  QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Other name"_s );
+  QCOMPARE( note->text(), u"Source: updated"_s );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, renamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
+  QCOMPARE( note->text(), u"Source: test data, October 2026"_s );
+
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, labelled.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QVERIFY( !layout->itemById( u"AI Note"_s ) );
+  QCOMPARE( map->mapRectToScene( map->rect() ), mapBefore );
+  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"legend_labels"_s, QJsonObject { { shown->id(), u"x"_s } } } } ).success );
+
+  // items added over several calls: a second call reuses the panel, a later note pushes the bottom items up
+  QVERIFY( createTool.execute( { { u"name"_s, u"Steps"_s }, { u"title"_s, u"Steps"_s } } ).success );
+  QgsPrintLayout *steps = dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Steps"_s ) );
+  QList<QgsLayoutItemMap *> stepMaps;
+  steps->layoutItems( stepMaps );
+  QgsLayoutItemMap *stepMap = stepMaps.constFirst();
+  QVERIFY( editTool.execute( { { u"layout_name"_s, u"Steps"_s }, { u"add_legend"_s, true } } ).success );
+  const QRectF afterLegend = stepMap->mapRectToScene( stepMap->rect() );
+  const QgsAiToolResult laterBar = editTool.execute( { { u"layout_name"_s, u"Steps"_s }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true } } );
+  QVERIFY2( laterBar.success, qPrintable( laterBar.errorMessage ) );
+  QVERIFY2( issuesOf( laterBar ).isEmpty(), dump( laterBar ).constData() );
+  QCOMPARE( stepMap->mapRectToScene( stepMap->rect() ), afterLegend );
+  QgsLayoutItem *stepBar = steps->itemById( u"AI Scale Bar"_s );
+  const QRectF barBefore = stepBar->mapRectToScene( stepBar->rect() );
+  const QgsAiToolResult laterNote = editTool.execute( { { u"layout_name"_s, u"Steps"_s }, { u"note"_s, u"Source: later"_s } } );
+  QVERIFY2( laterNote.success, qPrintable( laterNote.errorMessage ) );
+  QVERIFY2( issuesOf( laterNote ).isEmpty(), dump( laterNote ).constData() );
+  QVERIFY( stepBar->mapRectToScene( stepBar->rect() ).top() < barBefore.top() );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, laterNote.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( stepBar->mapRectToScene( stepBar->rect() ), barBefore );
+  QCOMPARE( stepMap->mapRectToScene( stepMap->rect() ), afterLegend );
+
+  // something a person would see as wrong on paper is reported
+  layout->layoutItems( legends );
+  QVERIFY( legends.isEmpty() );
+  map->attemptMove( QgsLayoutPoint( 250, 20 ) );
+  const QgsAiToolResult moved = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"add_page"_s, true } } );
+  QVERIFY( moved.success );
+  QVERIFY2( !issuesOf( moved ).isEmpty(), dump( moved ).constData() );
+
+  // portrait A3 puts the panel below the map
+  const QgsAiToolResult portrait = createTool.execute( { { u"name"_s, u"Portrait"_s }, { u"page_size"_s, u"A3"_s }, { u"orientation"_s, u"portrait"_s } } );
+  QVERIFY2( portrait.success, qPrintable( portrait.errorMessage ) );
+  const QgsAiToolResult portraitEdited = editTool.execute( { { u"layout_name"_s, u"Portrait"_s }, { u"add_legend"_s, true }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true } } );
+  QVERIFY2( portraitEdited.success, qPrintable( portraitEdited.errorMessage ) );
+  QVERIFY2( issuesOf( portraitEdited ).isEmpty(), dump( portraitEdited ).constData() );
+  QCOMPARE( portrait.output.toObject().value( u"layout"_s ).toObject().value( u"page"_s ).toObject().value( u"height_mm"_s ).toInt(), 420 );
+
+  // renaming a layer in an auto-updating legend freezes it; rollback makes it auto-updating again
+  QgsLayoutItemLegend *autoLegend = qobject_cast<QgsLayoutItemLegend *>( dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Portrait"_s ) )->itemById( u"AI Legend"_s ) );
+  QVERIFY( autoLegend );
+  QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::VisibleLayers );
+  const QgsAiToolResult autoRenamed = editTool.execute( { { u"layout_name"_s, u"Portrait"_s }, { u"legend_labels"_s, QJsonObject { { shown->id(), u"Name"_s } } } } );
+  QVERIFY2( autoRenamed.success, qPrintable( autoRenamed.errorMessage ) );
+  QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::Manual );
+  QCOMPARE( autoLegend->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, autoRenamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::VisibleLayers );
+  QVERIFY( !createTool.execute( { { u"page_size"_s, u"B52"_s } } ).success );
 }
 
 void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
