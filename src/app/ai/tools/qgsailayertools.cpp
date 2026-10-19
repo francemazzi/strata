@@ -650,6 +650,45 @@ namespace
     return normalized;
   }
 
+  // A feature source given as {"source", "selected_only", "filter", "feature_limit"} becomes the
+  // definition the Toolbox builds for "Selected features only" and its advanced options.
+  bool resolveFeatureSourceDefinitions( const QgsProcessingAlgorithm *algorithm, QVariantMap &parameters, QgsProcessingContext &context, QString &error )
+  {
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      const QVariant value = parameters.value( definition->name() );
+      if ( definition->type() != QgsProcessingParameterFeatureSource::typeName() || value.userType() != QMetaType::Type::QVariantMap )
+        continue;
+
+      const QVariantMap map = value.toMap();
+      const QString source = map.value( u"source"_s ).toString().trimmed();
+      if ( source.isEmpty() )
+      {
+        error = u"Parameter %1: 'source' (a layer id) is required when the input is an object."_s.arg( definition->name() );
+        return false;
+      }
+      const bool selectedOnly = map.value( u"selected_only"_s ).toBool();
+      if ( selectedOnly )
+      {
+        // QGIS would silently process zero features
+        QgsVectorLayer *layer = qobject_cast<QgsVectorLayer *>( QgsProcessingUtils::mapLayerFromString( source, context, false ) );
+        if ( layer && layer->selectedFeatureCount() == 0 )
+        {
+          error = u"Parameter %1: layer %2 has no selected features; select them first or drop selected_only."_s.arg( definition->name(), source );
+          return false;
+        }
+      }
+      parameters.insert(
+        definition->name(),
+        QVariant::fromValue( QgsProcessingFeatureSourceDefinition(
+          source, selectedOnly, map.value( u"feature_limit"_s, -1 ).toLongLong(), Qgis::ProcessingFeatureSourceDefinitionFlags(), Qgis::InvalidGeometryCheck::AbortOnInvalid, map.value( u"filter"_s ).toString()
+        ) )
+      );
+    }
+    return true;
+  }
+
   bool isLoadableProcessingDestination( const QgsProcessingParameterDefinition *definition )
   {
     return dynamic_cast<const QgsProcessingParameterFeatureSink *>( definition )
@@ -1924,7 +1963,15 @@ QJsonObject QgsAiRunProcessingAlgorithmTool::schema() const
 {
   QJsonObject properties;
   properties.insert( u"algorithm_id"_s, prop( u"string"_s, u"QGIS Processing algorithm id, e.g. 'native:buffer'."_s ) );
-  properties.insert( u"parameters"_s, prop( u"object"_s, u"Algorithm parameters as a JSON object. Use dry_run first if unsure. Layer destinations such as OUTPUT or OUTPUT_LINES default to TEMPORARY_OUTPUT and are loaded into the project."_s ) );
+  properties.insert(
+    u"parameters"_s,
+    prop(
+      u"object"_s,
+      u"Algorithm parameters as a JSON object. Use dry_run first if unsure. Layer destinations such as OUTPUT or OUTPUT_LINES default to TEMPORARY_OUTPUT and are loaded into the project. "
+      u"A vector input (feature source) can be an object to process part of a layer: {\"source\": \"<layer_id>\", \"selected_only\": true} for the selected features, "
+      u"{\"source\": \"<layer_id>\", \"filter\": \"<QGIS expression>\"} for the matching ones, optionally with \"feature_limit\"."_s
+    )
+  );
   properties.insert( u"configuration"_s, prop( u"object"_s, u"Optional Processing algorithm configuration map."_s ) );
   properties.insert( u"dry_run"_s, prop( u"boolean"_s, u"If true, returns algorithm parameter/output metadata without executing it."_s ) );
   properties.insert( u"rollback_token"_s, prop( u"string"_s, u"Optional token returned by a previous run. If set, removes the output layers that run loaded into the project (files it wrote stay)."_s ) );
@@ -2120,6 +2167,9 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
     context->setProject( project );
 
   QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
+  QString sourceError;
+  if ( !resolveFeatureSourceDefinitions( algorithm, parameters, *context, sourceError ) )
+    return QgsAiToolResult::error( sourceError );
   bindProcessingDestinationsToProject( algorithm, parameters, project );
   const QVariantMap configuration = args.value( u"configuration"_s ).isObject() ? jsonObjectToVariantMap( args.value( u"configuration"_s ).toObject() ) : QVariantMap();
 

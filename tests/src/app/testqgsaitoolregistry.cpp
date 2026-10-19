@@ -205,6 +205,7 @@ class TestQgsAiToolRegistry : public QObject
     void processingToolRunsNoThreadingOnMainThread();
     void processingPrepareFailureIsAnErrorNotACancel();
     void processingToolDeclaresInputLayers();
+    void processingSourceCanBeSelectedOrFiltered();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
 };
@@ -1444,6 +1445,44 @@ void TestQgsAiToolRegistry::advancedStyleGraduatedClassesAreReadable()
   project.addMapLayer( table );
   QVERIFY( !tool.execute( { { u"layer_id"_s, table->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s } } ).success );
   QVERIFY( !tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"color_ramp"_s, u"NoSuchRamp"_s } } ).success );
+}
+
+void TestQgsAiToolRegistry::processingSourceCanBeSelectedOrFiltered()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  QgsProject project;
+  QgsVectorLayer *points = new QgsVectorLayer( u"Point?crs=EPSG:3857&field=v:integer"_s, u"points"_s, u"memory"_s );
+  QVERIFY( points->isValid() );
+  QgsFeatureList features;
+  for ( int i = 1; i <= 3; ++i )
+  {
+    QgsFeature feature( points->fields() );
+    feature.setAttribute( 0, i );
+    feature.setGeometry( QgsGeometry::fromPointXY( QgsPointXY( i * 100, 0 ) ) );
+    features << feature;
+  }
+  QVERIFY( points->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( points );
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+
+  const auto bufferOf = [&tool, &project]( const QJsonValue &input ) -> long long {
+    const QgsAiToolResult result = tool.execute( { { u"algorithm_id"_s, u"native:buffer"_s }, { u"parameters"_s, QJsonObject { { u"INPUT"_s, input }, { u"DISTANCE"_s, 10 } } } } );
+    if ( !result.success )
+      return -1;
+    const QString id = result.output.toObject().value( u"loaded_layers"_s ).toArray().at( 0 ).toObject().value( u"id"_s ).toString();
+    QgsVectorLayer *output = qobject_cast<QgsVectorLayer *>( project.mapLayer( id ) );
+    return output ? output->featureCount() : -1;
+  };
+
+  QCOMPARE( bufferOf( points->id() ), 3LL );
+  // no selection: an error instead of an empty result
+  QCOMPARE( bufferOf( QJsonObject { { u"source"_s, points->id() }, { u"selected_only"_s, true } } ), -1LL );
+  points->selectByExpression( u"\"v\" >= 2"_s );
+  QCOMPARE( bufferOf( QJsonObject { { u"source"_s, points->id() }, { u"selected_only"_s, true } } ), 2LL );
+  QCOMPARE( bufferOf( QJsonObject { { u"source"_s, points->id() }, { u"filter"_s, u"\"v\" = 3"_s } } ), 1LL );
+  QCOMPARE( bufferOf( QJsonObject { { u"selected_only"_s, true } } ), -1LL );
 }
 
 void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()
