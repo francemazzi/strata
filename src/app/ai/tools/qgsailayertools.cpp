@@ -50,6 +50,8 @@
 #include "qgslayertreelayer.h"
 #include "qgslayertreeregistrybridge.h"
 #include "qgslayoutexporter.h"
+#include "qgslayoutframe.h"
+#include "qgslayoutitemattributetable.h"
 #include "qgslayoutitemlabel.h"
 #include "qgslayoutitemgroup.h"
 #include "qgslayoutitemlegend.h"
@@ -61,6 +63,7 @@
 #include "qgslayoutpagecollection.h"
 #include "qgslayoutpoint.h"
 #include "qgslayoutsize.h"
+#include "qgslayouttablecolumn.h"
 #include "qgsmapcanvas.h"
 #include "qgsmaplayer.h"
 #include "qgsmaplayerfactory.h"
@@ -159,6 +162,8 @@ namespace
       QVariantMap legendLabelsBefore;
       //! Earlier items moved up to make room for a new footer note, by uuid.
       QHash<QString, QPointF> movedItems;
+      //! Attribute table added by edit_print_layout; its frame is in itemUuids.
+      QString tableUuid;
       QString filePath;
       //! Copy of the file export_map replaced, put back by rollback.
       QString backupPath;
@@ -1216,6 +1221,9 @@ namespace
       // a single-symbol layer prints its name beside the symbol, cached in the embedded node: this refreshes it
       if ( QgsLayerTreeModelLegendNode *embedded = legend->model()->legendNodeEmbeddedInParent( node ) )
         embedded->setUserLabel( embedded->userLabel() );
+      // a single-symbol layer prints its name beside the symbol, cached in the embedded node: this refreshes it
+      if ( QgsLayerTreeModelLegendNode *embedded = legend->model()->legendNodeEmbeddedInParent( node ) )
+        embedded->setUserLabel( embedded->userLabel() );
       legend->model()->clearCachedData( node );
     }
   }
@@ -1234,6 +1242,26 @@ namespace
   double wrappedTextHeight( const QgsLayoutItemLabel *label, double width )
   {
     const QSizeF natural = label->sizeForText();
+  // QGIS sizes table frames but does not say how tall the whole table is: read it from the row heights
+  class AiLayoutTable : public QgsLayoutItemAttributeTable
+  {
+    public:
+      using QgsLayoutItemAttributeTable::QgsLayoutItemAttributeTable;
+
+      QSizeF contentSize()
+      {
+        refreshAttributes();
+        const double width = totalWidth();
+        calculateMaxRowHeights();
+        const double grid = showGrid() && horizontalGrid() ? gridStrokeWidth() : 0;
+        double height = mMaxRowHeightMap.value( 0 ) + 2 * grid + 2 * cellMargin();
+        for ( int row = 0; row < contents().size(); ++row )
+          height += mMaxRowHeightMap.value( row + 1 ) + grid + 2 * cellMargin();
+        // QgsLayoutTable drops the last row when it fits the frame exactly
+        return QSizeF( width, height + 0.5 );
+      }
+  };
+
     return natural.height() * std::max( 1.0, std::ceil( natural.width() / width ) );
   }
 
@@ -1257,6 +1285,12 @@ namespace
       if ( QgsLayoutItem *item = layout->itemByUuid( uuid ) )
       {
         layout->removeLayoutItem( item );
+    if ( QgsLayoutMultiFrame *table = layout->multiFrameByUuid( entry.tableUuid ) )
+    {
+      // its frame is already gone; deleted now, while the layout it points to still exists
+      layout->removeMultiFrame( table );
+      delete table;
+    }
         ++removedItems;
       }
     }
@@ -2697,7 +2731,7 @@ QgsAiCreatePrintLayoutTool::QgsAiCreatePrintLayoutTool( QgsProject *project, Qgs
 
 QString QgsAiCreatePrintLayoutTool::description() const
 {
-  return QStringLiteral(
+    "and shows the whole current canvas extent with its rendered layers, or the whole of one layer with extent_layer_id. "
     "Creates a native QGIS print layout with a map frame and optional title. "
     "The page is A4 landscape unless page_size/orientation say otherwise; the map fills the page inside the margins "
     "and shows the whole current canvas extent with its rendered layers. "
@@ -2710,6 +2744,7 @@ QJsonObject QgsAiCreatePrintLayoutTool::schema() const
 {
   QJsonObject properties;
   properties.insert( u"name"_s, prop( u"string"_s, u"Optional layout name. Defaults to 'Strata Layout' and is made unique."_s ) );
+  properties.insert( u"extent_layer_id"_s, prop( u"string"_s, u"Optional layer id: the map frames that whole layer instead of the current map view, e.g. all the municipalities of the study area."_s ) );
   properties.insert( u"title"_s, prop( u"string"_s, u"Optional title label to place above the map."_s ) );
   properties.insert( u"page_size"_s, prop( u"string"_s, u"Optional page size known to QGIS, e.g. A4, A3, A0, Letter. Defaults to A4."_s ) );
   properties.insert( u"orientation"_s, prop( u"string"_s, u"Optional page orientation: landscape or portrait. Defaults to landscape."_s ) );
@@ -2733,6 +2768,10 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   const QString layoutName = uniqueLayoutName( project, args.value( u"name"_s ).toString() );
   const QString title = args.value( u"title"_s ).toString().trimmed();
   const QString pageSizeName = args.value( u"page_size"_s ).toString( u"A4"_s ).trimmed();
+  const QString extentLayerId = args.value( u"extent_layer_id"_s ).toString().trimmed();
+  QgsMapLayer *extentLayer = extentLayerId.isEmpty() ? nullptr : project->mapLayer( extentLayerId );
+  if ( !extentLayerId.isEmpty() && ( !extentLayer || extentLayer->extent().isEmpty() ) )
+    return QgsAiToolResult::error( u"extent_layer_id must be a layer in the project with features: %1"_s.arg( extentLayerId ) );
   const QString orientationName = args.value( u"orientation"_s ).toString( u"landscape"_s ).trimmed().toLower();
   if ( orientationName != "landscape"_L1 && orientationName != "portrait"_L1 )
     return QgsAiToolResult::error( u"Unsupported orientation '%1'. Use landscape or portrait."_s.arg( orientationName ) );
@@ -2760,6 +2799,21 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   }
   else if ( project->layerTreeRoot() )
   {
+  if ( extentLayer )
+  {
+    QgsRectangle extent = extentLayer->extent();
+    try
+    {
+      extent = QgsCoordinateTransform( extentLayer->crs(), map->crs(), project ).transformBoundingBox( extent );
+    }
+    catch ( QgsCsException & )
+    {
+      return QgsAiToolResult::error( u"Cannot transform the extent of %1 to the map CRS."_s.arg( extentLayer->name() ) );
+    }
+    // a small margin so the frame does not cut the outline
+    extent.scale( 1.02 );
+    map->zoomToExtent( extent );
+  }
     map->setLayers( project->layerTreeRoot()->layerOrder() );
     map->setKeepLayerSet( true );
   }
@@ -2802,7 +2856,7 @@ QgsAiToolResult QgsAiCreatePrintLayoutTool::execute( const QJsonObject &args )
   diff.insert( u"layout_name"_s, layoutName );
 
   QJsonObject output;
-  output.insert( u"layout_name"_s, layoutName );
+  output.insert( u"uses_canvas_extent"_s, mCanvas && !extentLayer );
   output.insert( u"title"_s, title );
   output.insert( u"has_map"_s, true );
   output.insert( u"uses_canvas_extent"_s, mCanvas != nullptr );
@@ -2829,6 +2883,9 @@ QString QgsAiEditPrintLayoutTool::description() const
     "in a panel beside the map (right on landscape pages, bottom on portrait pages, or as set by placement); "
     "the map shrinks to make room and keeps its extent. The scale bar uses QGIS defaults for units and length. "
     "The legend shows the layers visible in the map unless legend_layers is given, e.g. to leave out a basemap; "
+    "table adds an attribute table at the top of the panel, above the legend, e.g. the features past a threshold with their values: "
+    "columns are fields or expressions with headings, filter, sort_by, descending and max_rows choose the rows. "
+    "Add it in the same call as the legend; if table.fits is false in the result, rows past the frame are not printed. "
     "legend_labels replaces technical layer names with readable ones. note adds a footer line with text the user gave, "
     "e.g. data source and date: never make up a source; add it in the same call as the other items so they are laid out together. "
     "Called again with note or legend_labels and without add_legend, it updates the existing note and legend instead of adding new ones. "
@@ -2846,6 +2903,10 @@ QJsonObject QgsAiEditPrintLayoutTool::schema() const
   properties.insert( u"add_north_arrow"_s, prop( u"boolean"_s, u"Add a north arrow picture linked to the first map item."_s ) );
   properties.insert( u"add_page"_s, prop( u"boolean"_s, u"Append a new page to the layout."_s ) );
   properties.insert( u"placement"_s, prop( u"string"_s, u"Optional side of the map for legend, scale bar and north arrow: right or bottom. Defaults to right on landscape pages, bottom on portrait pages."_s ) );
+  properties.insert(
+    u"table"_s,
+    prop( u"object"_s, u"Optional attribute table: {\"layer_id\": vector layer id, \"columns\": [{\"field\": field name or expression, e.g. round(\"share\", 1), or format_number(\"people\", 0) for thousands separators, \"heading\": column title}], \"filter\": optional expression for the rows, \"sort_by\": optional field or expression, \"descending\": optional bool, \"max_rows\": optional, default 30}."_s )
+  );
   properties.insert( u"legend_layers"_s, propArray( prop( u"string"_s, u"Layer id."_s ), u"Optional layer ids to show in the legend, in project order. Leave it out to show the layers visible in the map, which is usually right; pass it only to leave some of those out, e.g. a basemap. Layers the map does not show are left out and listed in legend_layers_not_in_map."_s ) );
   properties.insert( u"legend_labels"_s, prop( u"object"_s, u"Optional legend names by layer id, e.g. {\"<layer_id>\": \"Flood-prone area (%)\"}. Applies to the legend added by this call, or without add_legend to the layout's existing legend. The project layer names do not change."_s ) );
   properties.insert( u"note"_s, prop( u"string"_s, u"Optional footer text at the bottom of the page, only when the user asks for it, e.g. the data source and date they give. Replaces the text of a note added earlier."_s ) );
@@ -2876,11 +2937,55 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
   const bool addLegend = args.value( u"add_legend"_s ).toBool( false );
   const bool addScaleBar = args.value( u"add_scalebar"_s ).toBool( false );
   const bool addNorthArrow = args.value( u"add_north_arrow"_s ).toBool( false );
-  const bool addPage = args.value( u"add_page"_s ).toBool( false );
+  const QJsonObject tableArgs = args.value( u"table"_s ).toObject();
+  if ( !addLegend && !addScaleBar && !addNorthArrow && !addPage && note.isEmpty() && legendLabels.isEmpty() && tableArgs.isEmpty() )
   const QString note = args.value( u"note"_s ).toString().trimmed();
   QJsonObject legendLabels = args.value( u"legend_labels"_s ).toObject();
+  // the table is checked before anything changes, so a wrong column leaves the layout as it was
+  QgsVectorLayer *tableLayer = nullptr;
+  QgsLayoutTableColumns tableColumns;
+  QString tableFilter;
+  QString tableSort;
+  if ( !tableArgs.isEmpty() )
+  {
+    tableLayer = qobject_cast<QgsVectorLayer *>( project->mapLayer( tableArgs.value( u"layer_id"_s ).toString().trimmed() ) );
+    if ( !tableLayer )
+      return QgsAiToolResult::error( u"table.layer_id must be the id of a vector layer in the project."_s );
+    const auto expressionError = [tableLayer]( const QString &expression ) -> QString {
+      const QgsExpression parsed( expression );
+      if ( parsed.hasParserError() )
+        return parsed.parserErrorString();
+      for ( const QString &column : parsed.referencedColumns() )
+      {
+        if ( column != QgsFeatureRequest::ALL_ATTRIBUTES && tableLayer->fields().lookupField( column ) < 0 )
+          return u"no field named '%1' in the layer"_s.arg( column );
+      }
+      return QString();
+    };
+    for ( const QJsonValue &value : tableArgs.value( u"columns"_s ).toArray() )
+    {
+      const QString field = value.toObject().value( u"field"_s ).toString().trimmed();
+      const QString error = field.isEmpty() ? u"a column needs a field"_s : expressionError( field );
+      if ( !error.isEmpty() )
+        return QgsAiToolResult::error( u"Table column '%1': %2"_s.arg( field, error ) );
+      QgsLayoutTableColumn column( value.toObject().value( u"heading"_s ).toString( field ) );
+      column.setAttribute( field );
+      tableColumns.append( column );
+    }
+    if ( tableColumns.isEmpty() )
+      return QgsAiToolResult::error( u"table.columns needs at least one column."_s );
+    tableFilter = tableArgs.value( u"filter"_s ).toString().trimmed();
+    tableSort = tableArgs.value( u"sort_by"_s ).toString().trimmed();
+    for ( const QString &expression : { tableFilter, tableSort } )
+    {
+      const QString error = expression.isEmpty() ? QString() : expressionError( expression );
+      if ( !error.isEmpty() )
+        return QgsAiToolResult::error( u"Table expression '%1': %2"_s.arg( expression, error ) );
+    }
+  }
+
   if ( !addLegend && !addScaleBar && !addNorthArrow && !addPage && note.isEmpty() && legendLabels.isEmpty() )
-    return QgsAiToolResult::error( u"No layout edit requested."_s );
+  if ( ( addLegend || addScaleBar || addNorthArrow || tableLayer ) && !map )
 
   QgsLayoutItemMap *map = firstLayoutMap( layout );
   if ( ( addLegend || addScaleBar || addNorthArrow ) && !map )
@@ -3012,6 +3117,44 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
         newMapRect.setBottom( std::min( newMapRect.bottom(), top - gap ) );
     }
     rollback.itemUuids.append( noteLabel->uuid() );
+  AiLayoutTable *table = nullptr;
+  QSizeF tableSize;
+  if ( tableLayer )
+  {
+    table = new AiLayoutTable( layout );
+    table->setVectorLayer( tableLayer );
+    table->setDisplayOnlyVisibleFeatures( false );
+    table->setColumns( tableColumns );
+    if ( !tableSort.isEmpty() )
+    {
+      QgsLayoutTableColumn sort;
+      sort.setAttribute( tableSort );
+      sort.setSortOrder( tableArgs.value( u"descending"_s ).toBool( false ) ? Qt::DescendingOrder : Qt::AscendingOrder );
+      table->setSortColumns( { sort } );
+    }
+    table->setFilterFeatures( !tableFilter.isEmpty() );
+    table->setFeatureFilter( tableFilter );
+    table->setMaximumNumberOfFeatures( std::clamp( tableArgs.value( u"max_rows"_s ).toInt( 30 ), 1, 200 ) );
+    // 7 pt on A4, scaled with the page, header in bold
+    const double fontSize = std::max( 7.0, std::round( 7.0 * std::max( pageRect.width(), pageRect.height() ) / 297.0 ) );
+    QgsTextFormat content = table->contentTextFormat();
+    content.setSize( fontSize );
+    content.setSizeUnit( Qgis::RenderUnit::Points );
+    table->setContentTextFormat( content );
+    QgsTextFormat header = table->headerTextFormat();
+    QFont headerFont = header.font();
+    headerFont.setBold( true );
+    header.setFont( headerFont );
+    header.setSize( fontSize );
+    header.setSizeUnit( Qgis::RenderUnit::Points );
+    table->setHeaderTextFormat( header );
+    table->setGridStrokeWidth( 0.2 );
+    table->setGridColor( QColor( 150, 150, 150 ) );
+    layout->addMultiFrame( table );
+    tableSize = table->contentSize();
+  }
+
+  const bool addPanelItems = addLegend || addScaleBar || addNorthArrow || table;
     changes.append( u"note"_s );
   }
 
@@ -3019,14 +3162,16 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
   bool panelOnRight = true;
   QgsLayoutItem *panelItem = layout->itemById( u"AI Legend"_s );
   if ( !panelItem )
-    panelItem = layout->itemById( u"AI Scale Bar"_s );
+  if ( !panelItem )
+    panelItem = layout->itemById( u"AI Table"_s );
+  if ( addPanelItems && panelItem && map )
   if ( !panelItem )
     panelItem = layout->itemById( u"AI North Arrow"_s );
   if ( ( addLegend || addScaleBar || addNorthArrow ) && panelItem && map )
   {
     // a panel from an earlier call: the new items go in it and the map keeps its size
     panelOnRight = sceneRect( panelItem ).left() >= newMapRect.right();
-    panel = panelOnRight ? QRectF( newMapRect.right() + gap, newMapRect.top(), pageRect.right() - margin - newMapRect.right() - gap, newMapRect.height() )
+  else if ( addPanelItems )
                          : QRectF( newMapRect.left(), newMapRect.bottom() + gap, newMapRect.width(), contentBottom - newMapRect.bottom() - gap );
   }
   else if ( addLegend || addScaleBar || addNorthArrow )
@@ -3042,6 +3187,17 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     {
       const double height = std::clamp( pageRect.height() * 0.2, 35.0, 70.0 );
       panel = QRectF( newMapRect.left(), contentBottom - height, newMapRect.width(), height );
+  // the panel grows to the table, up to half the page: wider on the right, taller at the bottom
+  if ( table && panelOnRight && tableSize.width() > panel.width() )
+  {
+    panel.setLeft( std::max( panel.right() - tableSize.width(), pageRect.center().x() ) );
+    newMapRect.setRight( std::min( newMapRect.right(), panel.left() - gap ) );
+  }
+  else if ( table && !panelOnRight && tableSize.height() > panel.height() )
+  {
+    panel.setTop( std::max( panel.bottom() - tableSize.height(), pageRect.center().y() ) );
+    newMapRect.setBottom( std::min( newMapRect.bottom(), panel.top() - gap ) );
+  }
       newMapRect.setBottom( std::min( newMapRect.bottom(), panel.top() - gap ) );
     }
   }
@@ -3053,6 +3209,31 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     rollback.mapExtent = map->extent();
     map->attemptResize( QgsLayoutSize( newMapRect.size() ) );
     map->zoomToExtent( rollback.mapExtent );
+  // the table takes the top of the panel and the legend goes after it
+  QRectF tableRect;
+  QPointF legendTopLeft = panel.topLeft();
+  if ( table )
+  {
+    QgsLayoutFrame *frame = new QgsLayoutFrame( layout, table );
+    frame->setId( u"AI Table"_s );
+    frame->attemptSetSceneRect( QRectF( panel.topLeft(), QSizeF( std::min( tableSize.width(), panel.width() ), std::min( tableSize.height(), panel.height() ) ) ) );
+    table->addFrame( frame );
+    tableRect = sceneRect( frame );
+    legendTopLeft = panelOnRight ? QPointF( panel.left(), tableRect.bottom() + gap ) : QPointF( tableRect.right() + gap, panel.top() );
+    if ( QgsLayoutItem *earlierLegend = addLegend ? nullptr : layout->itemById( u"AI Legend"_s ) )
+    {
+      const QRectF r = sceneRect( earlierLegend );
+      if ( r.intersects( tableRect ) )
+      {
+        rollback.movedItems.insert( earlierLegend->uuid(), r.topLeft() );
+        earlierLegend->attemptMove( QgsLayoutPoint( legendTopLeft ) );
+      }
+    }
+    rollback.itemUuids.append( frame->uuid() );
+    rollback.tableUuid = table->uuid();
+    changes.append( u"table"_s );
+  }
+
     changes.append( u"map_resized"_s );
   }
 
@@ -3069,7 +3250,7 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     else
     {
       makeLegendManual( legend, legendIds );
-      setLegendLabels( legend, legendLabels.toVariantMap() );
+    legend->attemptMove( QgsLayoutPoint( legendTopLeft ) );
     }
     fitLegendToContent( legend );
     legend->attemptMove( QgsLayoutPoint( panel.topLeft() ) );
@@ -3109,7 +3290,15 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
     QgsLayoutItemPicture *northArrow = new QgsLayoutItemPicture( layout );
     northArrow->setId( u"AI North Arrow"_s );
     northArrow->setPicturePath( u":/images/north_arrows/layout_default_north_arrow.svg"_s, Qgis::PictureFormat::SVG );
-    northArrow->setLinkedMap( map );
+    QPointF position = panelOnRight ? QPointF( panel.left(), panel.bottom() - 3 * northArrowSize ) : QPointF( panel.right() - northArrowSize, panel.top() );
+    // with a table the legend sits lower, so on the right panel the arrow goes beside the scale bar
+    if ( table && panelOnRight )
+    {
+      const QgsLayoutItem *bar = layout->itemById( u"AI Scale Bar"_s );
+      const double x = bar ? sceneRect( bar ).right() + gap : panel.left();
+      if ( x + northArrowSize <= panel.right() )
+        position = QPointF( x, panel.bottom() - northArrowSize );
+    }
     northArrow->setNorthMode( QgsLayoutItemPicture::GridNorth );
     // on the right panel it sits above the scale bar slot, on the bottom panel in the top-right corner
     const QPointF position = panelOnRight ? QPointF( panel.left(), panel.bottom() - 3 * northArrowSize ) : QPointF( panel.right() - northArrowSize, panel.top() );
@@ -3140,6 +3329,13 @@ QgsAiToolResult QgsAiEditPrintLayoutTool::execute( const QJsonObject &args )
   output.insert( u"page_count"_s, layout->pageCollection()->pageCount() );
   output.insert( u"layout"_s, layoutSummary( layout ) );
   if ( !skippedLegendLayers.isEmpty() )
+  if ( table )
+  {
+    QJsonObject tableJson;
+    tableJson.insert( u"rows"_s, table->contents().size() );
+    tableJson.insert( u"fits"_s, tableRect.width() >= tableSize.width() - 0.01 && tableRect.height() >= tableSize.height() - 0.01 );
+    output.insert( u"table"_s, tableJson );
+  }
     output.insert( u"legend_layers_not_in_map"_s, skippedLegendLayers );
   if ( !skippedLegendLabels.isEmpty() )
     output.insert( u"legend_labels_not_in_legend"_s, skippedLegendLabels );

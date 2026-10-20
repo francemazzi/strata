@@ -31,6 +31,8 @@
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
 #include "qgslayertreelayer.h"
+#include "qgslayoutframe.h"
+#include "qgslayoutitemattributetable.h"
 #include "qgslayoutitemlabel.h"
 #include "qgslayoutitemlegend.h"
 #include "qgslayoutitemmap.h"
@@ -200,6 +202,7 @@ class TestQgsAiToolRegistry : public QObject
     void advancedStyleGraduatedClassesAreReadable();
     void createPrintLayoutAndExportMap();
     void printLayoutItemsFitThePage();
+    void printLayoutTableBesideTheMap();
     void processingToolReportsMissingAlgorithm();
     void processingToolAcceptsJsonEnumAndRunsOffThread();
     void processingToolRunsNoThreadingOnMainThread();
@@ -1135,6 +1138,10 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
   QVERIFY( embedded );
   QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
+  // a single-symbol layer prints its name beside the symbol, from the embedded legend node
+  QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
+  QVERIFY( embedded );
+  QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
   QCOMPARE( legends.constFirst()->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
   QCOMPARE( shown->name(), u"Shown"_s );
   QgsLayoutItemLabel *note = qobject_cast<QgsLayoutItemLabel *>( layout->itemById( u"AI Note"_s ) );
@@ -1153,6 +1160,7 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( issuesOf( renamed ).isEmpty(), dump( renamed ).constData() );
   layout->layoutItems( legends );
   QCOMPARE( legends.size(), 1 );
+  QCOMPARE( legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode )->data( Qt::DisplayRole ).toString(), u"Other name"_s );
   QList<QgsLayoutItemLabel *> labels;
   layout->layoutItems( labels );
   QCOMPARE( labels.size(), 2 );
@@ -1214,6 +1222,81 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( autoRenamed.success, qPrintable( autoRenamed.errorMessage ) );
   QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::Manual );
   QCOMPARE( autoLegend->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
+void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:32632&field=name:string&field=share:double&field=pop:integer"_s, u"Towns"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  for ( int i = 0; i < 25; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttributes( QgsAttributes() << u"town %1"_s.arg( i ) << i * 4.0 << 1000 + i );
+    const double x = 570000 + ( i % 5 ) * 14000;
+    const double y = 5010000 + ( i / 5 ) * 25000;
+    feature.setGeometry( QgsGeometry::fromRect( QgsRectangle( x, y, x + 10000, y + 20000 ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+
+  QgsMapCanvas canvas;
+  canvas.resize( 400, 600 );
+  canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:32632"_s ) );
+  canvas.setLayers( { layer } );
+  canvas.setExtent( QgsRectangle( 565000, 5000000, 643000, 5140000 ) );
+
+  QgsAiCreatePrintLayoutTool createTool( &project, &canvas );
+  // the map can frame a whole layer instead of the canvas view, which here is much wider
+  canvas.setExtent( QgsRectangle( 400000, 4900000, 800000, 5240000 ) );
+  QVERIFY( !createTool.execute( { { u"name"_s, u"Bad"_s }, { u"extent_layer_id"_s, u"nope"_s } } ).success );
+  QVERIFY( createTool.execute( { { u"name"_s, u"Table"_s }, { u"title"_s, u"Towns past 20%"_s }, { u"extent_layer_id"_s, layer->id() } } ).success );
+  QgsPrintLayout *layout = dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Table"_s ) );
+  QVERIFY( layout );
+  QList<QgsLayoutItemMap *> maps;
+  layout->layoutItems( maps );
+  QVERIFY( maps.constFirst()->extent().contains( layer->extent() ) );
+  QVERIFY( maps.constFirst()->extent().height() < layer->extent().height() * 1.05 );
+
+  const QJsonObject table {
+    { u"layer_id"_s, layer->id() },
+    { u"columns"_s,
+      QJsonArray { QJsonObject { { u"field"_s, u"name"_s }, { u"heading"_s, u"Town"_s } }, QJsonObject { { u"field"_s, u"round(\"share\", 1)"_s }, { u"heading"_s, u"Share (%)"_s } }, QJsonObject { { u"field"_s, u"pop"_s }, { u"heading"_s, u"People"_s } } } },
+    { u"filter"_s, u"\"share\" > 20"_s },
+    { u"sort_by"_s, u"share"_s },
+    { u"descending"_s, true }
+  };
+  QgsAiEditPrintLayoutTool editTool( &project );
+
+  // a wrong column is refused before the layout changes
+  QJsonObject wrong = table;
+  wrong.insert( u"columns"_s, QJsonArray { QJsonObject { { u"field"_s, u"nope"_s } } } );
+  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Table"_s }, { u"table"_s, wrong } } ).success );
+  QVERIFY( layout->multiFrames().isEmpty() );
+
+  const QgsAiToolResult edited = editTool.execute(
+    { { u"layout_name"_s, u"Table"_s }, { u"add_legend"_s, true }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true }, { u"table"_s, table }, { u"note"_s, u"Source: test data"_s } }
+  );
+  QVERIFY2( edited.success, qPrintable( edited.errorMessage ) );
+  const QJsonObject output = edited.output.toObject();
+  QVERIFY2( output.value( u"layout"_s ).toObject().value( u"issues"_s ).toArray().isEmpty(), QJsonDocument( output.value( u"layout"_s ).toObject() ).toJson( QJsonDocument::Compact ).constData() );
+  QCOMPARE( output.value( u"table"_s ).toObject().value( u"rows"_s ).toInt(), 19 );
+  QVERIFY( output.value( u"table"_s ).toObject().value( u"fits"_s ).toBool() );
+
+  QCOMPARE( layout->multiFrames().size(), 1 );
+  QgsLayoutItemAttributeTable *attributeTable = qobject_cast<QgsLayoutItemAttributeTable *>( layout->multiFrames().constFirst() );
+  QVERIFY( attributeTable );
+  QCOMPARE( attributeTable->contents().constFirst().constFirst().toString(), u"town 24"_s );
+  QgsLayoutItem *frame = layout->itemById( u"AI Table"_s );
+  QgsLayoutItem *legend = layout->itemById( u"AI Legend"_s );
+  QVERIFY( frame && legend );
+  QVERIFY( legend->mapRectToScene( legend->rect() ).top() >= frame->mapRectToScene( frame->rect() ).bottom() );
+
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, output.value( u"rollback_token"_s ).toString() } } ).success );
+  QVERIFY( layout->multiFrames().isEmpty() );
+  QVERIFY( !layout->itemById( u"AI Table"_s ) );
+}
+
   QVERIFY( editTool.execute( { { u"rollback_token"_s, autoRenamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
   QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::VisibleLayers );
   QVERIFY( !createTool.execute( { { u"page_size"_s, u"B52"_s } } ).success );
