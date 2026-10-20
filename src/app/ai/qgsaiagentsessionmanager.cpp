@@ -92,6 +92,12 @@ namespace
     return codeRe.match( text ).captured( 1 ).toLower();
   }
 
+  int retryAfterFromText( const QString &text )
+  {
+    static const QRegularExpression waitRe( u"retry_after=(\\d+)"_s );
+    return waitRe.match( text ).captured( 1 ).toInt();
+  }
+
   bool isAuthenticationError( const QString &providerName, const QString &errorMessage, int httpStatus )
   {
     const QString lower = errorMessage.toLower();
@@ -1960,6 +1966,20 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
   const QString sanitized = mRouter ? mRouter->sanitizeErrorText( errorMessage ) : errorMessage;
   const QString lower = sanitized.toLower();
   const QString code = errorCodeFromText( sanitized );
+
+  if ( code == "managed_provider_funding_required"_L1 || code == "upstream_timeout"_L1 || ( httpStatus == 0 && lower.contains( "aborted due to timeout"_L1 ) ) )
+  {
+    if ( code == "managed_provider_funding_required"_L1 )
+      return tr( "I could not complete the reply. The managed AI service is unavailable. Your Strata credits were not charged, and retrying will not help until the service is restored." );
+    return tr( "I could not complete the reply.\nThe AI service did not respond in time. Try again in a few seconds.\n\nTechnical details: %1" ).arg( sanitized );
+  }
+  if ( code == "managed_provider_busy"_L1 )
+  {
+    const int waitSeconds = retryAfterFromText( sanitized );
+    if ( waitSeconds > 0 )
+      return tr( "I could not complete the reply. The managed AI service is busy. Wait %1 seconds before trying again. Your Strata credits were not charged." ).arg( waitSeconds );
+    return tr( "I could not complete the reply. The managed AI service is busy. Wait before trying again. Your Strata credits were not charged." );
+  }
 
   if ( httpStatus == 0 )
   {

@@ -192697,6 +192697,28 @@ L&apos;algoritmo rende inoltre possibile riordinare le bande del nuovo raster.</
         <source>The selected AI provider is unavailable. Open settings to configure it, or choose another provider for this chat.</source>
         <translation>Il servizio AI selezionato non è disponibile. Apri le impostazioni per configurarlo oppure scegli un altro servizio per questa chat.</translation>
     </message>
+    <message>
+        <source>I could not complete the reply. The managed AI service is unavailable. Your Strata credits were not charged, and retrying will not help until the service is restored.</source>
+        <translation>Non sono riuscito a completare la risposta. Il servizio AI gestito non è disponibile. I tuoi crediti Strata non sono stati scalati e riprovare non serve finché il servizio non torna.</translation>
+    </message>
+    <message>
+        <source>I could not complete the reply.
+The AI service did not respond in time. Try again in a few seconds.
+
+Technical details: %1</source>
+        <translation>Non sono riuscito a completare la risposta.
+Il servizio AI non ha risposto in tempo. Riprova tra qualche secondo.
+
+Dettagli tecnici: %1</translation>
+    </message>
+    <message>
+        <source>I could not complete the reply. The managed AI service is busy. Wait %1 seconds before trying again. Your Strata credits were not charged.</source>
+        <translation>Non sono riuscito a completare la risposta. Il servizio AI gestito è occupato. Attendi %1 secondi prima di riprovare. I tuoi crediti Strata non sono stati scalati.</translation>
+    </message>
+    <message>
+        <source>I could not complete the reply. The managed AI service is busy. Wait before trying again. Your Strata credits were not charged.</source>
+        <translation>Non sono riuscito a completare la risposta. Il servizio AI gestito è occupato. Attendi prima di riprovare. I tuoi crediti Strata non sono stati scalati.</translation>
+    </message>
 </context>
 <context>
     <name>QgsAiChatDockWidget</name>

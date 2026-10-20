@@ -2551,7 +2551,12 @@ void QgsAiModelRouter::onReplyFinished()
     {
       if ( retryAfterSeconds > 0 )
         emit retryWaiting( requestId, QDateTime::currentMSecsSinceEpoch() + static_cast<qint64>( retryAfterSeconds ) * 1000, retryAfterSeconds, context->attempt );
-      finishRequest( requestId, false, QString(), tr( "The provider asked to wait %1 seconds before resuming." ).arg( retryAfterSeconds ), httpStatus, context->attempt - 1, false, latencyMs );
+      QString errorMessage = tr( "The provider asked to wait %1 seconds before resuming." ).arg( retryAfterSeconds );
+      if ( !context->applicationErrorCode.isEmpty() && !errorMessage.contains( context->applicationErrorCode ) )
+        errorMessage += u" code=%1"_s.arg( context->applicationErrorCode );
+      if ( context->applicationErrorCode == u"managed_provider_busy"_s && retryAfterSeconds >= 0 && !errorMessage.contains( u"retry_after="_s ) )
+        errorMessage += u" · retry_after=%1"_s.arg( retryAfterSeconds );
+      finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );
       return;
     }
     const int backoffMs = retryAfterSeconds >= 0 ? retryAfterSeconds * 1000 : ( emptyCompletion ? 2000 * context->attempt : 1000 * context->attempt );
@@ -2605,6 +2610,8 @@ void QgsAiModelRouter::onReplyFinished()
   if ( !context->applicationErrorCode.isEmpty() && !errorMessage.contains( context->applicationErrorCode ) )
     errorMessage += u" code=%1"_s.arg( context->applicationErrorCode );
   errorMessage = sanitizeErrorText( errorMessage );
+  if ( context->applicationErrorCode == u"managed_provider_busy"_s && context->retryAfterSeconds >= 0 && !errorMessage.contains( u"retry_after="_s ) )
+    errorMessage += u" · retry_after=%1"_s.arg( context->retryAfterSeconds );
 
   finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );
 }

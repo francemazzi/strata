@@ -3,6 +3,7 @@
 #include <QPushButton>
 #include "qgstest.h"
 #include "qgsapplication.h"
+#include "qgssettings.h"
 #include "qgsrasterlayer.h"
 #include "qgsproject.h"
 #include "qgsvectorlayer.h"
@@ -213,6 +214,88 @@ class TestQgsAiIncidentRecovery : public QObject
       QTRY_COMPARE( finished.size(), 1 );
       QCOMPARE( server.requestCount, 1 );
       QVERIFY( !finished.first()[1].toBool() );
+    }
+    void fundingIsNotRetried()
+    {
+      QgsAiTestLoopbackServer server;
+      QVERIFY( server.listen( QHostAddress::LocalHost ) );
+      server.responses << QgsAiTestLoopbackServer::jsonResponse(
+        503,
+        "Unavailable",
+        QJsonDocument( QJsonObject {
+                         { u"error"_s, u"managed_provider_funding_required"_s },
+                         { u"message"_s, u"The managed AI provider account requires operator attention."_s },
+                         { u"recoverable"_s, false },
+                         { u"statusCode"_s, 503 },
+                       } )
+          .toJson()
+      );
+      QgsAiModelRouter router;
+      configure( router, server.serverPort() );
+      router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+      QTemporaryDir root;
+      QgsAiFileContextProvider files( root.path() );
+      QgsAiReviewPatchEngine review;
+      QgsAiAgentSessionManager manager( &router, &files, &review );
+      manager.sendUserMessage( u"Synthetic funding request"_s );
+      QTRY_VERIFY( !manager.history().isEmpty() && manager.history().last().metadata.value( u"ui_kind"_s ).toString() == u"request_error"_s );
+      QCOMPARE( server.requestCount, 1 );
+      const QString text = manager.history().last().content;
+      QVERIFY2( text.contains( u"were not charged"_s ), qPrintable( text ) );
+      QVERIFY( !text.contains( u"Please retry shortly"_s ) );
+      QCOMPARE( manager.history().last().metadata.value( u"error_code"_s ).toString(), u"managed_provider_funding_required"_s );
+    }
+    void busyNamesTheWait()
+    {
+      QgsAiTestLoopbackServer server;
+      QVERIFY( server.listen( QHostAddress::LocalHost ) );
+      server.responses << QgsAiTestLoopbackServer::jsonResponse(
+        503,
+        "Unavailable",
+        QJsonDocument( QJsonObject {
+                         { u"error"_s, u"managed_provider_busy"_s },
+                         { u"message"_s, u"The managed AI provider is cooling down."_s },
+                         { u"recoverable"_s, false },
+                         { u"retry_after"_s, 90 },
+                         { u"statusCode"_s, 503 },
+                       } )
+          .toJson()
+      );
+      QgsAiModelRouter router;
+      configure( router, server.serverPort() );
+      router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+      QTemporaryDir root;
+      QgsAiFileContextProvider files( root.path() );
+      QgsAiReviewPatchEngine review;
+      QgsAiAgentSessionManager manager( &router, &files, &review );
+      manager.sendUserMessage( u"Synthetic busy request"_s );
+      QTRY_VERIFY( !manager.history().isEmpty() && manager.history().last().metadata.value( u"ui_kind"_s ).toString() == u"request_error"_s );
+      QCOMPARE( server.requestCount, 1 );
+      const QString text = manager.history().last().content;
+      QVERIFY2( text.contains( u"Wait 90 seconds"_s ), qPrintable( text ) );
+      QVERIFY( !text.contains( u"Please retry shortly"_s ) );
+    }
+    void transferTimeoutExplainsTheAbort()
+    {
+      // dispatchRequest clamps the transfer timeout to at least 10 seconds.
+      QgsSettings().setValue( u"ai/network/timeoutSeconds"_s, 10 );
+      QgsAiTestLoopbackServer server;
+      QVERIFY( server.listen( QHostAddress::LocalHost ) );
+      auto delayed = QgsAiTestLoopbackServer::sseResponse( { "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n" } );
+      delayed.responseDelayMs = 20000;
+      server.responses << delayed;
+      QgsAiModelRouter router;
+      configure( router, server.serverPort() );
+      router.setActiveProvider( QgsAiModelRouter::Provider::Plan );
+      QTemporaryDir root;
+      QgsAiFileContextProvider files( root.path() );
+      QgsAiReviewPatchEngine review;
+      QgsAiAgentSessionManager manager( &router, &files, &review );
+      manager.sendUserMessage( u"Synthetic timeout request"_s );
+      QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest() && !manager.history().isEmpty(), 45000 );
+      const QString text = manager.history().last().content;
+      QVERIFY2( text.contains( u"did not respond in time"_s ), qPrintable( text ) );
+      QVERIFY2( text.contains( u"aborted due to timeout"_s ), qPrintable( text ) );
     }
     void verifiesOpaqueIdentityAndRevocation()
     {
