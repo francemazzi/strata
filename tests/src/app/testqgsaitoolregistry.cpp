@@ -11,6 +11,7 @@
 
 #include "ai/qgsaiagentpolicy.h"
 #include "ai/qgsaiauditlog.h"
+#include "ai/qgsaichathistorystore.h"
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/qgsaiworkspacetrust.h"
 #include "ai/tools/qgsaidownloadfiletool.h"
@@ -31,6 +32,8 @@
 #include "qgsgraduatedsymbolrenderer.h"
 #include "qgslayertree.h"
 #include "qgslayertreelayer.h"
+#include "qgslayoutframe.h"
+#include "qgslayoutitemattributetable.h"
 #include "qgslayoutframe.h"
 #include "qgslayoutitemattributetable.h"
 #include "qgslayoutitemlabel.h"
@@ -77,6 +80,7 @@
 #include <QSize>
 #include <QString>
 #include <QTemporaryDir>
+#include <QUuid>
 #include <QThread>
 #include <QTimer>
 
@@ -199,7 +203,9 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
+    void readChatHistoryListsAndReadsOtherChats();
     void advancedStyleGraduatedClassesAreReadable();
+    void printLayoutTableBesideTheMap();
     void createPrintLayoutAndExportMap();
     void printLayoutItemsFitThePage();
     void printLayoutTableBesideTheMap();
@@ -1131,6 +1137,10 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( issuesOf( labelled ).isEmpty(), dump( labelled ).constData() );
   layout->layoutItems( legends );
   QCOMPARE( legends.size(), 1 );
+  // a single-symbol layer prints its name beside the symbol, from the embedded legend node
+  QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
+  QVERIFY( embedded );
+  QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
   QgsLayerTreeLayer *legendNode = legends.constFirst()->model()->rootGroup()->findLayer( shown->id() );
   QVERIFY( legendNode );
   QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
@@ -1153,6 +1163,7 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( hiddenLabel.success, qPrintable( hiddenLabel.errorMessage ) );
   QCOMPARE( hiddenLabel.output.toObject().value( u"legend_labels_not_in_legend"_s ).toArray(), QJsonArray { hidden->id() } );
   QVERIFY( editTool.execute( { { u"rollback_token"_s, hiddenLabel.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode )->data( Qt::DisplayRole ).toString(), u"Other name"_s );
 
   // a later call changes the note and the legend names in place; its rollback brings them back
   const QgsAiToolResult renamed = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"legend_labels"_s, QJsonObject { { shown->id(), u"Other name"_s } } }, { u"note"_s, u"Source: updated"_s } } );
@@ -1213,6 +1224,81 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( portraitEdited.success, qPrintable( portraitEdited.errorMessage ) );
   QVERIFY2( issuesOf( portraitEdited ).isEmpty(), dump( portraitEdited ).constData() );
   QCOMPARE( portrait.output.toObject().value( u"layout"_s ).toObject().value( u"page"_s ).toObject().value( u"height_mm"_s ).toInt(), 420 );
+
+void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
+{
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:32632&field=name:string&field=share:double&field=pop:integer"_s, u"Towns"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  for ( int i = 0; i < 25; ++i )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttributes( QgsAttributes() << u"town %1"_s.arg( i ) << i * 4.0 << 1000 + i );
+    const double x = 570000 + ( i % 5 ) * 14000;
+    const double y = 5010000 + ( i / 5 ) * 25000;
+    feature.setGeometry( QgsGeometry::fromRect( QgsRectangle( x, y, x + 10000, y + 20000 ) ) );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+
+  QgsMapCanvas canvas;
+  canvas.resize( 400, 600 );
+  canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:32632"_s ) );
+  canvas.setLayers( { layer } );
+  canvas.setExtent( QgsRectangle( 565000, 5000000, 643000, 5140000 ) );
+
+  QgsAiCreatePrintLayoutTool createTool( &project, &canvas );
+  // the map can frame a whole layer instead of the canvas view, which here is much wider
+  canvas.setExtent( QgsRectangle( 400000, 4900000, 800000, 5240000 ) );
+  QVERIFY( !createTool.execute( { { u"name"_s, u"Bad"_s }, { u"extent_layer_id"_s, u"nope"_s } } ).success );
+  QVERIFY( createTool.execute( { { u"name"_s, u"Table"_s }, { u"title"_s, u"Towns past 20%"_s }, { u"extent_layer_id"_s, layer->id() } } ).success );
+  QgsPrintLayout *layout = dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Table"_s ) );
+  QVERIFY( layout );
+  QList<QgsLayoutItemMap *> maps;
+  layout->layoutItems( maps );
+  QVERIFY( maps.constFirst()->extent().contains( layer->extent() ) );
+  QVERIFY( maps.constFirst()->extent().height() < layer->extent().height() * 1.05 );
+
+  const QJsonObject table {
+    { u"layer_id"_s, layer->id() },
+    { u"columns"_s,
+      QJsonArray { QJsonObject { { u"field"_s, u"name"_s }, { u"heading"_s, u"Town"_s } }, QJsonObject { { u"field"_s, u"round(\"share\", 1)"_s }, { u"heading"_s, u"Share (%)"_s } }, QJsonObject { { u"field"_s, u"pop"_s }, { u"heading"_s, u"People"_s } } } },
+    { u"filter"_s, u"\"share\" > 20"_s },
+    { u"sort_by"_s, u"share"_s },
+    { u"descending"_s, true }
+  };
+  QgsAiEditPrintLayoutTool editTool( &project );
+
+  // a wrong column is refused before the layout changes
+  QJsonObject wrong = table;
+  wrong.insert( u"columns"_s, QJsonArray { QJsonObject { { u"field"_s, u"nope"_s } } } );
+  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Table"_s }, { u"table"_s, wrong } } ).success );
+  QVERIFY( layout->multiFrames().isEmpty() );
+
+  const QgsAiToolResult edited = editTool.execute(
+    { { u"layout_name"_s, u"Table"_s }, { u"add_legend"_s, true }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true }, { u"table"_s, table }, { u"note"_s, u"Source: test data"_s } }
+  );
+  QVERIFY2( edited.success, qPrintable( edited.errorMessage ) );
+  const QJsonObject output = edited.output.toObject();
+  QVERIFY2( output.value( u"layout"_s ).toObject().value( u"issues"_s ).toArray().isEmpty(), QJsonDocument( output.value( u"layout"_s ).toObject() ).toJson( QJsonDocument::Compact ).constData() );
+  QCOMPARE( output.value( u"table"_s ).toObject().value( u"rows"_s ).toInt(), 19 );
+  QVERIFY( output.value( u"table"_s ).toObject().value( u"fits"_s ).toBool() );
+
+  QCOMPARE( layout->multiFrames().size(), 1 );
+  QgsLayoutItemAttributeTable *attributeTable = qobject_cast<QgsLayoutItemAttributeTable *>( layout->multiFrames().constFirst() );
+  QVERIFY( attributeTable );
+  QCOMPARE( attributeTable->contents().constFirst().constFirst().toString(), u"town 24"_s );
+  QgsLayoutItem *frame = layout->itemById( u"AI Table"_s );
+  QgsLayoutItem *legend = layout->itemById( u"AI Legend"_s );
+  QVERIFY( frame && legend );
+  QVERIFY( legend->mapRectToScene( legend->rect() ).top() >= frame->mapRectToScene( frame->rect() ).bottom() );
+
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, output.value( u"rollback_token"_s ).toString() } } ).success );
+  QVERIFY( layout->multiFrames().isEmpty() );
+  QVERIFY( !layout->itemById( u"AI Table"_s ) );
+}
 
   // renaming a layer in an auto-updating legend freezes it; rollback makes it auto-updating again
   QgsLayoutItemLegend *autoLegend = qobject_cast<QgsLayoutItemLegend *>( dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Portrait"_s ) )->itemById( u"AI Legend"_s ) );
@@ -1364,6 +1450,120 @@ void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
   QCOMPARE( pictures.constFirst()->picturePath(), u":/images/north_arrows/layout_default_north_arrow.svg"_s );
 
   QJsonObject editLayoutRollbackArgs;
+void TestQgsAiToolRegistry::readChatHistoryListsAndReadsOtherChats()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiChatHistoryStore store( &contextProvider );
+  store.setHistoryScopeKey( u"project:file:%1/corso.qgz"_s.arg( tempDir.path() ) );
+  QVERIFY( store.ensureReady() );
+
+  const auto message = []( QgsAiChatRole role, const QString &content, const QVariantMap &metadata = QVariantMap() ) {
+    QgsAiChatMessage m;
+    m.id = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    m.role = role;
+    m.content = content;
+    m.metadata = metadata;
+    return m;
+  };
+  const auto toolMetadata = []( const QString &name, const QVariantMap &args, const QString &effects ) {
+    return QVariantMap { { u"tool_name"_s, name }, { u"tool_args"_s, args }, { u"effects_state"_s, effects }, { u"execution_state"_s, u"completed"_s } };
+  };
+
+  QVERIFY( store.createSession( u"open"_s, u"Documenta il lavoro"_s, u"agent"_s ) );
+  QVERIFY( store.appendMessage( u"open"_s, message( QgsAiChatRole::User, u"Documenta il lavoro"_s ), 0 ) );
+
+  QVERIFY( store.createSession( u"fields"_s, u"Aggiungi un campo quota_allagabile"_s, u"agent"_s ) );
+  QVERIFY( store.appendMessage( u"fields"_s, message( QgsAiChatRole::User, u"Aggiungi un campo quota_allagabile"_s ), 0 ) );
+  const QVariantMap
+    calculateArgs { { u"layer_id"_s, u"comuni"_s }, { u"field_name"_s, u"quota_allagabile"_s }, { u"expression"_s, u"area(intersection($geometry, aggregate('aree','collect',$geometry))) / area($geometry) * 100"_s } };
+  QVERIFY(
+    store.appendMessage( u"fields"_s, message( QgsAiChatRole::Tool, u"{\"status\":\"ok\",\"updated_count\":205,\"rollback_token\":\"tok-1\",\"verification\":{\"required\":true}}"_s, toolMetadata( u"calculate_field"_s, calculateArgs, u"applied"_s ) ), 1 )
+  );
+  QString fieldsJson;
+  for ( int i = 0; i < 30; ++i )
+    fieldsJson += u"%1{\"name\":\"campo_%2\",\"type\":\"Real\"}"_s.arg( i ? u","_s : QString() ).arg( i );
+  QVERIFY(
+    store.appendMessage( u"fields"_s, message( QgsAiChatRole::Tool, u"{\"feature_count\":205,\"fields\":[%1]}"_s.arg( fieldsJson ), toolMetadata( u"describe_layer"_s, { { u"layer_id"_s, u"comuni"_s } }, u"read_only"_s ) ), 2 )
+  );
+  QVERIFY( store.appendMessage( u"fields"_s, message( QgsAiChatRole::Assistant, u"Ho calcolato quota_allagabile per 205 comuni."_s ), 3 ) );
+
+  QVERIFY( store.createSession( u"styles"_s, u"Colora i comuni"_s, u"agent"_s ) );
+  QVERIFY( store.appendMessage( u"styles"_s, message( QgsAiChatRole::User, u"Colora i comuni"_s ), 0 ) );
+  QVariantMap undone = toolMetadata( u"style_layer"_s, { { u"layer_id"_s, u"comuni"_s } }, u"applied"_s );
+  undone.insert( u"undo_status"_s, u"undone"_s );
+  QVERIFY( store.appendMessage( u"styles"_s, message( QgsAiChatRole::Tool, u"{\"status\":\"ok\"}"_s, undone ), 1 ) );
+  QVariantMap failed = toolMetadata( u"query_features"_s, { { u"layer_id"_s, u"laghi"_s } }, u"read_only"_s );
+  failed.insert( u"is_error"_s, true );
+  QVERIFY( store.appendMessage( u"styles"_s, message( QgsAiChatRole::Tool, u"{\"error\":\"Layer not found\"}"_s, failed ), 2 ) );
+
+  QgsAiReadChatHistoryTool tool( &store, [] { return u"open"_s; } );
+  QVERIFY( tool.isAvailable() );
+  QVERIFY( !tool.requiresApproval() );
+
+  const QgsAiToolResult list = tool.execute( QJsonObject() );
+  QVERIFY2( list.success, qPrintable( list.errorMessage ) );
+  QMap<QString, QJsonObject> listed;
+  for ( const QJsonValue &chat : list.output.toObject().value( u"chats"_s ).toArray() )
+    listed.insert( chat.toObject().value( u"id"_s ).toString(), chat.toObject() );
+  QCOMPARE( listed.keys(), QStringList( { u"fields"_s, u"styles"_s } ) );
+  QCOMPARE( listed.value( u"fields"_s ).value( u"tools_that_change_data"_s ).toString(), u"calculate_field"_s );
+  QCOMPARE( listed.value( u"fields"_s ).value( u"prompts"_s ).toInt(), 1 );
+  QCOMPARE( listed.value( u"styles"_s ).value( u"tools_that_change_data"_s ).toString(), QString() );
+  QCOMPARE( listed.value( u"styles"_s ).value( u"undone_changes"_s ).toInt(), 1 );
+
+  const QgsAiToolResult read = tool.execute( QJsonObject { { u"chat_ids"_s, QJsonArray { u"fields"_s, u"styles"_s, u"open"_s, u"nope"_s } } } );
+  QVERIFY2( read.success, qPrintable( read.errorMessage ) );
+  QVERIFY( !read.output.toObject().contains( u"continue"_s ) );
+  const QJsonArray chats = read.output.toObject().value( u"chats"_s ).toArray();
+  QCOMPARE( chats.size(), 4 );
+  const QJsonArray fields = chats.at( 0 ).toObject().value( u"turns"_s ).toArray().at( 0 ).toObject().value( u"steps"_s ).toArray();
+  QCOMPARE( fields.size(), 4 );
+  QCOMPARE( fields.at( 0 ).toObject().value( u"user"_s ).toString(), u"Aggiungi un campo quota_allagabile"_s );
+  // a change comes whole: arguments and result, without the session's bookkeeping
+  const QJsonObject calculate = fields.at( 1 ).toObject();
+  QCOMPARE( calculate.value( u"ref"_s ).toString(), u"1.1"_s );
+  QCOMPARE( calculate.value( u"args"_s ).toObject().value( u"expression"_s ).toString(), calculateArgs.value( u"expression"_s ).toString() );
+  QCOMPARE( calculate.value( u"result"_s ).toObject(), QJsonObject( { { u"status"_s, u"ok"_s }, { u"updated_count"_s, 205 } } ) );
+  // a long read comes as a preview that says how to get it whole
+  const QJsonObject describe = fields.at( 2 ).toObject();
+  QCOMPARE( describe.value( u"ref"_s ).toString(), u"1.2"_s );
+  QVERIFY( !describe.contains( u"result"_s ) );
+  QCOMPARE( describe.value( u"result_preview"_s ).toString().size(), 300 );
+  QVERIFY( describe.value( u"full_result"_s ).toString().contains( u"details=[\"1.2\"]"_s ) );
+  QCOMPARE( fields.at( 3 ).toObject().value( u"assistant"_s ).toString(), u"Ho calcolato quota_allagabile per 205 comuni."_s );
+  const QJsonArray styles = chats.at( 1 ).toObject().value( u"turns"_s ).toArray().at( 0 ).toObject().value( u"steps"_s ).toArray();
+  QCOMPARE( styles.at( 1 ).toObject().value( u"outcome"_s ).toString(), u"undone by the user"_s );
+  QCOMPARE( styles.at( 2 ).toObject().value( u"outcome"_s ).toString(), u"failed"_s );
+  QCOMPARE( styles.at( 2 ).toObject().value( u"result"_s ).toObject().value( u"error"_s ).toString(), u"Layer not found"_s );
+  QVERIFY( chats.at( 2 ).toObject().contains( u"note"_s ) );
+  QVERIFY( chats.at( 3 ).toObject().contains( u"error"_s ) );
+
+  const QgsAiToolResult detail = tool.execute( QJsonObject { { u"chat_ids"_s, QJsonArray { u"fields"_s } }, { u"details"_s, QJsonArray { u"1.2"_s, u"9.9"_s } } } );
+  QVERIFY2( detail.success, qPrintable( detail.errorMessage ) );
+  const QJsonArray calls = detail.output.toObject().value( u"calls"_s ).toArray();
+  QCOMPARE( calls.at( 0 ).toObject().value( u"result"_s ).toObject().value( u"fields"_s ).toArray().size(), 30 );
+  QVERIFY( calls.at( 1 ).toObject().contains( u"error"_s ) );
+  QVERIFY( !tool.execute( QJsonObject { { u"chat_ids"_s, QJsonArray { u"fields"_s, u"styles"_s } }, { u"details"_s, QJsonArray { u"1.1"_s } } } ).success );
+
+  // what does not fit waits for the next call, cut between turns and never inside one
+  QVERIFY( store.createSession( u"long"_s, u"Lungo"_s, u"agent"_s ) );
+  QVERIFY( store.appendMessage( u"long"_s, message( QgsAiChatRole::User, QString( 45000, 'x' ) ), 0 ) );
+  const QJsonObject first = tool.execute( QJsonObject { { u"chat_ids"_s, QJsonArray { u"long"_s, u"fields"_s } } } ).output.toObject();
+  QCOMPARE( first.value( u"chats"_s ).toArray().size(), 1 );
+  QCOMPARE( first.value( u"chats"_s ).toArray().at( 0 ).toObject().value( u"turns"_s ).toArray().at( 0 ).toObject().value( u"steps"_s ).toArray().at( 0 ).toObject().value( u"user"_s ).toString().size(), 45000 );
+  const QJsonObject next = first.value( u"continue"_s ).toObject();
+  QCOMPARE( next.value( u"chat_ids"_s ).toArray(), QJsonArray { u"fields"_s } );
+  QCOMPARE( next.value( u"from_turn"_s ).toInt(), 1 );
+  const QJsonArray second = tool.execute( next ).output.toObject().value( u"chats"_s ).toArray();
+  QCOMPARE( second.at( 0 ).toObject().value( u"id"_s ).toString(), u"fields"_s );
+  QCOMPARE( second.at( 0 ).toObject().value( u"turns"_s ).toArray().size(), 1 );
+
+  store.setHistoryScopeKey( QString() );
+  QVERIFY( !tool.isAvailable() );
+}
+
   editLayoutRollbackArgs.insert( u"rollback_token"_s, editLayoutRollbackToken );
   const QgsAiToolResult editLayoutRollback = editLayoutTool.execute( editLayoutRollbackArgs );
   QVERIFY2( editLayoutRollback.success, qPrintable( editLayoutRollback.errorMessage ) );

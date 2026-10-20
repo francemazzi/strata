@@ -1579,6 +1579,7 @@ QgisApp::QgisApp(
   mAiSessionManager->setToolRegistry( mAiToolRegistry.get() );
   mAiSessionManager->setWorkspaceIndex( mAiWorkspaceIndex.get() );
   mAiSessionManager->setHistoryStore( mAiChatHistoryStore.get() );
+  mAiToolRegistry->registerTool( std::make_unique<QgsAiReadChatHistoryTool>( mAiChatHistoryStore.get(), [this] { return mAiSessionManager ? mAiSessionManager->activeSessionId() : QString(); } ) );
   // The model knows what the user is looking at: the map view, the active layer and its selection.
   mAiSessionManager->setMapContextProvider( [this]() {
     QgsAiMapContext context;
