@@ -1213,6 +1213,9 @@ namespace
         node->setCustomProperty( u"legend/title-label"_s, it.value().toString() );
       else
         node->removeCustomProperty( u"legend/title-label"_s );
+      // a single-symbol layer prints its name beside the symbol, cached in the embedded node: this refreshes it
+      if ( QgsLayerTreeModelLegendNode *embedded = legend->model()->legendNodeEmbeddedInParent( node ) )
+        embedded->setUserLabel( embedded->userLabel() );
       legend->model()->clearCachedData( node );
     }
   }

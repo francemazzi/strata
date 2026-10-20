@@ -1131,6 +1131,10 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QgsLayerTreeLayer *legendNode = legends.constFirst()->model()->rootGroup()->findLayer( shown->id() );
   QVERIFY( legendNode );
   QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
+  // a single-symbol layer prints its name beside the symbol, from the embedded legend node
+  QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
+  QVERIFY( embedded );
+  QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
   QCOMPARE( legends.constFirst()->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
   QCOMPARE( shown->name(), u"Shown"_s );
   QgsLayoutItemLabel *note = qobject_cast<QgsLayoutItemLabel *>( layout->itemById( u"AI Note"_s ) );
@@ -1153,6 +1157,7 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   layout->layoutItems( labels );
   QCOMPARE( labels.size(), 2 );
   QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Other name"_s );
+  QCOMPARE( legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode )->data( Qt::DisplayRole ).toString(), u"Other name"_s );
   QCOMPARE( note->text(), u"Source: updated"_s );
   QVERIFY( editTool.execute( { { u"rollback_token"_s, renamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
   QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
