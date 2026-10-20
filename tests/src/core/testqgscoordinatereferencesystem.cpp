@@ -36,6 +36,18 @@ using namespace Qt::StringLiterals;
 #include <cpl_conv.h>
 #include <QtTest/QSignalSpy>
 
+// PROJ 9.9 exports a WKT1-derived CRS like the WKT1 import itself (OSGeo/PROJ#4844):
+// the conversion is named "unknown" and the axes keep the "(E)"/"(N)" abbreviations.
+static QString expectedWktFromWkt1( QString wkt )
+{
+#if PROJ_VERSION_MAJOR > 9 || ( PROJ_VERSION_MAJOR == 9 && PROJ_VERSION_MINOR >= 9 )
+  wkt.replace( "CONVERSION[\"unnamed\""_L1, "CONVERSION[\"unknown\""_L1 );
+  wkt.replace( "AXIS[\"easting\""_L1, "AXIS[\"(E)\""_L1 );
+  wkt.replace( "AXIS[\"northing\""_L1, "AXIS[\"(N)\""_L1 );
+#endif
+  return wkt;
+}
+
 class TestQgsCoordinateReferenceSystem : public QObject
 {
     Q_OBJECT
@@ -707,9 +719,9 @@ void TestQgsCoordinateReferenceSystem::createFromWktUnknown()
   const QString wkt = QStringLiteral(
     R"""(PROJCS["Belge 1972 / Belgian Lambert 72",GEOGCS["Belge 1972",DATUM["Reseau_National_Belge_1972",SPHEROID["International 1924",6378388,297],AUTHORITY["EPSG","6313"]],PRIMEM["Greenwich",0],UNIT["Degree",0.0174532925199433]],PROJECTION["Lambert_Conformal_Conic_2SP"],PARAMETER["latitude_of_origin",90],PARAMETER["central_meridian",4.36798666666667],PARAMETER["standard_parallel_1",49.8333339],PARAMETER["standard_parallel_2",51.1666672333333],PARAMETER["false_easting",150000.01256],PARAMETER["false_northing",5400088.4378],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]])"""
   );
-  const QString expectedWkt = QStringLiteral(
+  const QString expectedWkt = expectedWktFromWkt1( QStringLiteral(
     R"""(PROJCRS["Belge 1972 / Belgian Lambert 72",BASEGEOGCRS["Belge 1972",DATUM["Reseau National Belge 1972",ELLIPSOID["International 1924",6378388,297,LENGTHUNIT["metre",1]],ID["EPSG",6313]],PRIMEM["Greenwich",0,ANGLEUNIT["Degree",0.0174532925199433]]],CONVERSION["unnamed",METHOD["Lambert Conic Conformal (2SP)",ID["EPSG",9802]],PARAMETER["Latitude of false origin",90,ANGLEUNIT["Degree",0.0174532925199433],ID["EPSG",8821]],PARAMETER["Longitude of false origin",4.36798666666667,ANGLEUNIT["Degree",0.0174532925199433],ID["EPSG",8822]],PARAMETER["Latitude of 1st standard parallel",49.8333339,ANGLEUNIT["Degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["Latitude of 2nd standard parallel",51.1666672333333,ANGLEUNIT["Degree",0.0174532925199433],ID["EPSG",8824]],PARAMETER["Easting at false origin",150000.01256,LENGTHUNIT["metre",1],ID["EPSG",8826]],PARAMETER["Northing at false origin",5400088.4378,LENGTHUNIT["metre",1],ID["EPSG",8827]]],CS[Cartesian,2],AXIS["easting",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["northing",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]])"""
-  );
+  ) );
 
   QgsDebugMsgLevel( expectedWkt, 1 );
 
@@ -1496,9 +1508,9 @@ void TestQgsCoordinateReferenceSystem::readWriteXml()
   QCOMPARE( myCrs11.toProj(), u"+proj=lcc +lat_0=-37.2 +lon_0=145.1 +lat_1=-36 +lat_2=-38 +x_0=2510000 +y_0=2520000 +ellps=GRS80 +towgs84=1,2,3,4,5,6,7 +units=m +no_defs +type=crs"_s );
   QCOMPARE(
     myCrs11.toWkt( Qgis::CrsWktVariant::Wkt2_2019 ),
-    QStringLiteral(
+    expectedWktFromWkt1( QStringLiteral(
       R"""(BOUNDCRS[SOURCECRS[PROJCRS["xxx",BASEGEOGCRS["GDA94",DATUM["Geocentric Datum of Australia 1994",ELLIPSOID["GRS 1980",6378137,298.257222101,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4283]],CONVERSION["unnamed",METHOD["Lambert Conic Conformal (2SP)",ID["EPSG",9802]],PARAMETER["Latitude of 1st standard parallel",-36,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["Latitude of 2nd standard parallel",-38,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8824]],PARAMETER["Latitude of false origin",-37.2,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8821]],PARAMETER["Longitude of false origin",145.1,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8822]],PARAMETER["Easting at false origin",2510000,LENGTHUNIT["metre",1],ID["EPSG",8826]],PARAMETER["Northing at false origin",2520000,LENGTHUNIT["metre",1],ID["EPSG",8827]]],CS[Cartesian,2],AXIS["easting",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["northing",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["Transformation from GDA94 to WGS84",METHOD["Position Vector transformation (geog2D domain)",ID["EPSG",9606]],PARAMETER["X-axis translation",1,ID["EPSG",8605]],PARAMETER["Y-axis translation",2,ID["EPSG",8606]],PARAMETER["Z-axis translation",3,ID["EPSG",8607]],PARAMETER["X-axis rotation",4,ID["EPSG",8608]],PARAMETER["Y-axis rotation",5,ID["EPSG",8609]],PARAMETER["Z-axis rotation",6,ID["EPSG",8610]],PARAMETER["Scale difference",1.000007,ID["EPSG",8611]]]])"""
-    )
+    ) )
   );
 
   // try reloading, make sure it gets the same user crs assigned
@@ -1509,9 +1521,9 @@ void TestQgsCoordinateReferenceSystem::readWriteXml()
   QCOMPARE( myCrs11b.toProj(), u"+proj=lcc +lat_0=-37.2 +lon_0=145.1 +lat_1=-36 +lat_2=-38 +x_0=2510000 +y_0=2520000 +ellps=GRS80 +towgs84=1,2,3,4,5,6,7 +units=m +no_defs +type=crs"_s );
   QCOMPARE(
     myCrs11b.toWkt( Qgis::CrsWktVariant::Wkt2_2019 ),
-    QStringLiteral(
+    expectedWktFromWkt1( QStringLiteral(
       R"""(BOUNDCRS[SOURCECRS[PROJCRS["xxx",BASEGEOGCRS["GDA94",DATUM["Geocentric Datum of Australia 1994",ELLIPSOID["GRS 1980",6378137,298.257222101,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4283]],CONVERSION["unnamed",METHOD["Lambert Conic Conformal (2SP)",ID["EPSG",9802]],PARAMETER["Latitude of 1st standard parallel",-36,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["Latitude of 2nd standard parallel",-38,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8824]],PARAMETER["Latitude of false origin",-37.2,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8821]],PARAMETER["Longitude of false origin",145.1,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8822]],PARAMETER["Easting at false origin",2510000,LENGTHUNIT["metre",1],ID["EPSG",8826]],PARAMETER["Northing at false origin",2520000,LENGTHUNIT["metre",1],ID["EPSG",8827]]],CS[Cartesian,2],AXIS["easting",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["northing",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["Transformation from GDA94 to WGS84",METHOD["Position Vector transformation (geog2D domain)",ID["EPSG",9606]],PARAMETER["X-axis translation",1,ID["EPSG",8605]],PARAMETER["Y-axis translation",2,ID["EPSG",8606]],PARAMETER["Z-axis translation",3,ID["EPSG",8607]],PARAMETER["X-axis rotation",4,ID["EPSG",8608]],PARAMETER["Y-axis rotation",5,ID["EPSG",8609]],PARAMETER["Z-axis rotation",6,ID["EPSG",8610]],PARAMETER["Scale difference",1.000007,ID["EPSG",8611]]]])"""
-    )
+    ) )
   );
 
   // fudge an dom element without the wkt element
@@ -1558,9 +1570,9 @@ void TestQgsCoordinateReferenceSystem::readWriteXml()
   QCOMPARE( myCrs15.toProj(), u"+proj=lcc +lat_0=-37.2 +lon_0=145.1 +lat_1=-36 +lat_2=-38 +x_0=2510000 +y_0=2520000 +ellps=GRS80 +towgs84=1,2,3,4,5,6,7 +units=m +no_defs +type=crs"_s );
   QCOMPARE(
     myCrs15.toWkt( Qgis::CrsWktVariant::Wkt2_2019 ),
-    QStringLiteral(
+    expectedWktFromWkt1( QStringLiteral(
       R"""(BOUNDCRS[SOURCECRS[PROJCRS["xxx",BASEGEOGCRS["GDA94",DATUM["Geocentric Datum of Australia 1994",ELLIPSOID["GRS 1980",6378137,298.257222101,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4283]],CONVERSION["unnamed",METHOD["Lambert Conic Conformal (2SP)",ID["EPSG",9802]],PARAMETER["Latitude of 1st standard parallel",-36,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["Latitude of 2nd standard parallel",-38,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8824]],PARAMETER["Latitude of false origin",-37.2,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8821]],PARAMETER["Longitude of false origin",145.1,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8822]],PARAMETER["Easting at false origin",2510000,LENGTHUNIT["metre",1],ID["EPSG",8826]],PARAMETER["Northing at false origin",2520000,LENGTHUNIT["metre",1],ID["EPSG",8827]]],CS[Cartesian,2],AXIS["easting",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["northing",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]],TARGETCRS[GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["geodetic latitude (Lat)",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["geodetic longitude (Lon)",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]],ABRIDGEDTRANSFORMATION["Transformation from GDA94 to WGS84",METHOD["Position Vector transformation (geog2D domain)",ID["EPSG",9606]],PARAMETER["X-axis translation",1,ID["EPSG",8605]],PARAMETER["Y-axis translation",2,ID["EPSG",8606]],PARAMETER["Z-axis translation",3,ID["EPSG",8607]],PARAMETER["X-axis rotation",4,ID["EPSG",8608]],PARAMETER["Y-axis rotation",5,ID["EPSG",8609]],PARAMETER["Z-axis rotation",6,ID["EPSG",8610]],PARAMETER["Scale difference",1.000007,ID["EPSG",8611]]]])"""
-    )
+    ) )
   );
 
   // fudge a dom element with auth/code and conflicting proj, auth/code should be preferred
