@@ -34,8 +34,6 @@
 #include "qgslayertreelayer.h"
 #include "qgslayoutframe.h"
 #include "qgslayoutitemattributetable.h"
-#include "qgslayoutframe.h"
-#include "qgslayoutitemattributetable.h"
 #include "qgslayoutitemlabel.h"
 #include "qgslayoutitemlegend.h"
 #include "qgslayoutitemmap.h"
@@ -80,9 +78,9 @@
 #include <QSize>
 #include <QString>
 #include <QTemporaryDir>
-#include <QUuid>
 #include <QThread>
 #include <QTimer>
+#include <QUuid>
 
 using namespace Qt::StringLiterals;
 
@@ -203,10 +201,10 @@ class TestQgsAiToolRegistry : public QObject
     void addLayerFromServiceLoadsXyzAndRollsBack();
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
-    void readChatHistoryListsAndReadsOtherChats();
     void advancedStyleGraduatedClassesAreReadable();
-    void printLayoutTableBesideTheMap();
     void createPrintLayoutAndExportMap();
+    void exportMarkdownReportToPdf();
+    void readChatHistoryListsAndReadsOtherChats();
     void printLayoutItemsFitThePage();
     void printLayoutTableBesideTheMap();
     void processingToolReportsMissingAlgorithm();
@@ -1137,17 +1135,9 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( issuesOf( labelled ).isEmpty(), dump( labelled ).constData() );
   layout->layoutItems( legends );
   QCOMPARE( legends.size(), 1 );
-  // a single-symbol layer prints its name beside the symbol, from the embedded legend node
-  QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
-  QVERIFY( embedded );
-  QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
   QgsLayerTreeLayer *legendNode = legends.constFirst()->model()->rootGroup()->findLayer( shown->id() );
   QVERIFY( legendNode );
   QCOMPARE( legendNode->customProperty( u"legend/title-label"_s ).toString(), u"Readable name (%)"_s );
-  // a single-symbol layer prints its name beside the symbol, from the embedded legend node
-  QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
-  QVERIFY( embedded );
-  QCOMPARE( embedded->data( Qt::DisplayRole ).toString(), u"Readable name (%)"_s );
   // a single-symbol layer prints its name beside the symbol, from the embedded legend node
   QgsLayerTreeModelLegendNode *embedded = legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode );
   QVERIFY( embedded );
@@ -1163,7 +1153,6 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( hiddenLabel.success, qPrintable( hiddenLabel.errorMessage ) );
   QCOMPARE( hiddenLabel.output.toObject().value( u"legend_labels_not_in_legend"_s ).toArray(), QJsonArray { hidden->id() } );
   QVERIFY( editTool.execute( { { u"rollback_token"_s, hiddenLabel.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
-  QCOMPARE( legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode )->data( Qt::DisplayRole ).toString(), u"Other name"_s );
 
   // a later call changes the note and the legend names in place; its rollback brings them back
   const QgsAiToolResult renamed = editTool.execute( { { u"layout_name"_s, u"Fit"_s }, { u"legend_labels"_s, QJsonObject { { shown->id(), u"Other name"_s } } }, { u"note"_s, u"Source: updated"_s } } );
@@ -1171,7 +1160,6 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( issuesOf( renamed ).isEmpty(), dump( renamed ).constData() );
   layout->layoutItems( legends );
   QCOMPARE( legends.size(), 1 );
-  QCOMPARE( legends.constFirst()->model()->legendNodeEmbeddedInParent( legendNode )->data( Qt::DisplayRole ).toString(), u"Other name"_s );
   QList<QgsLayoutItemLabel *> labels;
   layout->layoutItems( labels );
   QCOMPARE( labels.size(), 2 );
@@ -1225,81 +1213,6 @@ void TestQgsAiToolRegistry::printLayoutItemsFitThePage()
   QVERIFY2( issuesOf( portraitEdited ).isEmpty(), dump( portraitEdited ).constData() );
   QCOMPARE( portrait.output.toObject().value( u"layout"_s ).toObject().value( u"page"_s ).toObject().value( u"height_mm"_s ).toInt(), 420 );
 
-void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
-{
-  QgsProject project;
-  QgsVectorLayer *layer = new QgsVectorLayer( u"Polygon?crs=EPSG:32632&field=name:string&field=share:double&field=pop:integer"_s, u"Towns"_s, u"memory"_s );
-  QVERIFY( layer->isValid() );
-  QgsFeatureList features;
-  for ( int i = 0; i < 25; ++i )
-  {
-    QgsFeature feature( layer->fields() );
-    feature.setAttributes( QgsAttributes() << u"town %1"_s.arg( i ) << i * 4.0 << 1000 + i );
-    const double x = 570000 + ( i % 5 ) * 14000;
-    const double y = 5010000 + ( i / 5 ) * 25000;
-    feature.setGeometry( QgsGeometry::fromRect( QgsRectangle( x, y, x + 10000, y + 20000 ) ) );
-    features << feature;
-  }
-  QVERIFY( layer->dataProvider()->addFeatures( features ) );
-  project.addMapLayer( layer );
-
-  QgsMapCanvas canvas;
-  canvas.resize( 400, 600 );
-  canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:32632"_s ) );
-  canvas.setLayers( { layer } );
-  canvas.setExtent( QgsRectangle( 565000, 5000000, 643000, 5140000 ) );
-
-  QgsAiCreatePrintLayoutTool createTool( &project, &canvas );
-  // the map can frame a whole layer instead of the canvas view, which here is much wider
-  canvas.setExtent( QgsRectangle( 400000, 4900000, 800000, 5240000 ) );
-  QVERIFY( !createTool.execute( { { u"name"_s, u"Bad"_s }, { u"extent_layer_id"_s, u"nope"_s } } ).success );
-  QVERIFY( createTool.execute( { { u"name"_s, u"Table"_s }, { u"title"_s, u"Towns past 20%"_s }, { u"extent_layer_id"_s, layer->id() } } ).success );
-  QgsPrintLayout *layout = dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Table"_s ) );
-  QVERIFY( layout );
-  QList<QgsLayoutItemMap *> maps;
-  layout->layoutItems( maps );
-  QVERIFY( maps.constFirst()->extent().contains( layer->extent() ) );
-  QVERIFY( maps.constFirst()->extent().height() < layer->extent().height() * 1.05 );
-
-  const QJsonObject table {
-    { u"layer_id"_s, layer->id() },
-    { u"columns"_s,
-      QJsonArray { QJsonObject { { u"field"_s, u"name"_s }, { u"heading"_s, u"Town"_s } }, QJsonObject { { u"field"_s, u"round(\"share\", 1)"_s }, { u"heading"_s, u"Share (%)"_s } }, QJsonObject { { u"field"_s, u"pop"_s }, { u"heading"_s, u"People"_s } } } },
-    { u"filter"_s, u"\"share\" > 20"_s },
-    { u"sort_by"_s, u"share"_s },
-    { u"descending"_s, true }
-  };
-  QgsAiEditPrintLayoutTool editTool( &project );
-
-  // a wrong column is refused before the layout changes
-  QJsonObject wrong = table;
-  wrong.insert( u"columns"_s, QJsonArray { QJsonObject { { u"field"_s, u"nope"_s } } } );
-  QVERIFY( !editTool.execute( { { u"layout_name"_s, u"Table"_s }, { u"table"_s, wrong } } ).success );
-  QVERIFY( layout->multiFrames().isEmpty() );
-
-  const QgsAiToolResult edited = editTool.execute(
-    { { u"layout_name"_s, u"Table"_s }, { u"add_legend"_s, true }, { u"add_scalebar"_s, true }, { u"add_north_arrow"_s, true }, { u"table"_s, table }, { u"note"_s, u"Source: test data"_s } }
-  );
-  QVERIFY2( edited.success, qPrintable( edited.errorMessage ) );
-  const QJsonObject output = edited.output.toObject();
-  QVERIFY2( output.value( u"layout"_s ).toObject().value( u"issues"_s ).toArray().isEmpty(), QJsonDocument( output.value( u"layout"_s ).toObject() ).toJson( QJsonDocument::Compact ).constData() );
-  QCOMPARE( output.value( u"table"_s ).toObject().value( u"rows"_s ).toInt(), 19 );
-  QVERIFY( output.value( u"table"_s ).toObject().value( u"fits"_s ).toBool() );
-
-  QCOMPARE( layout->multiFrames().size(), 1 );
-  QgsLayoutItemAttributeTable *attributeTable = qobject_cast<QgsLayoutItemAttributeTable *>( layout->multiFrames().constFirst() );
-  QVERIFY( attributeTable );
-  QCOMPARE( attributeTable->contents().constFirst().constFirst().toString(), u"town 24"_s );
-  QgsLayoutItem *frame = layout->itemById( u"AI Table"_s );
-  QgsLayoutItem *legend = layout->itemById( u"AI Legend"_s );
-  QVERIFY( frame && legend );
-  QVERIFY( legend->mapRectToScene( legend->rect() ).top() >= frame->mapRectToScene( frame->rect() ).bottom() );
-
-  QVERIFY( editTool.execute( { { u"rollback_token"_s, output.value( u"rollback_token"_s ).toString() } } ).success );
-  QVERIFY( layout->multiFrames().isEmpty() );
-  QVERIFY( !layout->itemById( u"AI Table"_s ) );
-}
-
   // renaming a layer in an auto-updating legend freezes it; rollback makes it auto-updating again
   QgsLayoutItemLegend *autoLegend = qobject_cast<QgsLayoutItemLegend *>( dynamic_cast<QgsPrintLayout *>( project.layoutManager()->layoutByName( u"Portrait"_s ) )->itemById( u"AI Legend"_s ) );
   QVERIFY( autoLegend );
@@ -1308,6 +1221,11 @@ void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
   QVERIFY2( autoRenamed.success, qPrintable( autoRenamed.errorMessage ) );
   QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::Manual );
   QCOMPARE( autoLegend->model()->rootGroup()->findLayerIds(), QStringList { shown->id() } );
+  QVERIFY( editTool.execute( { { u"rollback_token"_s, autoRenamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
+  QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::VisibleLayers );
+  QVERIFY( !createTool.execute( { { u"page_size"_s, u"B52"_s } } ).success );
+}
+
 void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
 {
   QgsProject project;
@@ -1381,11 +1299,6 @@ void TestQgsAiToolRegistry::printLayoutTableBesideTheMap()
   QVERIFY( editTool.execute( { { u"rollback_token"_s, output.value( u"rollback_token"_s ).toString() } } ).success );
   QVERIFY( layout->multiFrames().isEmpty() );
   QVERIFY( !layout->itemById( u"AI Table"_s ) );
-}
-
-  QVERIFY( editTool.execute( { { u"rollback_token"_s, autoRenamed.output.toObject().value( u"rollback_token"_s ).toString() } } ).success );
-  QCOMPARE( autoLegend->syncMode(), Qgis::LegendSyncMode::VisibleLayers );
-  QVERIFY( !createTool.execute( { { u"page_size"_s, u"B52"_s } } ).success );
 }
 
 void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
@@ -1450,6 +1363,133 @@ void TestQgsAiToolRegistry::createPrintLayoutAndExportMap()
   QCOMPARE( pictures.constFirst()->picturePath(), u":/images/north_arrows/layout_default_north_arrow.svg"_s );
 
   QJsonObject editLayoutRollbackArgs;
+  editLayoutRollbackArgs.insert( u"rollback_token"_s, editLayoutRollbackToken );
+  const QgsAiToolResult editLayoutRollback = editLayoutTool.execute( editLayoutRollbackArgs );
+  QVERIFY2( editLayoutRollback.success, qPrintable( editLayoutRollback.errorMessage ) );
+  QCOMPARE( layout->pageCollection()->pageCount(), 1 );
+  layout->layoutItems<QgsLayoutItemLegend>( legends );
+  QCOMPARE( legends.size(), 0 );
+  layout->layoutItems<QgsLayoutItemScaleBar>( scaleBars );
+  QCOMPARE( scaleBars.size(), 0 );
+  layout->layoutItems<QgsLayoutItemPicture>( pictures );
+  QCOMPARE( pictures.size(), 0 );
+
+  QgsAiExportMapTool exportTool( &contextProvider, &project, &canvas );
+  QVERIFY( exportTool.requiresApproval() );
+
+  QJsonObject canvasExportArgs;
+  canvasExportArgs.insert( u"path"_s, u"exports/canvas.png"_s );
+  canvasExportArgs.insert( u"format"_s, u"png"_s );
+  canvasExportArgs.insert( u"width"_s, 320 );
+  canvasExportArgs.insert( u"height"_s, 180 );
+  const QgsAiToolResult canvasExport = exportTool.execute( canvasExportArgs );
+  QVERIFY2( canvasExport.success, qPrintable( canvasExport.errorMessage ) );
+  const QString canvasPath = canvasExport.output.toObject().value( u"absolute_path"_s ).toString();
+  const QString canvasRollbackToken = canvasExport.output.toObject().value( u"rollback_token"_s ).toString();
+  QVERIFY( !canvasRollbackToken.isEmpty() );
+  QVERIFY( canvasExport.output.toObject().contains( u"diff"_s ) );
+  QVERIFY( QFileInfo::exists( canvasPath ) );
+  const QImage canvasImage( canvasPath );
+  QVERIFY( !canvasImage.isNull() );
+  QCOMPARE( canvasImage.size(), QSize( 320, 180 ) );
+
+  QJsonObject layoutExportArgs;
+  layoutExportArgs.insert( u"path"_s, u"exports/layout.png"_s );
+  layoutExportArgs.insert( u"format"_s, u"png"_s );
+  layoutExportArgs.insert( u"layout_name"_s, u"AI Layout"_s );
+  const QgsAiToolResult layoutExport = exportTool.execute( layoutExportArgs );
+  QVERIFY2( layoutExport.success, qPrintable( layoutExport.errorMessage ) );
+  const QString layoutPath = layoutExport.output.toObject().value( u"absolute_path"_s ).toString();
+  const QString layoutExportRollbackToken = layoutExport.output.toObject().value( u"rollback_token"_s ).toString();
+  QVERIFY( !layoutExportRollbackToken.isEmpty() );
+  QVERIFY( QFileInfo::exists( layoutPath ) );
+  QVERIFY( QFileInfo( layoutPath ).size() > 0 );
+
+  // the model gets the first page as an image, long side 1200 px
+  const QJsonObject preview = layoutExport.output.toObject().value( u"image"_s ).toObject();
+  QVERIFY( QFileInfo::exists( preview.value( u"path"_s ).toString() ) );
+  QCOMPARE( std::max( preview.value( u"width"_s ).toInt(), preview.value( u"height"_s ).toInt() ), 1200 );
+
+  // an existing file is replaced only on request, and rollback brings it back
+  QFile firstFile( layoutPath );
+  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
+  const QByteArray firstBytes = firstFile.readAll();
+  firstFile.close();
+  const QgsAiToolResult refused = exportTool.execute( layoutExportArgs );
+  QVERIFY( !refused.success );
+  QVERIFY( refused.errorMessage.contains( u"overwrite=true"_s ) );
+  QJsonObject overwriteArgs = layoutExportArgs;
+  overwriteArgs.insert( u"overwrite"_s, true );
+  overwriteArgs.insert( u"dpi"_s, 72 );
+  const QgsAiToolResult overwritten = exportTool.execute( overwriteArgs );
+  QVERIFY2( overwritten.success, qPrintable( overwritten.errorMessage ) );
+  QVERIFY( overwritten.output.toObject().value( u"diff"_s ).toObject().value( u"existed_before"_s ).toBool() );
+  QVERIFY( QFileInfo( layoutPath ).size() != firstBytes.size() );
+  const QgsAiToolResult restored = exportTool.execute( { { u"rollback_token"_s, overwritten.output.toObject().value( u"rollback_token"_s ).toString() } } );
+  QVERIFY2( restored.success, qPrintable( restored.errorMessage ) );
+  QCOMPARE( restored.output.toObject().value( u"status"_s ).toString(), u"restored_previous"_s );
+  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
+  QCOMPARE( firstFile.readAll(), firstBytes );
+  firstFile.close();
+
+  QJsonObject canvasRollbackArgs;
+  canvasRollbackArgs.insert( u"rollback_token"_s, canvasRollbackToken );
+  const QgsAiToolResult canvasRollback = exportTool.execute( canvasRollbackArgs );
+  QVERIFY2( canvasRollback.success, qPrintable( canvasRollback.errorMessage ) );
+  QVERIFY( !QFileInfo::exists( canvasPath ) );
+
+  QJsonObject layoutExportRollbackArgs;
+  layoutExportRollbackArgs.insert( u"rollback_token"_s, layoutExportRollbackToken );
+  const QgsAiToolResult layoutExportRollback = exportTool.execute( layoutExportRollbackArgs );
+  QVERIFY2( layoutExportRollback.success, qPrintable( layoutExportRollback.errorMessage ) );
+  QVERIFY( !QFileInfo::exists( layoutPath ) );
+
+  QJsonObject layoutRollbackArgs;
+  layoutRollbackArgs.insert( u"rollback_token"_s, layoutRollbackToken );
+  const QgsAiToolResult layoutRollback = createTool.execute( layoutRollbackArgs );
+  QVERIFY2( layoutRollback.success, qPrintable( layoutRollback.errorMessage ) );
+  QVERIFY( !project.layoutManager()->layoutByName( u"AI Layout"_s ) );
+}
+
+void TestQgsAiToolRegistry::exportMarkdownReportToPdf()
+{
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsProject project;
+
+  QImage sheet( 1600, 800, QImage::Format_RGB32 );
+  sheet.fill( Qt::darkBlue );
+  QVERIFY( sheet.save( tempDir.filePath( u"tavola.png"_s ) ) );
+  QFile note( tempDir.filePath( u"nota.md"_s ) );
+  QVERIFY( note.open( QIODevice::WriteOnly ) );
+  note.write( "# Nota metodologica\n\n| Campo | Espressione |\n| --- | --- |\n| superficie_kmq | area($geometry) / 1000000 |\n\n![Tavola](tavola.png)\n\n![Fonte](manca.png)\n" );
+  note.close();
+
+  QgsAiExportMapTool tool( &contextProvider, &project, nullptr );
+  QJsonObject args { { u"path"_s, u"nota.png"_s }, { u"source_path"_s, u"nota.md"_s } };
+  QVERIFY( !tool.execute( args ).success );
+  QVERIFY( !tool.execute( QJsonObject { { u"path"_s, u"x.pdf"_s }, { u"source_path"_s, u"manca.md"_s } } ).success );
+
+  args.insert( u"path"_s, u"nota.pdf"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY2( result.success, qPrintable( result.errorMessage ) );
+  const QJsonObject output = result.output.toObject();
+  QCOMPARE( output.value( u"missing_images"_s ).toArray(), QJsonArray { u"manca.png"_s } );
+  QCOMPARE( output.value( u"source_path"_s ).toString(), u"nota.md"_s );
+  QFile pdf( tempDir.filePath( u"nota.pdf"_s ) );
+  QVERIFY( pdf.open( QIODevice::ReadOnly ) );
+  const QByteArray bytes = pdf.readAll();
+  pdf.close();
+  QVERIFY( bytes.startsWith( "%PDF" ) );
+  // the sheet itself, not the broken-image icon
+  QVERIFY( bytes.contains( "/Width 1600" ) );
+  QCOMPARE( output.value( u"page_count"_s ).toInt(), 1 );
+
+  QVERIFY( tool.execute( QJsonObject { { u"rollback_token"_s, output.value( u"rollback_token"_s ).toString() } } ).success );
+  QVERIFY( !QFile::exists( tempDir.filePath( u"nota.pdf"_s ) ) );
+}
+
 void TestQgsAiToolRegistry::readChatHistoryListsAndReadsOtherChats()
 {
   QTemporaryDir tempDir;
@@ -1562,94 +1602,6 @@ void TestQgsAiToolRegistry::readChatHistoryListsAndReadsOtherChats()
 
   store.setHistoryScopeKey( QString() );
   QVERIFY( !tool.isAvailable() );
-}
-
-  editLayoutRollbackArgs.insert( u"rollback_token"_s, editLayoutRollbackToken );
-  const QgsAiToolResult editLayoutRollback = editLayoutTool.execute( editLayoutRollbackArgs );
-  QVERIFY2( editLayoutRollback.success, qPrintable( editLayoutRollback.errorMessage ) );
-  QCOMPARE( layout->pageCollection()->pageCount(), 1 );
-  layout->layoutItems<QgsLayoutItemLegend>( legends );
-  QCOMPARE( legends.size(), 0 );
-  layout->layoutItems<QgsLayoutItemScaleBar>( scaleBars );
-  QCOMPARE( scaleBars.size(), 0 );
-  layout->layoutItems<QgsLayoutItemPicture>( pictures );
-  QCOMPARE( pictures.size(), 0 );
-
-  QgsAiExportMapTool exportTool( &contextProvider, &project, &canvas );
-  QVERIFY( exportTool.requiresApproval() );
-
-  QJsonObject canvasExportArgs;
-  canvasExportArgs.insert( u"path"_s, u"exports/canvas.png"_s );
-  canvasExportArgs.insert( u"format"_s, u"png"_s );
-  canvasExportArgs.insert( u"width"_s, 320 );
-  canvasExportArgs.insert( u"height"_s, 180 );
-  const QgsAiToolResult canvasExport = exportTool.execute( canvasExportArgs );
-  QVERIFY2( canvasExport.success, qPrintable( canvasExport.errorMessage ) );
-  const QString canvasPath = canvasExport.output.toObject().value( u"absolute_path"_s ).toString();
-  const QString canvasRollbackToken = canvasExport.output.toObject().value( u"rollback_token"_s ).toString();
-  QVERIFY( !canvasRollbackToken.isEmpty() );
-  QVERIFY( canvasExport.output.toObject().contains( u"diff"_s ) );
-  QVERIFY( QFileInfo::exists( canvasPath ) );
-  const QImage canvasImage( canvasPath );
-  QVERIFY( !canvasImage.isNull() );
-  QCOMPARE( canvasImage.size(), QSize( 320, 180 ) );
-
-  QJsonObject layoutExportArgs;
-  layoutExportArgs.insert( u"path"_s, u"exports/layout.png"_s );
-  layoutExportArgs.insert( u"format"_s, u"png"_s );
-  layoutExportArgs.insert( u"layout_name"_s, u"AI Layout"_s );
-  const QgsAiToolResult layoutExport = exportTool.execute( layoutExportArgs );
-  QVERIFY2( layoutExport.success, qPrintable( layoutExport.errorMessage ) );
-  const QString layoutPath = layoutExport.output.toObject().value( u"absolute_path"_s ).toString();
-  const QString layoutExportRollbackToken = layoutExport.output.toObject().value( u"rollback_token"_s ).toString();
-  QVERIFY( !layoutExportRollbackToken.isEmpty() );
-  QVERIFY( QFileInfo::exists( layoutPath ) );
-  QVERIFY( QFileInfo( layoutPath ).size() > 0 );
-
-  // the model gets the first page as an image, long side 1200 px
-  const QJsonObject preview = layoutExport.output.toObject().value( u"image"_s ).toObject();
-  QVERIFY( QFileInfo::exists( preview.value( u"path"_s ).toString() ) );
-  QCOMPARE( std::max( preview.value( u"width"_s ).toInt(), preview.value( u"height"_s ).toInt() ), 1200 );
-
-  // an existing file is replaced only on request, and rollback brings it back
-  QFile firstFile( layoutPath );
-  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
-  const QByteArray firstBytes = firstFile.readAll();
-  firstFile.close();
-  const QgsAiToolResult refused = exportTool.execute( layoutExportArgs );
-  QVERIFY( !refused.success );
-  QVERIFY( refused.errorMessage.contains( u"overwrite=true"_s ) );
-  QJsonObject overwriteArgs = layoutExportArgs;
-  overwriteArgs.insert( u"overwrite"_s, true );
-  overwriteArgs.insert( u"dpi"_s, 72 );
-  const QgsAiToolResult overwritten = exportTool.execute( overwriteArgs );
-  QVERIFY2( overwritten.success, qPrintable( overwritten.errorMessage ) );
-  QVERIFY( overwritten.output.toObject().value( u"diff"_s ).toObject().value( u"existed_before"_s ).toBool() );
-  QVERIFY( QFileInfo( layoutPath ).size() != firstBytes.size() );
-  const QgsAiToolResult restored = exportTool.execute( { { u"rollback_token"_s, overwritten.output.toObject().value( u"rollback_token"_s ).toString() } } );
-  QVERIFY2( restored.success, qPrintable( restored.errorMessage ) );
-  QCOMPARE( restored.output.toObject().value( u"status"_s ).toString(), u"restored_previous"_s );
-  QVERIFY( firstFile.open( QIODevice::ReadOnly ) );
-  QCOMPARE( firstFile.readAll(), firstBytes );
-  firstFile.close();
-
-  QJsonObject canvasRollbackArgs;
-  canvasRollbackArgs.insert( u"rollback_token"_s, canvasRollbackToken );
-  const QgsAiToolResult canvasRollback = exportTool.execute( canvasRollbackArgs );
-  QVERIFY2( canvasRollback.success, qPrintable( canvasRollback.errorMessage ) );
-  QVERIFY( !QFileInfo::exists( canvasPath ) );
-
-  QJsonObject layoutExportRollbackArgs;
-  layoutExportRollbackArgs.insert( u"rollback_token"_s, layoutExportRollbackToken );
-  const QgsAiToolResult layoutExportRollback = exportTool.execute( layoutExportRollbackArgs );
-  QVERIFY2( layoutExportRollback.success, qPrintable( layoutExportRollback.errorMessage ) );
-  QVERIFY( !QFileInfo::exists( layoutPath ) );
-
-  QJsonObject layoutRollbackArgs;
-  layoutRollbackArgs.insert( u"rollback_token"_s, layoutRollbackToken );
-  const QgsAiToolResult layoutRollback = createTool.execute( layoutRollbackArgs );
-  QVERIFY2( layoutRollback.success, qPrintable( layoutRollback.errorMessage ) );
-  QVERIFY( !project.layoutManager()->layoutByName( u"AI Layout"_s ) );
 }
 
 void TestQgsAiToolRegistry::advancedStyleGraduatedClassesAreReadable()
