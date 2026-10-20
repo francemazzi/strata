@@ -33,7 +33,7 @@ namespace
 
 QString QgsAiWebFetchTool::description() const
 {
-  return u"Fetches a web page through Strata Plan and returns its content as markdown (credits metered). Use it to read a page found via web_search or catalog_search before acting on it."_s;
+  return u"Fetches a web page through Strata Plan and returns its content as markdown (credits metered). Use it to read a page found via web_search or catalog_search before acting on it. The markdown keeps the readable text only: download buttons and file links can be missing. When a page should offer a file but shows no link, save the page with download_file and look for the link in its HTML."_s;
 }
 
 QJsonObject QgsAiWebFetchTool::schema() const
