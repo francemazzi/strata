@@ -171,7 +171,11 @@ assert_glob_has_matches()
 {
   local pattern="$1"
   local -a matches=()
-  mapfile -t matches < <( compgen -G "${pattern}" || true )
+  local match
+  # A while-read loop instead of mapfile keeps the guards runnable on the bash 3.2 shipped with macOS.
+  while IFS= read -r match; do
+    matches+=( "${match}" )
+  done < <( compgen -G "${pattern}" || true )
 
   if [[ ${#matches[@]} -eq 0 ]]; then
     guard_fail "Required Strata file pattern has no matches: ${pattern}"
@@ -351,8 +355,25 @@ create_or_update_pr()
   rm -f "${body_file}"
 }
 
+guards_only()
+{
+  # Checks the current working tree (e.g. a manually resolved merge) without fetching or merging.
+  # The EXIT trap is dropped first: it would otherwise abort the merge being resolved when a guard fails.
+  trap - EXIT
+  if ! run_safety_guards; then
+    echo "Strata safety guards failed." >&2
+    exit 1
+  fi
+  log "Strata safety guards passed."
+}
+
 main()
 {
+  if [[ "${1:-}" == "--guards-only" ]]; then
+    guards_only
+    return 0
+  fi
+
   require_clean_tree
   require_gh
 
