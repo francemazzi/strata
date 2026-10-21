@@ -13,7 +13,7 @@ on:
       sdk_run_id:
         description: Existing workflow run id containing strata-sdk-x64-windows; leave empty to rebuild vcpkg
         required: false
-        default: '29234806065'
+        default: '39615691979'
       sdk_artifact_name:
         description: SDK artifact name to download
         required: false
