@@ -42,6 +42,26 @@ try {
     Assert-Fails { & $unsignedImplementation $file } 'SignTool failed'
     Set-Content $script:SignTool '$global:LASTEXITCODE = 0'
     Assert-Fails { & $unsignedImplementation $file } 'Signature verification failed'
+    # Expired federated token: one renewed login and one retry per file, only when the
+    # GitHub OIDC request variables and the Azure identity are available.
+    $script:RefreshCalls = 0
+    function Update-AzureSigningLogin { param([string]$Reason) $script:RefreshCalls++ }
+    $marker = Join-Path $root 'signtool-first-call'
+    Set-Content $script:SignTool "if (Test-Path -LiteralPath '$marker') { `$global:LASTEXITCODE = 0 } else { New-Item -ItemType File -Path '$marker' | Out-Null; `$global:LASTEXITCODE = 1 }"
+    Assert-Fails { & $unsignedImplementation $file } 'SignTool failed'
+    if ($script:RefreshCalls -ne 0) { throw 'Azure login must not be refreshed without OIDC request variables.' }
+    Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue
+    $refreshEnv = @{ ACTIONS_ID_TOKEN_REQUEST_URL = 'https://example.invalid/token?api-version=2.0'; ACTIONS_ID_TOKEN_REQUEST_TOKEN = 'request-token'; AZURE_CLIENT_ID = 'client'; AZURE_TENANT_ID = 'tenant' }
+    $previousRefreshEnv = @{}
+    foreach ($name in $refreshEnv.Keys) { $previousRefreshEnv[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $refreshEnv[$name]) }
+    try {
+      Assert-Fails { & $unsignedImplementation $file } 'Signature verification failed'
+      if ($script:RefreshCalls -ne 1) { throw "Expected one renewed Azure login after a SignTool failure, got $($script:RefreshCalls)." }
+      Set-Content $script:SignTool '$global:LASTEXITCODE = 0'
+      $script:AzureSigningLoginTime = [DateTime]::UtcNow.AddMinutes(-($script:AzureSigningRefreshMinutes + 1))
+      Assert-Fails { & $unsignedImplementation $file } 'Signature verification failed'
+      if ($script:RefreshCalls -ne 2) { throw "Expected a scheduled Azure login renewal, got $($script:RefreshCalls)." }
+    } finally { foreach ($name in $refreshEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $previousRefreshEnv[$name]) } }
   } finally { $env:STRATA_SIGNED_CACHE = $previousCache }
   $bytes[128 + 24 + 112 + 32] = 1
   [System.IO.File]::WriteAllBytes($file, $bytes)
@@ -77,5 +97,5 @@ try {
     $envText = [System.IO.File]::ReadAllText($githubEnv, [System.Text.UTF8Encoding]::new($false))
     if ($envText -notmatch '^NSISDIR=D:\\temp\\strata-signed-nsis') { throw 'GITHUB_ENV line was not written correctly.' }
   } finally { $env:GITHUB_ENV = $previousGithubEnv }
-  Write-Host 'Windows signing policy tests passed (13 scenarios).'
+  Write-Host 'Windows signing policy tests passed (16 scenarios).'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

@@ -58,6 +58,37 @@ function Test-AuthenticodeSignature {
   return $LASTEXITCODE -eq 0
 }
 
+# Federated GitHub OIDC logins cannot be refreshed by the Azure CLI, and the Trusted Signing
+# library takes its access token from the CLI cache. A token issued more than about an hour
+# earlier makes SignerSign() fail halfway through a package, so the login is renewed with a
+# fresh OIDC token on a schedule and once more after a SignTool failure.
+$script:AzureSigningLoginTime = [DateTime]::UtcNow
+$script:AzureSigningRefreshMinutes = 40
+
+function Test-AzureSigningRefreshAvailable {
+  foreach ($name in @('ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID')) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { return $false }
+  }
+  return $true
+}
+
+function Update-AzureSigningLogin {
+  param([string]$Reason)
+  $response = Invoke-RestMethod -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" -Headers @{ Authorization = "bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)" }
+  if ([string]::IsNullOrWhiteSpace($response.value)) { throw 'GitHub did not return an OIDC token for the Azure signing login.' }
+  & az account clear --only-show-errors *> $null
+  & az login --service-principal --username $env:AZURE_CLIENT_ID --tenant $env:AZURE_TENANT_ID --federated-token $response.value --allow-no-subscriptions --output none --only-show-errors
+  if ($LASTEXITCODE -ne 0) { throw "Azure signing login could not be refreshed ($Reason)." }
+  $script:AzureSigningLoginTime = [DateTime]::UtcNow
+  Write-Host "Azure signing login refreshed ($Reason)."
+}
+
+function Invoke-SignToolSign {
+  param([string]$FilePath)
+  & $script:SignTool sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $script:Dlib /dmdf $script:Metadata /d Strata $FilePath | Out-Host
+  return $LASTEXITCODE
+}
+
 function Invoke-UnsignedFile {
   param([string]$FilePath)
   $cache = $null
@@ -70,8 +101,16 @@ function Invoke-UnsignedFile {
       return
     }
   }
-  & $script:SignTool sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $script:Dlib /dmdf $script:Metadata /d Strata $FilePath | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw "SignTool failed: $FilePath" }
+  $refreshable = Test-AzureSigningRefreshAvailable
+  if ($refreshable -and ([DateTime]::UtcNow - $script:AzureSigningLoginTime).TotalMinutes -ge $script:AzureSigningRefreshMinutes) {
+    Update-AzureSigningLogin -Reason 'scheduled'
+  }
+  $exitCode = Invoke-SignToolSign $FilePath
+  if ($exitCode -ne 0 -and $refreshable) {
+    Update-AzureSigningLogin -Reason "retry after SignTool failure on $([System.IO.Path]::GetFileName($FilePath))"
+    $exitCode = Invoke-SignToolSign $FilePath
+  }
+  if ($exitCode -ne 0) { throw "SignTool failed: $FilePath" }
   if (-not (Test-AuthenticodeSignature $FilePath)) { throw "Signature verification failed: $FilePath" }
   if ($cache) { Copy-Item -LiteralPath $FilePath -Destination $cache }
 }
