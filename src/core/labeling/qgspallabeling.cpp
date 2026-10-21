@@ -1426,12 +1426,12 @@ void QgsPalLayerSettings::readXml( const QDomElement &elem, const QgsReadWriteCo
   // TODO - replace with registry when multiple callout styles exist
   const QString calloutType = elem.attribute( u"calloutType"_s );
   if ( calloutType.isEmpty() )
-    mCallout.reset( QgsCalloutRegistry::defaultCallout() );
+    mCallout = QgsCalloutRegistry::defaultCallout();
   else
   {
-    mCallout.reset( QgsApplication::calloutRegistry()->createCallout( calloutType, elem.firstChildElement( u"callout"_s ), context ) );
+    mCallout = QgsApplication::calloutRegistry()->createCallout( calloutType, elem.firstChildElement( u"callout"_s ), context );
     if ( !mCallout )
-      mCallout.reset( QgsCalloutRegistry::defaultCallout() );
+      mCallout = QgsCalloutRegistry::defaultCallout();
   }
 }
 
@@ -2101,7 +2101,7 @@ void QgsPalLayerSettings::calculateLabelMetrics(
 
 void QgsPalLayerSettings::registerFeature( const QgsFeature &f, QgsRenderContext &context )
 {
-  registerFeatureWithDetails( f, context, QgsGeometry(), nullptr );
+  registerFeatureWithDetails( f, context, QgsLabelFeatureDetails() );
 }
 
 bool QgsPalLayerSettings::isLabelVisible( QgsRenderContext &context ) const
@@ -2338,6 +2338,8 @@ QgsTextFormat QgsPalLayerSettings::evaluateTextFormat( QgsRenderContext &context
 
 bool QgsPalLayerSettings::evaluateLabelContent( const QgsFeature &feature, QgsRenderContext &context, bool allowMultipleLines, QString &labelText, QgsTextDocument &document, const QgsTextFormat &format ) const
 {
+  QgsTextFormat formatEvaluated = format;
+
   // Check to see if we are using an expression string.
   if ( isExpression )
   {
@@ -2370,10 +2372,6 @@ bool QgsPalLayerSettings::evaluateLabelContent( const QgsFeature &feature, QgsRe
   {
     labelText = substitutions.process( labelText );
   }
-
-  // TODO -- this is in the wrong place. We should be capitalizing the text only, ie after we have parsed
-  // any HTML tags to a text document.
-  labelText = QgsStringUtils::capitalize( labelText, format.capitalization() );
 
   // TODO -- this is in the wrong place. We should be formatting numbers AFTER converting HTML to documents
 
@@ -2408,23 +2406,47 @@ bool QgsPalLayerSettings::evaluateLabelContent( const QgsFeature &feature, QgsRe
     }
   }
 
-  document = QgsTextDocument::fromTextAndFormat( { labelText }, format );
+  // maintain API - capitalization may have been set in textFont
+  if ( formatEvaluated.capitalization() == Qgis::Capitalization::MixedCase && mFormat.font().capitalization() != QFont::MixedCase )
+  {
+    formatEvaluated.setCapitalization( static_cast< Qgis::Capitalization >( mFormat.font().capitalization() ) );
+  }
 
   QString wrapchr = wrapChar;
+  QString wrapchrCopy = wrapChar;
   int evalAutoWrapLength = autoWrapLength;
-  if ( dataDefinedValues.contains( QgsPalLayerSettings::Property::MultiLineWrapChar ) )
+  if ( allowMultipleLines )
   {
-    wrapchr = dataDefinedValues.value( QgsPalLayerSettings::Property::MultiLineWrapChar ).toString();
-  }
-  if ( dataDefinedValues.contains( QgsPalLayerSettings::Property::AutoWrapLength ) )
-  {
-    evalAutoWrapLength = dataDefinedValues.value( QgsPalLayerSettings::Property::AutoWrapLength, evalAutoWrapLength ).toInt();
+    if ( dataDefinedValues.contains( QgsPalLayerSettings::Property::MultiLineWrapChar ) )
+    {
+      wrapchr = dataDefinedValues.value( QgsPalLayerSettings::Property::MultiLineWrapChar ).toString();
+    }
+    if ( dataDefinedValues.contains( QgsPalLayerSettings::Property::AutoWrapLength ) )
+    {
+      evalAutoWrapLength = dataDefinedValues.value( QgsPalLayerSettings::Property::AutoWrapLength, evalAutoWrapLength ).toInt();
+    }
+
+    wrapchrCopy = wrapchr;
+
+    if ( wrapchr.isEmpty() )
+    {
+      wrapchr = u"\n"_s; // default to new line delimiter
+      wrapchrCopy = wrapchr;
+    }
+    else if ( formatEvaluated.capitalization() != Qgis::Capitalization::MixedCase )
+    {
+      // Change wrapchr to a non printable character to avoid issues with capitalization.
+      while ( labelText.contains( wrapchr ) )
+      {
+        labelText.replace( wrapchr, QString( QChar::ReplacementCharacter ) );
+      }
+
+      wrapchr = QString( QChar::ReplacementCharacter );
+    }
   }
 
-  if ( wrapchr.isEmpty() )
-  {
-    wrapchr = u"\n"_s; // default to new line delimiter
-  }
+  document = QgsTextDocument::fromTextAndFormat( { labelText }, formatEvaluated );
+  labelText = document.toPlainText().join( wrapchrCopy );
 
   if ( allowMultipleLines )
   {
@@ -2486,7 +2508,7 @@ QgsGeometry QgsPalLayerSettings::evaluateLabelGeometry( const QgsFeature &featur
   return geom;
 }
 
-std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeatureWithDetails( const QgsFeature &f, QgsRenderContext &context, QgsGeometry obstacleGeometry, const QgsSymbol *symbol )
+std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeatureWithDetails( const QgsFeature &f, QgsRenderContext &context, const QgsLabelFeatureDetails &details )
 {
   QVariant exprVal; // value() is repeatedly nulled on data defined evaluation and replaced when successful
   mCurFeat = &f;
@@ -2497,6 +2519,8 @@ std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeat
     isObstacle = mDataDefinedProperties.valueAsBool( QgsPalLayerSettings::Property::IsObstacle, context.expressionContext(), isObstacle ); // default to layer default
 
   std::vector<std::unique_ptr<QgsLabelFeature> > res;
+
+  QgsGeometry obstacleGeometry = details.obstacleGeometry();
 
   // possibly an obstacle-only feature
   if ( !drawLabels )
@@ -2544,6 +2568,14 @@ std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeat
   QgsTextFormat evaluatedFormat = evaluateTextFormat( context, labelIsHidden );
   if ( labelIsHidden )
     return {};
+
+  if ( context.testFlag( Qgis::RenderContextFlag::DrawLabelSelection ) && details.isSelected() )
+  {
+    // when rendering labels in a selected state, we render them using a buffer in the layer's selection color
+    dataDefinedValues.insert( QgsPalLayerSettings::Property::BufferDraw, true );
+    dataDefinedValues.insert( QgsPalLayerSettings::Property::BufferSize, 2 );
+    dataDefinedValues.insert( QgsPalLayerSettings::Property::BufferColor, context.selectionColor() );
+  }
 
   QgsLabelPlacementSettings placementSettings = mPlacementSettings;
   placementSettings.updateDataDefinedProperties( mDataDefinedProperties, context.expressionContext() );
@@ -2647,7 +2679,7 @@ std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeat
     case Qgis::MultiPartLabelingBehavior::LabelEveryPartWithEntireLabel:
     {
       std::unique_ptr< QgsTextLabelFeature > label
-        = generateLabelFeature( context, feature, 0, geom, obstacleGeometry, doc, labelText, evaluatedFormat, symbol, lineSettings, pointSettings, placementSettings, isObstacle, doClip );
+        = generateLabelFeature( context, feature, 0, geom, obstacleGeometry, doc, labelText, evaluatedFormat, details.symbol(), lineSettings, pointSettings, placementSettings, isObstacle, doClip );
       if ( label )
         res.emplace_back( std::move( label ) );
       break;
@@ -2662,7 +2694,7 @@ std::vector<std::unique_ptr<QgsLabelFeature> > QgsPalLayerSettings::registerFeat
       for ( std::size_t i = 0; i < partCount; ++i )
       {
         std::unique_ptr< QgsTextLabelFeature > label
-          = generateLabelFeature( context, feature, static_cast< int >( i ), geometryParts[i], obstacleGeometry, documentParts[i], labelText, evaluatedFormat, symbol, lineSettings, pointSettings, placementSettings, isObstacle, doClip );
+          = generateLabelFeature( context, feature, static_cast< int >( i ), geometryParts[i], obstacleGeometry, documentParts[i], labelText, evaluatedFormat, details.symbol(), lineSettings, pointSettings, placementSettings, isObstacle, doClip );
         if ( label )
           res.emplace_back( std::move( label ) );
       }

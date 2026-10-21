@@ -1,5 +1,21 @@
 # AGENTS.md
 
+## Upstream QGIS contribution policy
+
+Strata is an independent fork of QGIS. The QGIS project does not accept LLM-, AI- or
+agent-assisted contributions to its repositories
+([QEP 408](https://github.com/qgis/QGIS-Enhancement-Proposals/blob/master/qep-408-ai-tool-policy.md)).
+Upstream ships that policy as its own root `AGENTS.md`; Strata keeps this file instead,
+so the policy is restated here:
+
+- Never open pull requests, issues, comments, reviews or any other interaction on
+  `qgis/QGIS` or other QGIS project repositories, and never prepare patches meant to be
+  submitted there.
+- Merging upstream QGIS into Strata (`scripts/ci/sync-qgis-upstream.sh`) is maintenance
+  of this fork, not a contribution to QGIS.
+- When an upstream sync conflicts on `AGENTS.md`, keep this file and update this section
+  if the upstream policy changed.
+
 ## Cursor Cloud specific instructions
 
 Strata is an AI-native fork of **QGIS**: the QGIS desktop app (rebranded `Strata`)

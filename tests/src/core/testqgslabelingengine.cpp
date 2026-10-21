@@ -58,6 +58,7 @@ class TestQgsLabelingEngine : public QgsTest
     void testBasic();
     void testDiagrams();
     void testRuleBased();
+    void testSelectedState();
     void zOrder(); //test that labels are stacked correctly
     void testEncodeDecodePositionOrder();
     void testEncodeDecodeLinePlacement();
@@ -135,6 +136,8 @@ class TestQgsLabelingEngine : public QgsTest
     void testRotationBasedOrientationPoint();
     void testRotationBasedOrientationPointHtmlLabel();
     void testRotationBasedOrientationLine();
+    void testHorizontalRotation_data();
+    void testHorizontalRotation();
     void testMapUnitLetterSpacing();
     void testMapUnitWordSpacing();
     void testLineHeightAbsolute();
@@ -352,8 +355,8 @@ void TestQgsLabelingEngine::testBasic()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -401,8 +404,8 @@ void TestQgsLabelingEngine::testDiagrams()
   vl->loadNamedStyle( QStringLiteral( TEST_DATA_DIR ) + "/points_diagrams.qml", res );
   QVERIFY( res );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerDiagramProvider( vl ) );
   engine.run( context );
 
@@ -505,10 +508,43 @@ void TestQgsLabelingEngine::testRuleBased()
   context.setPainter( &p );
 
   QgsLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+
   engine.addProvider( new QgsRuleBasedLabelProvider(, vl ) );
   engine.run( context );
 #endif
+}
+
+void TestQgsLabelingEngine::testSelectedState()
+{
+  const QSize size( 640, 480 );
+  QgsMapSettings mapSettings;
+  mapSettings.setLabelingEngineSettings( createLabelEngineSettings() );
+  mapSettings.setOutputSize( size );
+  mapSettings.setExtent( vl->extent() );
+  mapSettings.setLayers( QList<QgsMapLayer *>() << vl );
+  mapSettings.setOutputDpi( 96 );
+  mapSettings.setFlag( Qgis::MapSettingsFlag::DrawLabelSelection );
+
+  QgsPalLayerSettings settings;
+  settings.fieldName = u"Class"_s;
+  setDefaultLabelParams( settings );
+
+  vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) );
+  vl->setLabelsEnabled( true );
+  vl->selectByExpression( u"Class='B52'"_s );
+  QCOMPARE( vl->selectedFeatureCount(), 4 );
+
+  QgsDefaultLabelingEngine engine( mapSettings );
+
+  engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
+
+  QgsMapRendererSequentialJob job( mapSettings );
+
+  job.start();
+  job.waitForFinished();
+  QImage img = job.renderedImage();
+
+  QGSVERIFYIMAGECHECK( "labeling_selection", "labeling_selection", img, QString(), 20, QSize( 0, 0 ), 2 );
 }
 
 void TestQgsLabelingEngine::zOrder()
@@ -549,8 +585,8 @@ void TestQgsLabelingEngine::zOrder()
   pls1.dataDefinedProperties().setProperty( QgsPalLayerSettings::Property::Size, QgsProperty::fromExpression( u"case when \"Class\"='Jet' then 100 when \"Class\"='B52' then 30 else 50 end"_s ) );
 
   QgsVectorLayerLabelProvider *provider1 = new QgsVectorLayerLabelProvider( vl, QString(), true, &pls1 );
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider1 );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -610,6 +646,7 @@ void TestQgsLabelingEngine::zOrder()
   //flip layer order and re-test
   mapSettings.setLayers( QList<QgsMapLayer *>() << vl2 << vl );
   engine.setMapSettings( mapSettings );
+
   p.begin( &img );
   engine.run( context );
   p.end();
@@ -707,8 +744,8 @@ void TestQgsLabelingEngine::testSubstitutions()
   mapSettings.setOutputDpi( 96 );
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   QSet<QString> attributes;
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
   provider->prepare( context, attributes );
 
@@ -740,8 +777,8 @@ void TestQgsLabelingEngine::testCapitalization()
   mapSettings.setOutputDpi( 96 );
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   QSet<QString> attributes;
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
 
   // no change
   QgsPalLayerSettings settings;
@@ -847,8 +884,8 @@ void TestQgsLabelingEngine::testNumberFormat()
   mapSettings.setOutputDpi( 96 );
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   QSet<QString> attributes;
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
 
   // no change
   QgsPalLayerSettings settings;
@@ -911,7 +948,8 @@ void TestQgsLabelingEngine::testNumberFormat()
 
 void TestQgsLabelingEngine::testParticipatingLayers()
 {
-  QgsDefaultLabelingEngine engine;
+  QgsMapSettings mapSettings;
+  QgsDefaultLabelingEngine engine( mapSettings );
   QVERIFY( engine.participatingLayers().isEmpty() );
 
   const QgsPalLayerSettings settings1;
@@ -966,8 +1004,8 @@ void TestQgsLabelingEngine::testRegisterFeatureUnprojectible()
   mapSettings.setOutputDpi( 96 );
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   QSet<QString> attributes;
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
   provider->prepare( context, attributes );
 
@@ -1034,8 +1072,8 @@ void TestQgsLabelingEngine::testRotateHidePartial()
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   context.setPainter( &p );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
 
   engine.run( context );
@@ -1109,8 +1147,8 @@ void TestQgsLabelingEngine::testParallelLabelSmallFeature()
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   context.setPainter( &p );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
 
   engine.run( context );
@@ -1178,8 +1216,8 @@ void TestQgsLabelingEngine::testAllowDegradedPlacements()
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   context.setPainter( &p );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
 
   engine.run( context );
@@ -1273,8 +1311,8 @@ void TestQgsLabelingEngine::testOverlapHandling()
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   context.setPainter( &p );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
   engine.addProvider( provider2 );
 
@@ -1436,8 +1474,8 @@ void TestQgsLabelingEngine::testAllowOverlapsIgnoresObstacles()
   QgsRenderContext context = QgsRenderContext::fromMapSettings( mapSettings );
   context.setPainter( &p );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( provider );
   engine.addProvider( provider2 );
 
@@ -4115,8 +4153,8 @@ void TestQgsLabelingEngine::testLabelRotationUnit()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   engine.run( context );
 
@@ -4481,23 +4519,32 @@ void TestQgsLabelingEngine::labelingResultsCurved()
   std::sort( labels.begin(), labels.end(), []( const QgsLabelPosition &a, const QgsLabelPosition &b ) { return a.labelText.compare( b.labelText ) < 0; } );
   QCOMPARE( labels.at( 0 ).labelText, u"1"_s );
   QCOMPARE( labels.at( 1 ).labelText, u"33333"_s );
+  QCOMPARE( labels.at( 1 ).groupedPositionIndex, 0 );
   long long group2 = labels.at( 1 ).groupedLabelId;
   QCOMPARE( labels.at( 2 ).labelText, u"33333"_s );
   QCOMPARE( labels.at( 2 ).groupedLabelId, group2 );
+  QCOMPARE( labels.at( 2 ).groupedPositionIndex, 1 );
   QCOMPARE( labels.at( 3 ).labelText, u"33333"_s );
   QCOMPARE( labels.at( 3 ).groupedLabelId, group2 );
+  QCOMPARE( labels.at( 3 ).groupedPositionIndex, 2 );
   QCOMPARE( labels.at( 4 ).labelText, u"33333"_s );
   QCOMPARE( labels.at( 4 ).groupedLabelId, group2 );
+  QCOMPARE( labels.at( 4 ).groupedPositionIndex, 3 );
   QCOMPARE( labels.at( 5 ).labelText, u"33333"_s );
   QCOMPARE( labels.at( 5 ).groupedLabelId, group2 );
+  QCOMPARE( labels.at( 5 ).groupedPositionIndex, 4 );
   long long group3 = labels.at( 6 ).groupedLabelId;
   QCOMPARE( labels.at( 6 ).labelText, u"8888"_s );
+  QCOMPARE( labels.at( 6 ).groupedPositionIndex, 0 );
   QCOMPARE( labels.at( 7 ).labelText, u"8888"_s );
   QCOMPARE( labels.at( 7 ).groupedLabelId, group3 );
+  QCOMPARE( labels.at( 7 ).groupedPositionIndex, 1 );
   QCOMPARE( labels.at( 8 ).labelText, u"8888"_s );
   QCOMPARE( labels.at( 8 ).groupedLabelId, group3 );
+  QCOMPARE( labels.at( 8 ).groupedPositionIndex, 2 );
   QCOMPARE( labels.at( 9 ).labelText, u"8888"_s );
   QCOMPARE( labels.at( 9 ).groupedLabelId, group3 );
+  QCOMPARE( labels.at( 9 ).groupedPositionIndex, 3 );
 
   labels = results->groupedLabelPositions( group2 );
   QCOMPARE( labels.size(), 5 );
@@ -5336,8 +5383,8 @@ void TestQgsLabelingEngine::testDataDefinedPlacementPositionPoint()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   engine.run( context );
 
@@ -5438,8 +5485,8 @@ void TestQgsLabelingEngine::testVerticalOrientation()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -5488,8 +5535,8 @@ void TestQgsLabelingEngine::testVerticalOrientationLetterLineSpacing()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -5534,8 +5581,8 @@ void TestQgsLabelingEngine::testRotationBasedOrientationPoint()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -5583,8 +5630,8 @@ void TestQgsLabelingEngine::testRotationBasedOrientationPointHtmlLabel()
   vl->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl, QString(), true, &settings ) );
   engine.run( context );
 
@@ -5635,8 +5682,8 @@ void TestQgsLabelingEngine::testRotationBasedOrientationLine()
   vl2->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
   vl2->setLabelsEnabled( true );
 
-  QgsDefaultLabelingEngine engine;
-  engine.setMapSettings( mapSettings );
+  QgsDefaultLabelingEngine engine( mapSettings );
+
   engine.addProvider( new QgsVectorLayerLabelProvider( vl2, QString(), true, &settings ) );
   //engine.setFlags( QgsLabelingEngine::RenderOutlineLabels | QgsLabelingEngine::DrawLabelRectOnly );
   engine.run( context );
@@ -5647,6 +5694,76 @@ void TestQgsLabelingEngine::testRotationBasedOrientationLine()
 
   vl2->setLabeling( nullptr );
   QgsProject::instance()->removeMapLayer( vl2 );
+}
+
+void TestQgsLabelingEngine::testHorizontalRotation_data()
+{
+  QTest::addColumn<Qgis::TextAnchorPoint>( "textAnchor" );
+  QTest::addColumn<double>( "angle" );
+  QTest::addColumn<QString>( "referenceImage" );
+
+  QTest::newRow( "center 45 degrees" ) << Qgis::TextAnchorPoint::CenterOfText << 45.0 << "horizontal_angle_center_45";
+  QTest::newRow( "center -45 degrees" ) << Qgis::TextAnchorPoint::CenterOfText << -45.0 << "horizontal_angle_center_neg45";
+  QTest::newRow( "end 45 degrees" ) << Qgis::TextAnchorPoint::EndOfText << 45.0 << "horizontal_angle_end_45";
+  QTest::newRow( "start 45 degrees" ) << Qgis::TextAnchorPoint::StartOfText << 45.0 << "horizontal_angle_start_45";
+}
+
+void TestQgsLabelingEngine::testHorizontalRotation()
+{
+  QFETCH( Qgis::TextAnchorPoint, textAnchor );
+  QFETCH( double, angle );
+  QFETCH( QString, referenceImage );
+
+  QgsPalLayerSettings settings;
+  setDefaultLabelParams( settings );
+
+  QgsTextFormat format = settings.format();
+  format.setSize( 20 );
+  format.setColor( QColor( 0, 0, 0 ) );
+  settings.setFormat( format );
+
+  settings.fieldName = u"'XXXXXXXX'"_s;
+  settings.isExpression = true;
+  settings.placement = Qgis::LabelPlacement::Horizontal;
+  settings.lineSettings().setPlacementFlags( Qgis::LabelLinePlacementFlag::AboveLine );
+  settings.placementSettings().setMultiPartBehavior( Qgis::MultiPartLabelingBehavior::LabelLargestPartOnly );
+  settings.lineSettings().setAnchorTextPoint( textAnchor );
+  settings.angleOffset = angle;
+
+  auto vl2 = std::make_unique<QgsVectorLayer>( u"LineString?crs=epsg:3946&field=id:integer"_s, u"vl"_s, u"memory"_s );
+  vl2->setRenderer( new QgsSingleSymbolRenderer( QgsLineSymbol::createSimple( { { u"color"_s, u"#000000"_s }, { u"outline_width"_s, 0.6 } } ).release() ) );
+
+  QgsFeature f;
+  f.setAttributes( QgsAttributes() << 1 );
+  f.setGeometry( QgsGeometry::fromWkt( u"LineString (190000 5000010, 190200 5000000)"_s ) );
+  QVERIFY( vl2->dataProvider()->addFeature( f ) );
+
+  vl2->setLabeling( new QgsVectorLayerSimpleLabeling( settings ) ); // TODO: this should not be necessary!
+  vl2->setLabelsEnabled( true );
+
+  // make a fake render context
+  const QSize size( 640, 480 );
+  QgsMapSettings mapSettings;
+  mapSettings.setLabelingEngineSettings( createLabelEngineSettings() );
+  mapSettings.setDestinationCrs( vl2->crs() );
+
+  mapSettings.setOutputSize( size );
+  mapSettings.setExtent( f.geometry().boundingBox().buffered( 10 ) );
+  mapSettings.setLayers( QList<QgsMapLayer *>() << vl2.get() );
+  mapSettings.setOutputDpi( 96 );
+
+  QgsLabelingEngineSettings engineSettings = mapSettings.labelingEngineSettings();
+  engineSettings.setFlag( Qgis::LabelingFlag::UsePartialCandidates, false );
+  engineSettings.setFlag( Qgis::LabelingFlag::DrawLabelRectOnly, true );
+  // engineSettings.setFlag( Qgis::LabelingFlag::DrawCandidates, true );
+  mapSettings.setLabelingEngineSettings( engineSettings );
+
+  QgsMapRendererSequentialJob job( mapSettings );
+  job.start();
+  job.waitForFinished();
+
+  QImage img = job.renderedImage();
+  QGSVERIFYIMAGECHECK( referenceImage, referenceImage, img, QString(), 20, QSize( 0, 0 ), 2 );
 }
 
 void TestQgsLabelingEngine::testMapUnitLetterSpacing()
@@ -6988,12 +7105,12 @@ void TestQgsLabelingEngine::testSymbologyScalingFactor()
   // test rendering labels with a layer with a reference scale set (with callout)
   auto vl = std::make_unique<QgsVectorLayer>( QStringLiteral( TEST_DATA_DIR ) + "/points.shp", u"points"_s, u"ogr"_s );
   QVERIFY( vl->isValid() );
-  QgsMarkerSymbol *marker = static_cast<QgsMarkerSymbol *>( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ) );
+  auto marker = qgis::unique_ptr_static_cast<QgsMarkerSymbol>( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ) );
   marker->setColor( QColor( 255, 0, 0 ) );
   marker->setSize( 3 );
   static_cast<QgsSimpleMarkerSymbolLayer *>( marker->symbolLayer( 0 ) )->setStrokeStyle( Qt::NoPen );
 
-  vl->setRenderer( new QgsSingleSymbolRenderer( marker ) );
+  vl->setRenderer( new QgsSingleSymbolRenderer( marker.release() ) );
 
   const QSize size( 640, 480 );
   QgsMapSettings mapSettings;
@@ -7051,12 +7168,12 @@ void TestQgsLabelingEngine::testSymbologyScalingFactor2()
   // test rendering labels with a layer with a reference scale set (with label background)
   auto vl = std::make_unique<QgsVectorLayer>( QStringLiteral( TEST_DATA_DIR ) + "/points.shp", u"points"_s, u"ogr"_s );
   QVERIFY( vl->isValid() );
-  QgsMarkerSymbol *marker = static_cast<QgsMarkerSymbol *>( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ) );
+  auto marker = qgis::unique_ptr_static_cast<QgsMarkerSymbol>( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ) );
   marker->setColor( QColor( 255, 0, 0 ) );
   marker->setSize( 3 );
   static_cast<QgsSimpleMarkerSymbolLayer *>( marker->symbolLayer( 0 ) )->setStrokeStyle( Qt::NoPen );
 
-  vl->setRenderer( new QgsSingleSymbolRenderer( marker ) );
+  vl->setRenderer( new QgsSingleSymbolRenderer( marker.release() ) );
 
   const QSize size( 640, 480 );
   QgsMapSettings mapSettings;

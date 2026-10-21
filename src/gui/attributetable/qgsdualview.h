@@ -462,6 +462,8 @@ class GUI_EXPORT QgsDualView : public QStackedWidget, private Ui::QgsDualViewBas
     bool mBrowsingAutoPanScaleAllowed = true;
     ViewMode mPreviousView = AttributeTable;
 
+    bool mSkipDisplayExpressionChangedSignal = false;
+
     friend class TestQgsDualView;
     friend class TestQgsAttributeTable;
 };

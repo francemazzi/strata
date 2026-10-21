@@ -27,8 +27,10 @@ set(TESTS
  testqgsprocessingfixgeometry.cpp
  testqgsprocessingmodelalgorithm.cpp
  testqgszonalstatistics.cpp
+ testqgsrasteranalysisutils.cpp
  testqgsrastercalculator.cpp
  testqgsreclassifyutils.cpp
+ testqgsrelief.cpp
  testqgsalignraster.cpp
  testqgsnetworkanalysis.cpp
  testqgsninecellfilters.cpp

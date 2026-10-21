@@ -22,6 +22,7 @@
 #include "qgslayertree.h"
 #include "qgslayertreefiltersettings.h"
 #include "qgslayertreemodellegendnode.h"
+#include "qgslayertreeutils.h"
 #include "qgslayoutitemlegend.h"
 #include "qgsmaphittest.h"
 #include "qgsmaplayer.h"
@@ -298,11 +299,7 @@ QVariant QgsLayerTreeModel::data( const QModelIndex &index, int role ) const
 
         if ( layer->isSpatial() && layer->crs().isValid() )
         {
-          QString layerCrs = layer->crs().authid();
-          if ( !std::isnan( layer->crs().coordinateEpoch() ) )
-          {
-            layerCrs += u" @ %1"_s.arg( qgsDoubleToString( layer->crs().coordinateEpoch(), 3 ) );
-          }
+          const QString layerCrs = layer->crs().userFriendlyIdentifier( Qgis::CrsIdentifierType::ShortString );
           if ( QgsVectorLayer *vl = qobject_cast<QgsVectorLayer *>( layer ) )
             title += tr( " (%1 - %2)" ).arg( QgsWkbTypes::displayString( vl->wkbType() ), layerCrs ).toHtmlEscaped();
           else
@@ -1333,6 +1330,13 @@ bool QgsLayerTreeModel::dropMimeData( const QMimeData *data, Qt::DropAction acti
 
     if ( nodes.isEmpty() )
       return false;
+
+    // moving around layer group preserves id but copying creates new id for the group + subgroups
+    if ( action == Qt::CopyAction )
+    {
+      for ( QgsLayerTreeNode *node : std::as_const( nodes ) )
+        QgsLayerTreeUtils::regenerateGroupIds( node );
+    }
 
     QgsLayerTree::toGroup( nodeParent )->insertChildNodes( row, nodes );
   }

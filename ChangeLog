@@ -4033,7 +4033,7 @@ Merge: 0c8697f1f16 4a82da89ed1
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-06-02
 
-    Merge pull request #66308 from ValentinBuira/remove-astyle-reference
+    Merge pull request #66308 from CeliaBuira/remove-astyle-reference
 
     Remove remaining reference to astyle(not used anymore) (no functional changes)
 
@@ -4044,8 +4044,8 @@ CommitDate: 2026-06-02
     set file filters for output in the Generate elevation profile image
     algorithm (fix #64915)
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-06-01
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-06-01
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-06-01
 
     Remove lasting reference to astyle (astyle is not used anymore)
@@ -5928,7 +5928,7 @@ CommitDate: 2026-05-20
 
     fix SETTINGS_NODE in api docs
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-10-15
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-10-15
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-20
 
@@ -6401,7 +6401,7 @@ CommitDate: 2026-05-15
     - Make shadows smoothly fade off as the distance to the shadow
       approaches the maximum shadow distance, instead of a hard cut-off
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-05-15
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-05-15
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-05-15
 
@@ -6497,7 +6497,7 @@ CommitDate: 2026-05-14
 
     auto sipify 🍺
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-14
 
@@ -7630,7 +7630,7 @@ CommitDate: 2026-05-12
 
     auto sipify 🍺
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-05-12
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-05-12
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-05-12
 
@@ -7730,13 +7730,13 @@ CommitDate: 2026-05-08
 
     auto sipify 🍺
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-05-08
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-05-08
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-08
 
     sipify
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-05-07
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-05-07
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-08
 
@@ -7744,7 +7744,7 @@ CommitDate: 2026-05-08
 
     Co-authored-by: Nyall Dawson <nyall.dawson@gmail.com>
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-04-29
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-04-29
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-08
 
@@ -7888,7 +7888,7 @@ CommitDate: 2026-05-08
     This issue is fixed by checking that the rubberband is not null when
     `Qgs3DMapToolMeasureLine::restart` is called.
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-05-07
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-05-07
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-05-07
 
@@ -7976,7 +7976,7 @@ CommitDate: 2026-05-07
 
     Fix build, rename from dialog->widget
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-26
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-26
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-07
 
@@ -8194,19 +8194,19 @@ CommitDate: 2026-05-07
     * create abstract class for 3d settings
     - handle gradient and skybox settings from it, adjust all needed methods and deprecate skybox specific ones
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-05-01
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-05-01
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-07
 
     use higher threeshold for the scene height as the higher presence of text together with different font size make the test fail on some plateform
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-03-31
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-03-31
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-07
 
     fix tests
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-03-30
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-03-30
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-05-07
 
@@ -13884,7 +13884,7 @@ CommitDate: 2026-03-31
 
     remove 3d profile on clear action
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-03-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-03-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-31
 
@@ -16834,7 +16834,7 @@ Merge: bae65a1bd12 98041f2f7d8
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-03-11
 
-    Merge pull request #62910 from ValentinBuira/fileuploader
+    Merge pull request #62910 from CeliaBuira/fileuploader
 
     [processing] New algorithm upload a file to server
 
@@ -16859,7 +16859,7 @@ CommitDate: 2026-03-11
     due to my mistake in
     https://github.com/qgis/QGIS/pull/53168/changes#diff-4a7addb15c37611abf9690c64cd4e0f65394658c67a5f29bbd1c564665cb81bdR55
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-03-10
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-03-10
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-03-10
 
@@ -18088,7 +18088,7 @@ CommitDate: 2026-03-06
 
     auto-fix pre-commit issues
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-25
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-25
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
@@ -18137,7 +18137,7 @@ CommitDate: 2026-03-06
 
     Update src/gui/processing/models/qgsmodelgraphicsscene.cpp
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-22
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-22
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
@@ -18145,20 +18145,20 @@ CommitDate: 2026-03-06
     * Wording in comment
     * Instead of center on the model center, zoomFull instead (aka FitInView)
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-22
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-22
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
     pre-commit
     fix tests
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-21
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-21
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
     Return the appropriate subclass instead of generic parent class
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-21
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-21
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
@@ -18166,13 +18166,13 @@ CommitDate: 2026-03-06
 
     see : https://github.com/qgis/QGIS/pull/64605#issuecomment-3771638032
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-21
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-21
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
     More sensible default for the margin around the model -> avoid to feel like your stuck  on each side of the model canvas
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-21
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-21
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-03-06
 
@@ -19748,7 +19748,7 @@ CommitDate: 2026-02-20
 
     allowing to group all the actions/settings that draw/edit the cross section, and separate them from the destructive action
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-27
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-27
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2026-02-20
 
@@ -21236,8 +21236,8 @@ CommitDate: 2026-02-13
 
     Co-authored-by: Matthias Kuhn <matthias@opengis.ch>
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-13
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-13
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-13
 
     remove clang tidy warning
@@ -21245,20 +21245,20 @@ CommitDate: 2026-02-13
     run sipify
 
 Merge: d8cbfff64c6 3968f2bc8ff
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-13
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-13
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-13
 
     Merge branch 'master' into fileuploader
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-13
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-13
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-13
 
     remove no needed anymore QTimer
     superflous set optional tag
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-02-13
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-02-13
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-02-13
 
@@ -22274,7 +22274,7 @@ CommitDate: 2026-02-07
 
     fix layout of the preview area in the form Text Widget (fix #63961)
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-02-06
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-02-06
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-02-06
 
@@ -22282,7 +22282,7 @@ CommitDate: 2026-02-06
 
     Co-authored-by: Matthias Kuhn <matthias@opengis.ch>
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-02-06
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-02-06
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-02-06
 
@@ -22290,7 +22290,7 @@ CommitDate: 2026-02-06
 
     Co-authored-by: Matthias Kuhn <matthias@opengis.ch>
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-02-06
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-02-06
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-02-06
 
@@ -22334,21 +22334,21 @@ CommitDate: 2026-02-06
 
     Add myself to contributors list
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-06
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-06
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-06
 
     Apply suggested diff from CI
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-06
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-06
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-06
 
     make CI happy ?
 
 Merge: e62d2dcee70 8d95b6cedc4
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-06
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-06
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-06
 
     Merge branch 'master' into fileuploader
@@ -23399,8 +23399,8 @@ CommitDate: 2026-02-03
     Fix maybe uninitialized warning when building release builds
 
 Merge: 4882373403b 4ae989121a8
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-02-02
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-02-02
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-02-02
 
     Merge branch 'master' into fileuploader
@@ -24371,21 +24371,21 @@ CommitDate: 2026-01-26
 
     allow to pass headers in QgsNetworkContentFetcher
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-26
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-26
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-26
 
     correct test
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-26
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-26
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-26
 
     fix clang tidy warning
 
 Merge: 1e97c89381e 6d2276e97ac
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-26
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-26
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-26
 
     Merge branch 'master' into fileuploader
@@ -24942,8 +24942,8 @@ CommitDate: 2026-01-21
 
     fix(Customization): make clang-tidy and cppcheck appy
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-21
 
     freaking tests
@@ -25166,27 +25166,27 @@ CommitDate: 2026-01-21
 
     chore(typo): fix a typo: Loîc => Loïc
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     Update tests
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     formatting
 
 Merge: 0d5b20a0b17 ecb1a71964e
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     Merge branch 'master' into fileuploader
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     clang-tidy warning
@@ -25280,8 +25280,8 @@ CommitDate: 2026-01-20
 
     Rewrite customization code
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     pre-commit
@@ -25443,8 +25443,8 @@ CommitDate: 2026-01-20
 
     add gui actions
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     remove superflous code
@@ -25525,21 +25525,21 @@ CommitDate: 2026-01-20
 
     nix: add support for building on macOS
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     pre-commit
 
 Merge: fb9fa269bb8 ec315719795
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     Merge branch 'master' into fileuploader
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-20
 
     Thread safety: use QgsBlockingNetworkRequest instead of QEventLoop
@@ -27312,7 +27312,7 @@ CommitDate: 2026-01-08
 
     auto sipify 🍺
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-01-09
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-01-09
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-01-09
 
@@ -27425,7 +27425,7 @@ CommitDate: 2026-01-08
 
     auto sipify 🍺
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2026-01-08
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2026-01-08
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-01-09
 
@@ -28062,7 +28062,7 @@ Merge: deb7b383518 08c63c37118
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2026-01-02
 
-    Merge pull request #64427 from ValentinBuira/update-git-blame-ignore-revs
+    Merge pull request #64427 from CeliaBuira/update-git-blame-ignore-revs
 
     Follow up on #64395 Update .git-blame-ignore-revs with mass conversion to u""_s and ""_L1
 
@@ -28102,8 +28102,8 @@ CommitDate: 2026-01-02
 
     Bump lukka/get-cmake from 4.2.0 to 4.2.1
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2026-01-02
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2026-01-02
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2026-01-02
 
     Update .git-blame-ignore-revs with mass conversion to use u""_s and ""_L1 operators instead of  QLiteralString() and QLatin1String()
@@ -39629,7 +39629,7 @@ Merge: 68de81e8520 4adfec7e430
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-09-26
 
-    Merge pull request #63341 from ValentinBuira/improve-doc
+    Merge pull request #63341 from CeliaBuira/improve-doc
 
     Small improvements to code examples in documentation
 
@@ -39677,7 +39677,7 @@ CommitDate: 2025-09-25
     auto sipify 🍺
 
 Merge: bed51c86ff3 9efd6af8399
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2025-09-25
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2025-09-25
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-09-25
 
@@ -40247,19 +40247,19 @@ CommitDate: 2025-09-18
 
     Project/layer metadata localization support
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-12
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-12
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-09-18
 
     avoid shortening minimun in the UI
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-10
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-10
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-09-18
 
     Partial revert, only left changes to the limits
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-10
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-10
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-09-18
 
@@ -40434,8 +40434,8 @@ CommitDate: 2025-09-17
     Install Qt6 in bin dir for Windows build
 
 Merge: 2e44b20a771 70c094c960f
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-17
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-17
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-09-17
 
     Merge branch 'master' into fileuploader
@@ -40588,8 +40588,8 @@ CommitDate: 2025-09-16
 
     Remove moc from non-qobject class
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-15
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-15
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-09-15
 
     fix test
@@ -41546,14 +41546,14 @@ CommitDate: 2025-09-06
 
     Add unit tests for vertex editor adding vertices to z enabled layer
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-05
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-05
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-09-05
 
     Improve QgsGeos \returns doc
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-09-05
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-09-05
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-09-05
 
     Wrong parameter type in qgsfunction doc
@@ -42695,18 +42695,18 @@ Merge: 37ac6b5e0e5 ade1b05e1ac
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-08-31
 
-    Merge pull request #63014 from ValentinBuira/update-sip-doc
+    Merge pull request #63014 from CeliaBuira/update-sip-doc
 
     Update broken links to sip documentation
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-29
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-29
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-29
 
     Update broken links to sip documentation
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-29
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-29
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-29
 
     Fix code exemples in:
@@ -42951,19 +42951,19 @@ CommitDate: 2025-08-28
 
     In order to match 'magic' scaling constant rendering from older Qt versions
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-27
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-27
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-28
 
     remove smiley
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-27
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-27
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-28
 
     style and remove smiley
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-26
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-26
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-28
 
@@ -43082,8 +43082,8 @@ CommitDate: 2025-08-27
     with a null (but not invalid) qvariant user data
 
 Merge: f7fe042ae33 1b0c0793901
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-26
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-26
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-26
 
     Merge branch 'master' into fileuploader
@@ -43533,32 +43533,32 @@ CommitDate: 2025-08-22
     which results in no rendered segment anyway, so there's no visual
     difference here.
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     use unique_ptr instead of raw pointer
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     naming
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     remove qDebug()
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     missing doc
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     tests and fix
@@ -43587,8 +43587,8 @@ CommitDate: 2025-08-21
 
     Fix 3D terrain texture tiles stop loading
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-21
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-21
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-21
 
     Copyright
@@ -43647,22 +43647,22 @@ CommitDate: 2025-08-20
     fix typo
 
 Merge: 7f39871b5f5 58658c4bfc7
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-20
 
     Merge branch 'master' into fileuploader
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-20
 
     Make tests pass
     cpp check
     sipify
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-20
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-20
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-20
 
     Misc:
@@ -44008,8 +44008,8 @@ CommitDate: 2025-08-14
     By using a `Qt::QueuedConnection` we make sure that the signal is only
     sent later.
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-14
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-14
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-08-14
 
     Add Upload file Algorithm
@@ -44140,7 +44140,7 @@ CommitDate: 2025-08-11
 
     qgsrectangle: Add isvalid method
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-26
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-26
 Commit:     Jean Felder <jean.felder@oslandia.com>
 CommitDate: 2025-08-11
 
@@ -44222,13 +44222,13 @@ CommitDate: 2025-08-07
 
     auto sipify 🍺
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-07
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-07
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Adress review : add a recursion blocker
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-08-06
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-08-06
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
@@ -44236,20 +44236,20 @@ CommitDate: 2025-08-07
     * spelling
     * doxygen tag
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-06-30
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-06-30
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Adress comments
     superfluous centerOn
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-06-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-06-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Fix view jumping around
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2025-05-14
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
@@ -44257,25 +44257,25 @@ CommitDate: 2025-08-07
 
     Co-authored-by: Stefanos Natsis <uclaros@gmail.com>
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Avoid needless extra method
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Simplify restaure the previous viewed rect
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Remove the good superfluous method this time
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
@@ -44283,55 +44283,55 @@ CommitDate: 2025-08-07
 
     This reverts commit 13f020ef86c3f1501e1c1f69792f3b16616d4b4a.
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Superfluous method
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     connect signal to method  instead of individual calls
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-14
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-14
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Adress more comments
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Adress comments
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Fixing test and add  more case
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Attempt to debug CI test
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Tidy up PR
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-13
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-13
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
     Fix scrollback to (0,0) on each repaintModel / rebuild of the model
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-12
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-12
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-08-07
 
@@ -47417,7 +47417,7 @@ CommitDate: 2025-06-17
 
     Microoptimisation: reserve arguments list
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-06-16
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-06-16
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-06-17
 
@@ -49627,61 +49627,61 @@ CommitDate: 2025-05-30
 
     Followup #40109, fix clang tidy warnings
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     typo
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     More restrictive regex
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Fix input ENV variable
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     add regex example
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Rename
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Remove auto label
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Add get_latest_qgis_version.py script
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-04-27
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-04-27
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Check QGIS version in report, skip already running latest LTR
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-04-24
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-04-24
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
     Automatically add label 'Feedback' if the user is running unsupported version
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-04-24
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-04-24
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2025-05-30
 
@@ -51733,7 +51733,7 @@ Merge: 3d278c43787 a8f3be4dce9
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-05-09
 
-    Merge pull request #61758 from ValentinBuira/fix-crash-artefacts-modeler
+    Merge pull request #61758 from CeliaBuira/fix-crash-artefacts-modeler
 
     Fix crash and visual artefacts when linking components in the modeler
 
@@ -51929,8 +51929,8 @@ CommitDate: 2025-05-07
     #59249 - Add qgis.env.in and cmake step to generate when using vcpkg
 
 Merge: 8cdc8a57890 adc68b2332a
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-07
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-07
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-05-07
 
     Merge branch 'master' into fix-crash-artefacts-modeler
@@ -51940,7 +51940,7 @@ Merge: 5c8d4717890 698ad226afb
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-05-07
 
-    Merge pull request #61726 from ValentinBuira/fix-signal-modeler
+    Merge pull request #61726 from CeliaBuira/fix-signal-modeler
 
     followup #60664 - Fix warning when open  up the model (Qt: QObject::connect: signal not found in QgsModelGraphicsView )
 
@@ -52023,8 +52023,8 @@ CommitDate: 2025-05-06
     Introduce abstract QgsGpsToolsInterface and its subclass QgsAppGpsTools, which can be accessed via iface.gpsTools()
     Deprecate existent GPS method in iface and move it to GPS tools.
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-06
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-06
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-05-06
 
     Fix crash and visual artefacts when using linking components
@@ -52390,8 +52390,8 @@ CommitDate: 2025-05-03
     QGIS_PREFIX_PATH isn't required as qgisbuildpath.txt is in output
     and is used at started to set those paths
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-05-02
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-05-02
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-05-02
 
     Fix signal not found because of rename
@@ -52793,7 +52793,7 @@ CommitDate: 2025-04-29
 
     auto sipify 🍺
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2025-04-30
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2025-04-30
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-04-30
 
@@ -52805,7 +52805,7 @@ CommitDate: 2025-04-29
 
     auto sipify 🍺
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2025-04-30
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2025-04-30
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-04-30
 
@@ -56329,7 +56329,7 @@ Merge: ca1d9905006 16757ebd40d
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-03-31
 
-    Merge pull request #60842 from ValentinBuira/fix-mergevectorlayer-field-length
+    Merge pull request #60842 from CeliaBuira/fix-mergevectorlayer-field-length
 
     Fix processing (unreported) : Merge vector layer algorithm fail in the case a field name already exists but with different length or precision
 
@@ -57146,8 +57146,8 @@ CommitDate: 2025-03-27
     uri. If we directly add query components via string literals, then
     these will just get append to the SQL query and break everything
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-26
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-26
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-26
 
     Remove superfluous metadata from shapefiles
@@ -58374,15 +58374,15 @@ CommitDate: 2025-03-19
 
     This way, the formula is only defined once.
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-18
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-18
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-18
 
     Fix test attempt 2
 
 Merge: c3b65efa20c f1ad765ee7a
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-18
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-18
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-18
 
     Merge branch 'master' into fix-mergevectorlayer-field-length
@@ -59125,8 +59125,8 @@ CommitDate: 2025-03-12
 
     Minor decoupling of QgsAggregateMappingModel from QgsFieldMappingModel
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-12
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-12
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-12
 
     attempt to fix test
@@ -59565,8 +59565,8 @@ CommitDate: 2025-03-08
 
     port Define Projection algorithm to C++
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-07
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-07
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-07
 
     Add test for merging layers with different field length/precision
@@ -59981,7 +59981,7 @@ CommitDate: 2025-03-04
 
     chore: no need to fail if directory exists
 
-    Valentin Buira <30632058+ValentinBuira@users.noreply.github.com>AuthorDate: 2025-03-04
+    Celia Buira <30632058+CeliaBuira@users.noreply.github.com>AuthorDate: 2025-03-04
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2025-03-04
 
@@ -60020,8 +60020,8 @@ CommitDate: 2025-03-03
 
     Fix welcome page's recent projects showing unfriendly paths for geopackage-stored projects (#60827)
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-02
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-02
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-03
 
     Loss of precision in some merge vector operation
@@ -60272,8 +60272,8 @@ CommitDate: 2025-03-02
 
     [DXF] Fix writing encoding name
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2025-03-02
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2025-03-02
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2025-03-02
 
     Fix error when merging vector layers with the same field name but different length
@@ -73547,7 +73547,7 @@ Merge: cbcfe86fa66 c96ec1abbde
 Commit:     GitHub <noreply@github.com>
 CommitDate: 2024-11-09
 
-    Merge pull request #59380 from ValentinBuira/update-install-md
+    Merge pull request #59380 from CeliaBuira/update-install-md
 
     Update install md
 
@@ -73606,8 +73606,8 @@ CommitDate: 2024-11-08
     This means we do not need to add rotation to polygon / buffered line
     symbol's 3D entities in 3D map views (and there's only translation left, yay!)
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2024-11-08
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2024-11-08
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2024-11-08
 
     Revert "Fix table of content link"
@@ -73641,8 +73641,8 @@ CommitDate: 2024-11-08
 
     update url
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2024-11-08
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2024-11-08
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2024-11-08
 
     Use backtick instead
@@ -73712,20 +73712,20 @@ CommitDate: 2024-11-07
 
     Set appropriate permissions to called workflow
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2024-11-07
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2024-11-07
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2024-11-07
 
     Help multiline command
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2024-11-07
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2024-11-07
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2024-11-07
 
     Fix parameter syntax
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2024-11-07
-Commit:     Valentin Buira <valentin.buira@gmail.com>
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2024-11-07
+Commit:     Celia Buira <celia.buira@gmail.com>
 CommitDate: 2024-11-07
 
     Fix table of content link
@@ -110060,13 +110060,13 @@ CommitDate: 2023-10-28
 
     Synchronize point cloud layer's style with the layer properties' style widgets
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2023-10-18
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2023-10-18
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2023-10-28
 
     Update sip file
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2023-10-15
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2023-10-15
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2023-10-28
 
@@ -110092,7 +110092,7 @@ CommitDate: 2023-10-28
 
     Co-authored-by: Julien Cabieces <julien.cabieces@oslandia.com>
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2023-10-11
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2023-10-11
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2023-10-28
 
@@ -115857,7 +115857,7 @@ CommitDate: 2023-08-18
 
     Apply suggestions from code review
 
-    Valentin Buira <valentin.buira@gmail.com>AuthorDate: 2023-07-02
+    Celia Buira <celia.buira@gmail.com>AuthorDate: 2023-07-02
 Commit:     Nyall Dawson <nyall.dawson@gmail.com>
 CommitDate: 2023-08-18
 
@@ -547101,7 +547101,7 @@ CommitDate: 2014-06-13
 Commit:     jangbi882 <jangbi882@gmail.com>
 CommitDate: 2014-06-13
 
-    1/5 ����
+    1/5 ����
 
 Merge: c49e38c39c9 17a8e381081
     Martin Dobias <wonder.sk@gmail.com>AuthorDate: 2014-06-13
@@ -614976,7 +614976,7 @@ CommitDate: 2012-03-25
 Commit:     Jürgen E. Fischer <jef@norbit.de>
 CommitDate: 2012-03-25
 
-    osgeo4w: don't set GDAL_DRIVER_PATH�
+    osgeo4w: don't set GDAL_DRIVER_PATH�
 
     Marco Hugentobler <marco.hugentobler@sourcepole.ch>AuthorDate: 2012-03-24
 Commit:     Marco Hugentobler <marco.hugentobler@sourcepole.ch>

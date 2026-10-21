@@ -394,11 +394,11 @@ QgsError Qgs3To4Migration::runMigration( const QString &oldProfilePath, const QS
   const QString settingsIniPath = newProfileDir.filePath( u"getstrata.org/Strata.ini"_s );
   if ( QFile::exists( settingsIniPath ) )
   {
-    QgsFileUtils::replaceTextInFile( settingsIniPath, oldProfilePath, newProfilePath );
-  }
-  else if ( newProfileDir.exists( u"QGIS/QGIS4.ini"_s ) )
-  {
-    QgsFileUtils::replaceTextInFile( newProfileDir.filePath( u"QGIS/QGIS4.ini"_s ), oldProfilePath, newProfilePath );
+    const QString oldCleanProfilePath = QFileInfo( oldProfilePath ).absoluteFilePath().replace( "/"_L1, "(\\\\|/)"_L1 ).replace( "\\"_L1, "(\\\\|/)"_L1 );
+    const QString newCleanProfilePath = QFileInfo( newProfilePath ).absoluteFilePath();
+
+    // do a one-time search and replace for the old profiles path in the ini file to the new path
+    QgsFileUtils::replaceInFile( settingsIniPath, QRegularExpression( oldCleanProfilePath ), newCleanProfilePath );
   }
 
   QgsSettings newSettings;

@@ -72,8 +72,7 @@ namespace QgsWms
       const QgsWmsRequest &request,
       const QgsLayerTreeGroup *layerTreeGroup,
       const QMap<QString, QgsWmsLayerInfos> &wmsLayerInfos,
-      bool projectSettings,
-      QList<QgsDateTimeRange> &parentDateRanges
+      bool projectSettings
     );
 
     void addKeywordListElement( const QgsProject *project, QDomDocument &doc, QDomElement &parent );
@@ -777,8 +776,7 @@ namespace QgsWms
     const QgsWmsRequest &request,
     const QgsLayerTreeGroup *layerTreeGroup,
     const QMap<QString, QgsWmsLayerInfos> &wmsLayerInfos,
-    bool projectSettings,
-    QList<QgsDateTimeRange> &parentDateRanges
+    bool projectSettings
   )
   {
     const auto layerIds = layerTreeGroup->findLayerIds();
@@ -794,7 +792,7 @@ namespace QgsWms
 
     // when the group is opaque we should not append any child layers
     if ( layerTreeGroup->wmsGroupRequestMode() != Qgis::WmsGroupRequestMode::Opaque )
-      appendLayersFromTreeGroup( doc, parentLayer, serverIface, project, request, layerTreeGroup, wmsLayerInfos, projectSettings, parentDateRanges );
+      appendLayersFromTreeGroup( doc, parentLayer, serverIface, project, request, layerTreeGroup, wmsLayerInfos, projectSettings );
   }
 
   QDomElement getLayersAndStylesCapabilitiesElement( QDomDocument &doc, QgsServerInterface *serverIface, const QgsProject *project, const QgsWmsRequest &request, bool projectSettings )
@@ -903,13 +901,11 @@ namespace QgsWms
       appendLayerWgs84BoundingRect( doc, layerParentElem, wmsWgs84BoundingRect );
       appendLayerCrsExtents( doc, layerParentElem, wmsCrsExtents );
 
-      QList<QgsDateTimeRange> parentDateRanges;
-      appendLayersFromTreeGroup( doc, layerParentElem, serverIface, project, request, projectLayerTreeRoot, wmsLayerInfos, projectSettings, parentDateRanges );
+      appendLayersFromTreeGroup( doc, layerParentElem, serverIface, project, request, projectLayerTreeRoot, wmsLayerInfos, projectSettings );
     }
     else
     {
-      QList<QgsDateTimeRange> parentDateRanges;
-      handleLayersFromTreeGroup( doc, layerParentElem, serverIface, project, request, projectLayerTreeRoot, wmsLayerInfos, projectSettings, parentDateRanges );
+      handleLayersFromTreeGroup( doc, layerParentElem, serverIface, project, request, projectLayerTreeRoot, wmsLayerInfos, projectSettings );
     }
 
     return layerParentElem;
@@ -1124,8 +1120,8 @@ namespace QgsWms
       return dateOnly ? dateTime.date().toString( Qt::DateFormat::ISODate ) : dateTime.toString( Qt::DateFormat::ISODate );
     }
 
-    //! Return TRUE if date only have been written, FALSE if there are date and time
-    bool writeTimeDimensionNode( QDomDocument &doc, QDomElement &layerElem, const QList<QgsDateTimeRange> &dateRanges )
+    //! Return TRUE if date only have been written, FALSE if there is datetime
+    bool writeTimeDimensionNode( QDomDocument &doc, QDomElement &layerElem, const QList<QgsDateTimeRange> &dateRanges, const QDateTime &defaultDateTime = QDateTime() )
     {
       // Apparently, for vectors allTemporalRanges is always empty :/
       // there is no way to know the type of range or the individual instants
@@ -1150,6 +1146,10 @@ namespace QgsWms
       QDomElement dimElem = doc.createElement( u"Dimension"_s );
       dimElem.setAttribute( u"name"_s, u"TIME"_s );
       dimElem.setAttribute( u"units"_s, u"ISO8601"_s );
+
+      if ( defaultDateTime.isValid() )
+        dimElem.setAttribute( u"default"_s, defaultDateTime.toString( Qt::ISODate ) );
+
       QDomText dimValuesText = doc.createTextNode( strValues.join( QChar( ',' ) ) );
       dimElem.appendChild( dimValuesText );
 
@@ -1166,8 +1166,7 @@ namespace QgsWms
       const QgsWmsRequest &request,
       const QgsLayerTreeGroup *layerTreeGroup,
       const QMap<QString, QgsWmsLayerInfos> &wmsLayerInfos,
-      bool projectSettings,
-      QList<QgsDateTimeRange> &parentDateRanges
+      bool projectSettings
     )
     {
       const QString version = request.wmsParameters().version();
@@ -1220,13 +1219,6 @@ namespace QgsWms
 
           writeServerProperties( doc, layerElem, project, treeGroupChild->serverProperties(), name, version );
 
-          // There is no style assicated with layer tree group so just use a default one
-          const QString styleName = u"default"_s;
-          QDomElement styleElem = createStyleElement( doc, styleName );
-          writeLegendUrl( doc, styleElem, treeGroupChild->serverProperties()->legendUrl(), treeGroupChild->serverProperties()->legendUrlFormat(), name, styleName, project, request, serverIface->serverSettings() );
-
-          layerElem.appendChild( styleElem );
-
           // Layer tree name
           if ( projectSettings )
           {
@@ -1236,14 +1228,35 @@ namespace QgsWms
             layerElem.appendChild( treeNameElem );
           }
 
+          handleLayersFromTreeGroup( doc, layerElem, serverIface, project, request, treeGroupChild, wmsLayerInfos, projectSettings );
 
-          QList<QgsDateTimeRange> childrenDateRanges;
-          handleLayersFromTreeGroup( doc, layerElem, serverIface, project, request, treeGroupChild, wmsLayerInfos, projectSettings, childrenDateRanges );
+          const QList<QgsServerWmsDimensionProperties::WmsDimensionInfo> wmsDimensions = treeGroupChild->serverProperties()->wmsDimensions();
+          auto it = std::find_if( wmsDimensions.constBegin(), wmsDimensions.constEnd(), []( const QgsMapLayerServerProperties::WmsDimensionInfo &dim ) {
+            return dim.name == QgsServerWmsDimensionProperties::TIME_DIMENSION_NAME;
+          } );
 
-          if ( treeGroupChild->hasWmsTimeDimension() )
+          if ( it != wmsDimensions.end() )
           {
-            writeTimeDimensionNode( doc, layerElem, childrenDateRanges );
-            parentDateRanges.append( childrenDateRanges );
+            QList<QgsDateTimeRange> childrenDateRanges;
+            QgsWms::getChildRanges( treeGroupChild, wmsLayerInfos, restrictedLayers, childrenDateRanges );
+            QDateTime defaultDateTime;
+            switch ( it->defaultDisplayType )
+            {
+              case Qgis::WmsDimensionDefaultDisplay::MinValue:
+              case Qgis::WmsDimensionDefaultDisplay::MaxValue:
+                defaultDateTime = it->defaultDisplayType == Qgis::WmsDimensionDefaultDisplay::MinValue ? QgsDateTimeRange::min( childrenDateRanges ) : QgsDateTimeRange::max( childrenDateRanges );
+                break;
+
+              case Qgis::WmsDimensionDefaultDisplay::ReferenceValue:
+                defaultDateTime = it->referenceValue().toDateTime();
+                break;
+
+              case Qgis::WmsDimensionDefaultDisplay::AllValues:
+                // no default time
+                break;
+            }
+
+            writeTimeDimensionNode( doc, layerElem, childrenDateRanges, defaultDateTime );
           }
 
           // Check if child layer elements have been added - anyway opaque groups are added even without any children
@@ -1356,7 +1369,7 @@ namespace QgsWms
               QDomElement dimElem = doc.createElement( u"Dimension"_s );
               dimElem.setAttribute( u"name"_s, dim.name );
 
-              if ( dim.name.toUpper() == "TIME"_L1 )
+              if ( dim.name.toUpper() == QgsServerWmsDimensionProperties::TIME_DIMENSION_NAME )
               {
                 timeDimensionAdded = true;
               }
@@ -1369,17 +1382,17 @@ namespace QgsWms
               {
                 dimElem.setAttribute( u"unitSymbol"_s, dim.unitSymbol );
               }
-              if ( !values.isEmpty() && dim.defaultDisplayType == QgsMapLayerServerProperties::WmsDimensionInfo::MinValue )
+              if ( !values.isEmpty() && dim.defaultDisplayType == Qgis::WmsDimensionDefaultDisplay::MinValue )
               {
                 dimElem.setAttribute( u"default"_s, values.first().toString() );
               }
-              else if ( !values.isEmpty() && dim.defaultDisplayType == QgsMapLayerServerProperties::WmsDimensionInfo::MaxValue )
+              else if ( !values.isEmpty() && dim.defaultDisplayType == Qgis::WmsDimensionDefaultDisplay::MaxValue )
               {
                 dimElem.setAttribute( u"default"_s, values.last().toString() );
               }
-              else if ( dim.defaultDisplayType == QgsMapLayerServerProperties::WmsDimensionInfo::ReferenceValue )
+              else if ( dim.defaultDisplayType == Qgis::WmsDimensionDefaultDisplay::ReferenceValue )
               {
-                dimElem.setAttribute( u"default"_s, dim.referenceValue.toString() );
+                dimElem.setAttribute( u"default"_s, dim.referenceValue().toString() );
               }
               dimElem.setAttribute( u"multipleValues"_s, u"1"_s );
               dimElem.setAttribute( u"nearestValue"_s, u"0"_s );
@@ -1408,8 +1421,6 @@ namespace QgsWms
             // Add all values
             const QList<QgsDateTimeRange> allRanges { l->temporalProperties()->allTemporalRanges( l ) };
             const bool dateOnly = writeTimeDimensionNode( doc, layerElem, allRanges );
-
-            parentDateRanges.append( allRanges );
 
             QDomElement timeExtentElem = doc.createElement( u"Extent"_s );
             timeExtentElem.setAttribute( u"name"_s, u"TIME"_s );
