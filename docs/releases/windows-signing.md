@@ -63,6 +63,18 @@ Manual Windows rebuilds must be dispatched **on the release tag**, with
 `release_tag` and `ref_to_build` resolving to the same commit. Manual macOS
 packaging also verifies the source workflow commit and requires notarization.
 
+## Token lifetime during packaging
+
+The Azure login uses a federated GitHub OIDC token. The resulting access token
+lasts about an hour and the CLI cannot renew it, while the Trusted Signing library
+takes its token from the CLI cache. On `strata-v1.6.7` the package step started 31
+minutes after the first login, reused that cached token and failed with
+`SignerSign()` after 730 signed files, 68 minutes after the first login. The
+workflows therefore clear the CLI cache (`az account clear`) right before the
+refresh login that precedes packaging, and `windows-signing-files.ps1` logs in
+again with a fresh OIDC token every 40 minutes and once more after a SignTool
+failure, using `AZURE_CLIENT_ID`/`AZURE_TENANT_ID` from the package step.
+
 ## Windows 11 acceptance
 
 Use a clean Windows 11 x64 machine with Smart App Control **On**, not Evaluation,

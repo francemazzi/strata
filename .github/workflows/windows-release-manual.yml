@@ -231,6 +231,13 @@ jobs:
         shell: bash
         run: cmake --build "${{ github.workspace }}/build" --config Release
 
+      - name: 🔐 Clear cached Azure tokens before package signing
+        # A federated token from the first login stays in the CLI cache while it is valid and
+        # cannot be renewed; clearing it makes the next login issue a fresh one for packaging.
+        if: ${{ env.IS_STRATA_RELEASE == 'true' }}
+        shell: pwsh
+        run: az account clear --only-show-errors
+
       - name: 🔐 Refresh Azure login before package signing
         if: ${{ env.IS_STRATA_RELEASE == 'true' }}
         uses: azure/login@2dd0bbf4064d5a1812889dc200bb8eed2597f82a # v3
@@ -241,6 +248,11 @@ jobs:
 
       - name: 📦 Package
         shell: bash
+        env:
+          # Lets scripts/ci/windows-signing-files.ps1 renew the federated Azure login with a
+          # fresh GitHub OIDC token while signing the package.
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: cmake --build "${{ github.workspace }}/build" --target bundle --config Release
 
       - name: Upload NSIS CPack log on failure
