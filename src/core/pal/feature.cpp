@@ -897,7 +897,7 @@ std::size_t FeaturePart::createCandidatesAlongLine( std::vector< std::unique_ptr
   return candidates;
 }
 
-std::size_t FeaturePart::createHorizontalCandidatesAlongLine( std::vector<std::unique_ptr<LabelPosition> > &lPos, PointSet *mapShape, Pal *pal )
+std::size_t FeaturePart::createHorizontalCandidatesAlongLine( std::vector<std::unique_ptr<LabelPosition> > &lPos, PointSet *mapShape, Pal *pal, double angle )
 {
   const double labelWidth = getLabelWidth();
   const double labelHeight = getLabelHeight();
@@ -942,6 +942,11 @@ std::size_t FeaturePart::createHorizontalCandidatesAlongLine( std::vector<std::u
 
   const Qgis::TextAnchorPoint textPoint = mLF->lineAnchorTextPoint();
 
+  const double cosAngle = std::cos( angle );
+  const double sinAngle = std::sin( angle );
+  const double halfHeightX = ( labelHeight / 2.0 ) * sinAngle;
+  const double halfHeightY = ( labelHeight / 2.0 ) * cosAngle;
+
   double candidateCenterX, candidateCenterY;
   int i = 0;
   while ( currentDistanceAlongLine <= totalLineLength )
@@ -958,24 +963,27 @@ std::size_t FeaturePart::createHorizontalCandidatesAlongLine( std::vector<std::u
     cost /= 1000;                                                                                                      // < 0, 0.0005 >
 
     double labelX = 0;
+    double labelY = 0;
     switch ( textPoint )
     {
       case Qgis::TextAnchorPoint::StartOfText:
-        labelX = candidateCenterX;
+        labelX = candidateCenterX + halfHeightX;
+        labelY = candidateCenterY - halfHeightY;
         break;
       case Qgis::TextAnchorPoint::CenterOfText:
-        labelX = candidateCenterX - labelWidth / 2;
+        labelX = candidateCenterX - ( labelWidth / 2.0 ) * cosAngle + halfHeightX;
+        labelY = candidateCenterY - ( labelWidth / 2.0 ) * sinAngle - halfHeightY;
         break;
       case Qgis::TextAnchorPoint::EndOfText:
-        labelX = candidateCenterX - labelWidth;
+        labelX = candidateCenterX - labelWidth * cosAngle + halfHeightX;
+        labelY = candidateCenterY - labelWidth * sinAngle - halfHeightY;
         break;
       case Qgis::TextAnchorPoint::FollowPlacement:
         // not possible here
         break;
     }
     lPos.emplace_back(
-      std::make_unique<
-        LabelPosition >( i, labelX, candidateCenterY - labelHeight / 2, labelWidth, labelHeight, 0, cost, this, LabelPosition::LabelDirectionToLine::SameDirection, Qgis::LabelQuadrantPosition::Over )
+      std::make_unique< LabelPosition >( i, labelX, labelY, labelWidth, labelHeight, angle, cost, this, LabelPosition::LabelDirectionToLine::SameDirection, Qgis::LabelQuadrantPosition::Over )
     );
 
     currentDistanceAlongLine += lineStepDistance;
@@ -1170,7 +1178,24 @@ std::size_t FeaturePart::createCandidatesAlongLineNearStraightSegments( std::vec
         // this only applies to non closed linestrings, since the middle of a closed linestring is effectively arbitrary
         // and irrelevant to labeling
         double costLineCenter = 2 * std::fabs( labelTextAnchor - lineAnchorPoint ) / totalLineLength; // 0 -> 1
-        cost += costLineCenter * 0.0005;                                                              // < 0, 0.0005 >
+
+        // add a little tie breaker amount -- otherwise if we are generating an even number of candidates, we may end up with
+        // two with exactly the same cost centered over the mid point of the feature. So add a tiny PLACEMENT_TIEBREAKER amount
+        // so that one of these is always preferred, giving us a stable labeling solution:
+        // eg:
+        //   Line:  ============|============[ Anchor ]==========|==============
+        //                      |  <-same dist-> | <-same dist-> |
+        //              [-- Candidate --]        |       [-- Candidate --]
+        //                      |                |               |
+        //                 Anchor < Mid          |          Anchor > Mid
+        //                                       |     cost += PLACEMENT_TIEBREAKER
+        if ( labelTextAnchor > lineAnchorPoint )
+        {
+          constexpr double PLACEMENT_TIEBREAKER = 0.000001234;
+          cost += PLACEMENT_TIEBREAKER;
+        }
+
+        cost += costLineCenter * 0.0005; // < 0, 0.0005 >
       }
 
       if ( placementIsFlexible )
@@ -1271,6 +1296,7 @@ std::size_t FeaturePart::createCandidatesAlongLineNearStraightSegments( std::vec
       }
       else if ( mLF->layer()->arrangement() == Qgis::LabelPlacement::Horizontal )
       {
+        // TODO: this code is likely dead -- it doesn't look possible to reach here with a Horizontal arrangement
         lPos.emplace_back(
           std::make_unique<
             LabelPosition >( i, candidateStartX - labelWidth / 2, candidateStartY - labelHeight / 2, labelWidth, labelHeight, 0, cost, this, LabelPosition::LabelDirectionToLine::SameDirection, Qgis::LabelQuadrantPosition::Over )
@@ -1520,6 +1546,7 @@ std::size_t FeaturePart::createCandidatesAlongLineNearMidpoint( std::vector< std
     }
     else if ( mLF->layer()->arrangement() == Qgis::LabelPlacement::Horizontal )
     {
+      // TODO: this code is likely dead -- it doesn't look possible to reach here with a Horizontal arrangement
       lPos.emplace_back(
         std::make_unique<
           LabelPosition >( i, candidateStartX - labelWidth / 2, candidateStartY - labelHeight / 2, labelWidth, labelHeight, 0, cost, this, LabelPosition::LabelDirectionToLine::SameDirection, Qgis::LabelQuadrantPosition::Over )
@@ -1981,7 +2008,7 @@ std::size_t FeaturePart::createDefaultCurvedCandidatesAlongLine( std::vector<std
         LabelPosition *currentPos = p.get();
         while ( within && currentPos )
         {
-          within = GeomFunction::containsCandidate( mLF->permissibleZonePrepared(), currentPos->getX(), currentPos->getY(), currentPos->getWidth(), currentPos->getHeight(), currentPos->getAlpha() );
+          within = GeomFunction::containsCandidate( mLF->permissibleZonePrepared(), currentPos->getX(), currentPos->getY(), currentPos->getWidth(), currentPos->getHeight(), currentPos->angleRadians() );
           currentPos = currentPos->nextPart();
         }
         if ( !within )
@@ -2092,7 +2119,7 @@ std::size_t FeaturePart::createCurvedCandidateWithCharactersAtVertices( std::vec
     LabelPosition *currentPos = firstPosition.get();
     while ( within && currentPos )
     {
-      within = GeomFunction::containsCandidate( mLF->permissibleZonePrepared(), currentPos->getX(), currentPos->getY(), currentPos->getWidth(), currentPos->getHeight(), currentPos->getAlpha() );
+      within = GeomFunction::containsCandidate( mLF->permissibleZonePrepared(), currentPos->getX(), currentPos->getY(), currentPos->getWidth(), currentPos->getHeight(), currentPos->angleRadians() );
       currentPos = currentPos->nextPart();
     }
     if ( !within )
@@ -2587,7 +2614,7 @@ std::vector< std::unique_ptr< LabelPosition > > FeaturePart::createCandidates( P
 
       case GEOS_LINESTRING:
         if ( mLF->layer()->arrangement() == Qgis::LabelPlacement::Horizontal )
-          createHorizontalCandidatesAlongLine( lPos, this, pal );
+          createHorizontalCandidatesAlongLine( lPos, this, pal, angleInRadians );
         else if ( mLF->layer()->isCurved() )
           createCurvedCandidatesAlongLine( lPos, this, true, pal );
         else
@@ -2661,6 +2688,22 @@ std::vector< std::unique_ptr< LabelPosition > > FeaturePart::createCandidates( P
           }
         }
       }
+    }
+  }
+
+  if ( !lPos.empty() && pal->flags().testFlag( Qgis::LabelingFlag::SingleCandidateOnly ) )
+  {
+    // retain only the single least-cost candidate
+    // Note that we didn't handle this flag earlier, as we wanted to generate the full number
+    // of candidates considering the geometry of the feature, and then only NOW cull to the best
+    // one.
+    auto minIt = std::min_element( lPos.begin(), lPos.end(), []( const std::unique_ptr< LabelPosition > &a, const std::unique_ptr< LabelPosition > &b ) { return a->cost() < b->cost(); } );
+
+    if ( minIt != lPos.end() )
+    {
+      std::unique_ptr< LabelPosition > bestCandidate = std::move( *minIt );
+      lPos.clear();
+      lPos.emplace_back( std::move( bestCandidate ) );
     }
   }
 

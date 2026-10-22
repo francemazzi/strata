@@ -1389,8 +1389,10 @@ Example:
 Splits this geometry according to a given curve.
 
 :param curve: the curve that splits the geometry
-:param preserveCircular: whether if circular strings are preserved after
-                         splitting
+:param preserveCircular: whether if circular strings are reconstructed
+                         from segmentized geometries after splitting.
+                         From GEOS 3.15 on, this parameter is unused,
+                         and circular strings are preserved.
 :param topological: ``True`` if topological editing is enabled
 :param splitFeature: Set to ``True`` if you want to split a feature,
                      otherwise set to ``False`` to split parts
@@ -1401,7 +1403,8 @@ Splits this geometry according to a given curve.
            interpolation of the z value is performed on the geometry at
            split points, see example.
          - topologyTestPoints: points that need to be tested for
-           topological completeness in the dataset
+           topological completeness in the dataset. Points from curve
+           geometries are not yet fully supported.
 
 .. versionadded:: 3.16
 %End
@@ -1414,7 +1417,7 @@ Replaces a part of this geometry with another line
 %End
 
 
-    QgsGeometry makeDifference( const QgsGeometry &other, QgsFeedback* feedback = 0 ) const;
+ QgsGeometry makeDifference( const QgsGeometry &other, QgsFeedback* feedback = 0 ) const /Deprecated="Since 4.4. Use QgsGeometry.difference()."/;
 %Docstring
 Returns the geometry formed by modifying this geometry such that it does
 not intersect the other geometry.
@@ -1425,6 +1428,10 @@ not intersect the other geometry.
 
 :return: difference geometry, or empty geometry if difference could not
          be calculated
+
+.. deprecated:: 4.4
+
+   Use :py:func:`QgsGeometry.difference()`.
 %End
 
     QgsRectangle boundingBox() const;
@@ -3252,6 +3259,8 @@ Validates geometry and produces a list of geometry errors. The
 
 The ``flags`` parameter indicates optional flags which control the type
 of validity checking performed.
+
+:raises QgsNotSupportedException: when method is not supported
 %End
 
     void normalize();

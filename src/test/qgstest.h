@@ -98,7 +98,6 @@ inline void qgsTestInstallCrashHandler()
     qputenv( "QGIS_CUSTOM_CONFIG_PATH", settingsDir.path().toUtf8() ); \
     QgsApplication app( argc, argv, false );                           \
     app.setAttribute( Qt::AA_Use96Dpi, true );                         \
-    QTEST_DISABLE_KEYPAD_NAVIGATION                                    \
     TestObject tc;                                                     \
     QTEST_SET_MAIN_SOURCE_PATH                                         \
     return QTest::qExec( &tc, argc, argv );                            \

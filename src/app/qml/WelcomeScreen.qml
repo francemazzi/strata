@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Effects
 import QtQuick.Controls.Material
 
 import org.qgis.app
@@ -17,8 +16,8 @@ Item {
   property real titleFontSize: Application.font.pointSize * 1.3 * layoutSizeFactor
   property real largeFontSize: Application.font.pointSize * 1.1 * layoutSizeFactor
   property real normalFontSize: Application.font.pointSize * layoutSizeFactor
-  property real smallFontSize: Application.font.pointSize * 0.925 * layoutSizeFactor
-  property real tinyFontSize: Application.font.pointSize * 0.875 * layoutSizeFactor
+  property real smallFontSize: Application.font.pointSize * 0.95 * layoutSizeFactor
+  property real tinyFontSize: Application.font.pointSize * 0.925 * layoutSizeFactor
 
   width: 2100
   height: 1420
@@ -326,6 +325,41 @@ Item {
 
               model: templateProjectsModel
 
+              // Group the templates by directory: a header is shown each time the
+              // section changes between two consecutive projects.
+              section.property: "Section"
+              section.criteria: ViewSection.FullString
+              section.delegate: Item {
+                id: sectionHeader
+                required property string section
+
+                width: templatesListView.width - 12
+                height: section === "" ? 24 : sectionTitle.implicitHeight + 20
+
+                Text {
+                  id: sectionTitle
+                  visible: sectionHeader.section !== ""
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.topMargin: 8
+                  anchors.leftMargin: 4
+                  text: sectionHeader.section
+                  font.pointSize: smallFontSize
+                  font.bold: true
+                  color: "#ffffff"
+                  elide: Text.ElideMiddle
+                }
+
+                Rectangle {
+                  width: parent.width
+                  height: 1
+                  color: "#566775"
+                  anchors.bottom: parent.bottom
+                  anchors.bottomMargin: sectionHeader.section === "" ? 12 : 6
+                }
+              }
+
               delegate: ProjectCard {
                 width: templatesListView.width - 12
                 backgroundColor: CanvasColor || "#ffffff"
@@ -502,7 +536,7 @@ Item {
                   anchors.fill: parent
                   anchors.margins: 16
                   text: qsTr("Strata is an AI-native GIS desktop built as an independent, unofficial fork of QGIS. It combines QGIS cartography, editing, analysis, and plugin compatibility with a built-in assistant for working with layers, projects, and geospatial workflows.")
-                  font.pointSize: tinyFontSize
+                  font.pointSize: smallFontSize
                   color: "black"
                   wrapMode: Text.WordWrap
                   lineHeight: 1.3
@@ -532,7 +566,7 @@ Item {
                   Text {
                     Layout.fillWidth: true
                     text: qsTr("Would you like to enable the QGIS upstream news feed to stay updated on QGIS releases, features, and community highlights?")
-                    font.pointSize: tinyFontSize
+                    font.pointSize: smallFontSize
                     color: "black"
                     wrapMode: Text.WordWrap
                   }
@@ -680,10 +714,10 @@ Item {
     UpdateNotificationBar {
       id: pluginsUpdateBar
       Layout.fillWidth: true
-      Layout.preferredHeight: 50
-      radius: 16
+      Layout.preferredHeight: 54
+      radius: mainCard.radius
       visible: false
-      color: mainCard.color
+      color: "#ed7913"
 
       onInstallClicked: {
         visible = false;
@@ -694,8 +728,8 @@ Item {
     UpdateNotificationBar {
       id: qgisUpdateBar
       Layout.fillWidth: true
-      Layout.preferredHeight: 50
-      radius: 16
+      Layout.preferredHeight: 54
+      radius: mainCard.radius
       visible: false
       color: mainCard.color
       buttonText: qsTr("Open GitHub Releases")

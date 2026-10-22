@@ -188,7 +188,8 @@ unsigned int QgsCustomization::QgsItem::childrenCount() const
 
 void QgsCustomization::QgsItem::insertChild( int position, std::unique_ptr<QgsItem> item )
 {
-  if ( position < 0 && position >= static_cast<int>( mChildItemList.size() ) )
+  // NOTE: strict inequality is not appropriate here -- it must be possible to have position equal to the current size to allow inserting items at the end of the list
+  if ( position < 0 || position > static_cast<int>( mChildItemList.size() ) )
   {
     QgsDebugError( u"Insert item impossible, invalid position"_s );
     return;
@@ -201,7 +202,7 @@ void QgsCustomization::QgsItem::insertChild( int position, std::unique_ptr<QgsIt
 
 void QgsCustomization::QgsItem::deleteChild( int position )
 {
-  if ( position < 0 && position >= static_cast<int>( mChildItemList.size() ) )
+  if ( position < 0 || position >= static_cast<int>( mChildItemList.size() ) )
   {
     QgsDebugError( u"Delete item impossible, invalid position"_s );
     return;
@@ -1219,9 +1220,13 @@ void QgsCustomization::loadApplicationToolBars()
       mToolBars->addChild( std::move( toolBar ) );
       t = mToolBars->lastChild<QgsToolBarItem>();
     }
+    else
+    {
+      t->setTitle( tb->windowTitle() );
+    }
 
     addActions( t, tb );
-    t->setWasVisible( tb->isVisible() );
+    t->setWasVisible( !tb->isHidden() );
   }
 }
 
@@ -1305,8 +1310,12 @@ void QgsCustomization::loadApplicationDocks()
       mDocks->addChild( std::move( dock ) );
       d = mDocks->lastChild<QgsDockItem>();
     }
+    else
+    {
+      d->setTitle( dw->windowTitle() );
+    }
 
-    d->setWasVisible( dw->isVisible() );
+    d->setWasVisible( !dw->isHidden() );
   }
 }
 
@@ -1315,20 +1324,29 @@ void QgsCustomization::loadApplicationBrowserItems()
   if ( !mBrowserItems )
   {
     mBrowserItems = std::make_unique<QgsBrowserElementsItem>();
-    const QList<QPair<QString, QString>> staticItems = {
-      { u"special:Home"_s, QObject::tr( "Home Folder" ) },
-      { u"special:ProjectHome"_s, QObject::tr( "Project Home Folder" ) },
-      { u"special:Favorites"_s, QObject::tr( "Favorites Folder" ) },
-      { u"special:Drives"_s, QObject::tr( "Drive Folders (e.g. C:\\)" ) },
-#ifdef Q_OS_MAC
-      { u"special:Volumes"_s, QObject::tr( "Volume Folder (MacOS only)" ) }
-#endif
-    };
+  }
 
-    for ( const QPair<QString, QString> &staticItem : staticItems )
+  const QList<QPair<QString, QString>> staticItems = {
+    { u"special:Home"_s, QObject::tr( "Home Folder" ) },
+    { u"special:ProjectHome"_s, QObject::tr( "Project Home Folder" ) },
+    { u"special:Favorites"_s, QObject::tr( "Favorites Folder" ) },
+    { u"special:Drives"_s, QObject::tr( "Drive Folders (e.g. C:\\)" ) },
+#ifdef Q_OS_MAC
+    { u"special:Volumes"_s, QObject::tr( "Volume Folder (MacOS only)" ) }
+#endif
+  };
+
+  for ( const QPair<QString, QString> &staticItem : staticItems )
+  {
+    QgsBrowserElementItem *b = mBrowserItems->getChild<QgsBrowserElementItem>( staticItem.first );
+    if ( !b )
     {
       auto browserItem = std::make_unique<QgsBrowserElementItem>( staticItem.first, staticItem.second, mBrowserItems.get() );
       mBrowserItems->addChild( std::move( browserItem ) );
+    }
+    else
+    {
+      b->setTitle( staticItem.second );
     }
   }
 
@@ -1339,10 +1357,16 @@ void QgsCustomization::loadApplicationBrowserItems()
     const QString name = pr->name();
     if ( !name.isEmpty() && capabilities != Qgis::DataItemProviderCapabilities( Qgis::DataItemProviderCapability::NoCapabilities ) )
     {
-      if ( !mBrowserItems->getChild<QgsBrowserElementItem>( name ) )
+      QgsBrowserElementItem *b = mBrowserItems->getChild<QgsBrowserElementItem>( name );
+      const QString title = QObject::tr( "Data Item Provider: %1" ).arg( name );
+      if ( !b )
       {
-        auto browserItem = std::make_unique<QgsBrowserElementItem>( name, QObject::tr( "Data Item Provider: %1" ).arg( name ), mBrowserItems.get() );
+        auto browserItem = std::make_unique<QgsBrowserElementItem>( name, title, mBrowserItems.get() );
         mBrowserItems->addChild( std::move( browserItem ) );
+      }
+      else
+      {
+        b->setTitle( title );
       }
     }
   }
@@ -1370,7 +1394,7 @@ void QgsCustomization::loadApplicationStatusBarWidgets()
     if ( !s )
     {
       auto statusBarWidgetItem = std::make_unique<QgsStatusBarWidgetItem>( name, mStatusBarWidgets.get() );
-      statusBarWidgetItem->setVisible( statusBarWidget->isVisible() );
+      statusBarWidgetItem->setVisible( !statusBarWidget->isHidden() );
       mStatusBarWidgets->addChild( std::move( statusBarWidgetItem ) );
     }
   }

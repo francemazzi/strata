@@ -269,7 +269,6 @@
           ]
         },
         "qtimageformats",
-        "qtquickcontrols2",
         "qttools",
         "qtpositioning"
       ]
@@ -290,6 +289,12 @@
       "dependencies": [
         "qscintilla",
         "qwt"
+      ]
+    },
+    "hana": {
+      "description": "Build with SAP HANA Spatial support",
+      "dependencies": [
+        "odbccpp"
       ]
     },
     "opencl": {

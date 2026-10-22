@@ -402,7 +402,7 @@ namespace
     }
     layer->dataProvider()->addFeatures( features );
     auto *root = new QgsRuleBasedRenderer::Rule( nullptr );
-    root->appendChild( new QgsRuleBasedRenderer::Rule( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ), 0, 0, u"ai_test_slow_render()"_s ) );
+    root->appendChild( new QgsRuleBasedRenderer::Rule( QgsSymbol::defaultSymbol( Qgis::GeometryType::Point ).release(), 0, 0, u"ai_test_slow_render()"_s ) );
     layer->setRenderer( new QgsRuleBasedRenderer( root ) );
     canvas.resize( 400, 300 );
     canvas.setDestinationCrs( QgsCoordinateReferenceSystem( u"EPSG:4326"_s ) );

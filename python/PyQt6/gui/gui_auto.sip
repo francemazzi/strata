@@ -48,6 +48,7 @@
 %Include auto_generated/qgsdataitemguiproviderregistry.sip
 %Include auto_generated/qgsdataitemguiproviderutils.sip
 %Include auto_generated/qgsdatasourceselectdialog.sip
+%Include auto_generated/qgsdatetimewithtimezonewidget.sip
 %Include auto_generated/qgsdbrelationshipwidget.sip
 %Include auto_generated/qgsdecoratedscrollbar.sip
 %Include auto_generated/qgsnewdatabasetablenamewidget.sip
@@ -226,6 +227,7 @@
 %Include auto_generated/qgstemporalcontrollerwidget.sip
 %Include auto_generated/qgstextformatwidget.sip
 %Include auto_generated/qgstextpreview.sip
+%Include auto_generated/qgstoolbuttonaction.sip
 %Include auto_generated/qgstooltipcombobox.sip
 %Include auto_generated/qgstreewidgetitem.sip
 %Include auto_generated/qgsunitselectionwidget.sip
@@ -451,17 +453,16 @@
 %Include auto_generated/processing/qgsprocessingoutputdestinationwidget.sip
 %Include auto_generated/processing/qgsprocessingparameterdefinitionwidget.sip
 %Include auto_generated/processing/qgsprocessingparameterswidget.sip
+%Include auto_generated/processing/qgsprocessingprovideractions.sip
 %Include auto_generated/processing/qgsprocessingrecentalgorithmlog.sip
+%Include auto_generated/processing/qgsprocessingscripteditordialog.sip
 %Include auto_generated/processing/qgsprocessingtoolboxmodel.sip
 %Include auto_generated/processing/qgsprocessingtoolboxtreeview.sip
+%Include auto_generated/processing/qgsprocessingwidgetcontext.sip
 %Include auto_generated/processing/qgsprocessingwidgetwrapper.sip
-%Include auto_generated/processing/models/qgsmodelarrowitem.sip
-%Include auto_generated/processing/models/qgsmodelcomponentgraphicitem.sip
 %Include auto_generated/processing/models/qgsmodeldesignerconfigwidget.sip
 %Include auto_generated/processing/models/qgsmodeldesignerdialog.sip
-%Include auto_generated/processing/models/qgsmodelgraphicitem.sip
 %Include auto_generated/processing/models/qgsmodelgraphicsscene.sip
-%Include auto_generated/processing/models/qgsmodelgraphicsview.sip
 %Include auto_generated/proj/qgscoordinateboundspreviewmapwidget.sip
 %Include auto_generated/proj/qgscoordinateoperationwidget.sip
 %Include auto_generated/proj/qgscoordinatereferencesystemmodel.sip

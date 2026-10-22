@@ -167,7 +167,7 @@ QgsWelcomeScreen::QgsWelcomeScreen( bool skipVersionCheck, QWidget *parent )
   }
 
   QgsSettings settings;
-  mVersionInfo = new QgsVersionInfo();
+  mVersionInfo = new QgsVersionInfo( this );
   if ( !QgsApplication::isRunningFromBuildDir() && settings.value( u"/qgis/allowVersionCheck"_s, true ).toBool() && settingsCheckVersion->value() && !skipVersionCheck )
   {
     connect( mVersionInfo, &QgsVersionInfo::versionInfoAvailable, this, &QgsWelcomeScreen::versionInfoReceived );
@@ -299,13 +299,14 @@ void QgsWelcomeScreen::versionInfoReceived()
     return;
   }
 
-  QgsVersionInfo *versionInfo = qobject_cast<QgsVersionInfo *>( sender() );
-  Q_ASSERT( versionInfo );
+  Q_ASSERT( mVersionInfo );
 
-  if ( versionInfo->newVersionAvailable() )
+  if ( mVersionInfo->newVersionAvailable() )
   {
-    emit mWelcomeScreenController->newVersionAvailable( versionInfo->latestVersion(), versionInfo->releaseUrl() );
+    emit mWelcomeScreenController->newVersionAvailable( mVersionInfo->latestVersion(), mVersionInfo->releaseUrl() );
   }
+  mVersionInfo->deleteLater();
+  mVersionInfo = nullptr;
 }
 
 void QgsWelcomeScreen::pluginUpdatesAvailableReceived( const QStringList &plugins )

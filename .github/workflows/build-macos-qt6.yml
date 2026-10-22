@@ -56,7 +56,7 @@ jobs:
 
     steps:
       - name: 🐣 Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.release_tag || github.ref }}
@@ -84,7 +84,7 @@ jobs:
         run: python3 platform/macos/test_pymacdeployqt.py
 
       - name: 🐩 Install CMake and Ninja
-        uses: lukka/get-cmake@f5b8fbb4d77cec1acc5a5f9f0df4beffaf5d98d9 # latest
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # latest
         with:
           # Pin to specific version to avoid rebuilding too often
           # Also helps to avoid spurious build failures like https://github.com/qgis/QGIS/pull/47098
@@ -125,7 +125,7 @@ jobs:
           sudo mkdir -p /usr/local/gfortran
           sudo ln -sf /usr/local/Cellar/gcc@${GCC_VERSION}/*/lib/gcc/${GCC_VERSION} /usr/local/gfortran/lib
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
 
@@ -142,7 +142,7 @@ jobs:
           p12-password: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
 
       - name: 🛍️ Setup ccache
-        uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03  # v1.2.23
+        uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d  # v1.2.24
         with:
           max-size: 500M
           key: build-ccache-${{ matrix.triplet }}-qt6-${{ inputs.release_tag || github.event.pull_request.base.ref || github.ref_name }}
@@ -259,15 +259,14 @@ jobs:
       - name: 📦 Create SDK
         if: (github.event_name == 'workflow_dispatch' && !inputs.release_tag) || github.event_name == 'release'
         run: |
-          ${VCPKG_ROOT}/vcpkg export --zip --output-dir=./sdk --x-install-root=./build/vcpkg_installed  --x-manifest-root=vcpkg
+          ${VCPKG_ROOT}/vcpkg export --zip --output=strata-sdk-${{ matrix.triplet }} --output-dir=./sdk --x-install-root=./build/vcpkg_installed --x-manifest-root=vcpkg
 
       - name: 📤 Upload sdk
         if: (github.event_name == 'workflow_dispatch' && !inputs.release_tag) || github.event_name == 'release'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: strata-sdk-${{ matrix.triplet }}
-          path: |
-            sdk/vcpkg-export-*.zip
+          archive: false
+          path: sdk/strata-sdk-${{ matrix.triplet }}.zip
 
       - name: 🌋 Build
         run: |
@@ -294,7 +293,7 @@ jobs:
     needs: build
     steps:
       - name: 🐣 Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.release_tag || github.ref }}

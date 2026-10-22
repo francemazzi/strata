@@ -96,6 +96,15 @@ class CORE_EXPORT QgsCurvePolygon : public QgsSurface
 
       return true;
     }
+
+    /**
+     * Removes the ring with the specified \a ringId
+     *
+     * If \a ringId is 0 the exterior ring is removed, promoting the first
+     * interior ring (if any) to be the new exterior ring. Otherwise the
+     * interior ring at index \a ringId - 1 is removed.
+     */
+    void removeRing( int ringId );
 #endif
   public:
     // clang-format off
@@ -373,7 +382,6 @@ class CORE_EXPORT QgsCurvePolygon : public QgsSurface
 
     bool insertVertex( QgsVertexId position, const QgsPoint &vertex ) override;
     bool moveVertex( QgsVertexId position, const QgsPoint &newPos ) override;
-    bool deleteVertex( QgsVertexId position ) override;
     bool deleteVertices( const QSet<QgsVertexId> &positions ) override;
     bool hasVertex( QgsVertexId position ) const override;
 
