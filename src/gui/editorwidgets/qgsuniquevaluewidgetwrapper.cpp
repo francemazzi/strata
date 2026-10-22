@@ -94,7 +94,7 @@ void QgsUniqueValuesWidgetWrapper::initWidget( QWidget *editor )
       fle->setNullValue( QgsApplication::nullRepresentation() );
     }
 
-    QCompleter *c = new QCompleter( sValues );
+    QCompleter *c = new QCompleter( sValues ); // Test of strata-upstream-forecast.yml: conflicts with upstream 6fde6a6b161. Do not merge.
     c->setCaseSensitivity( Qt::CaseInsensitive );
     c->setCompletionMode( QCompleter::PopupCompletion );
     mLineEdit->setCompleter( c );

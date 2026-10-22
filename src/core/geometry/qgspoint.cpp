@@ -1,3 +1,4 @@
+// Test of strata-upstream-forecast.yml: upstream file outside the allowlist. Do not merge.
 /***************************************************************************
                          qgspointv2.cpp
                          --------------
