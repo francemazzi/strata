@@ -2,9 +2,8 @@ name: Sync QGIS upstream
 
 on:
   schedule:
-    # Target ~02:00 Europe/Rome. GitHub Actions often delays cron jobs by hours;
-    # scheduled runs are accepted any time between 02:00 and 09:59 Europe/Rome.
-    - cron: '0 0 * * *'
+    # 01:00 UTC: 02:00 Europe/Rome in winter, 03:00 in summer. GitHub often starts
+    # scheduled jobs hours late; the sync does not depend on the exact hour.
     - cron: '0 1 * * *'
   workflow_dispatch:
 
@@ -27,44 +26,40 @@ jobs:
       UPSTREAM_BRANCH: master
       SYNC_BRANCH: automation/qgis-upstream-master
       CONFLICT_ISSUE_TITLE: QGIS upstream sync conflicts
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # STRATA_SYNC_TOKEN is a fine-grained PAT (Contents, Pull requests, Issues and Workflows:
+      # read and write on this repository). With it the sync PR gets its CI without a maintainer
+      # approving the runs, and pushes that bring upstream changes to .github/workflows are
+      # accepted. Without it the job falls back to GITHUB_TOKEN: the pull_request runs of the
+      # sync PR then wait for approval, and pushes touching workflow files are rejected.
+      GH_TOKEN: ${{ secrets.STRATA_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.STRATA_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Check schedule window
-        id: schedule_window
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Manual dispatch: running upstream sync."
-            exit 0
-          fi
-
-          local_hour=$((10#$(TZ=Europe/Rome date +%H)))
-          if [ "$local_hour" -ge 2 ] && [ "$local_hour" -le 9 ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Scheduled run within Europe/Rome window 02:00-09:59 (hour ${local_hour})."
-          else
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "Outside sync window; Europe/Rome hour is ${local_hour}."
-          fi
-
       - name: Checkout
-        if: steps.schedule_window.outputs.should_run == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: true
+          # git push uses the credentials stored by checkout, not GH_TOKEN.
+          token: ${{ secrets.STRATA_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Report token in use
+        shell: bash
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.STRATA_SYNC_TOKEN != '' }}
+        run: |
+          if [ "${HAS_SYNC_TOKEN}" = "true" ]; then
+            echo "Using STRATA_SYNC_TOKEN: the sync PR CI starts without approval."
+          else
+            echo "::warning::STRATA_SYNC_TOKEN is not set: the sync PR CI will wait for a maintainer to approve it."
+          fi
 
       - name: Configure git identity
-        if: steps.schedule_window.outputs.should_run == 'true'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Merge QGIS upstream into sync branch
-        if: steps.schedule_window.outputs.should_run == 'true'
         shell: bash
         run: scripts/ci/sync-qgis-upstream.sh

@@ -1,0 +1,97 @@
+name: Strata upstream forecast
+
+# On every PR to master: predicts whether the PR adds conflicts for the next QGIS upstream sync
+# (comment on the PR) and fails when it modifies upstream files outside .strata/upstream-allowlist.txt
+# without the `upstream-touch` label. See scripts/ci/strata-upstream-forecast.sh.
+
+on:
+  pull_request:
+    branches:
+      - master
+    # labeled/unlabeled re-run the check when `upstream-touch` is added or removed. Other labels
+    # re-run it too: skipping would replace a failed check with a skipped, passing one.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: strata-upstream-forecast-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout PR merge commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history without file contents: merge-tree and diff need commits and trees,
+          # and fetch the few blobs they read on demand.
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Fetch QGIS upstream master
+        shell: bash
+        run: |
+          git remote add qgis-upstream https://github.com/qgis/QGIS.git
+          git config remote.qgis-upstream.promisor true
+          git config remote.qgis-upstream.partialclonefilter blob:none
+          git fetch --no-tags --filter=blob:none qgis-upstream +refs/heads/master:refs/remotes/qgis-upstream/master
+
+      - name: Forecast upstream conflicts and check the allowlist
+        id: forecast
+        shell: bash
+        env:
+          OVERRIDE_LABEL_PRESENT: ${{ contains(github.event.pull_request.labels.*.name, 'upstream-touch') }}
+          REPORT_FILE: ${{ runner.temp }}/upstream-forecast.md
+        run: |
+          status=0
+          scripts/ci/strata-upstream-forecast.sh || status=$?
+          if [ -f "${REPORT_FILE}" ]; then
+            cat "${REPORT_FILE}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${status}"
+
+      - name: Comment on the PR
+        # Fork PRs get a read-only token: the report stays in the job summary.
+        if: ${{ !cancelled() && steps.forecast.outputs.comment != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT: ${{ steps.forecast.outputs.comment }}
+          REPORT_FILE: ${{ runner.temp }}/upstream-forecast.md
+        run: |
+          marker='<!-- strata-upstream-forecast -->'
+          existing="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"${marker}\"))) | .id" \
+              | tail -n 1
+          )"
+
+          if [ "${COMMENT}" = "true" ]; then
+            body_file="${REPORT_FILE}"
+          elif [ -n "${existing}" ]; then
+            # An earlier commit of this PR got a warning: say that it no longer applies.
+            body_file="${RUNNER_TEMP}/upstream-forecast-ok.md"
+            {
+              echo "${marker}"
+              echo "## Upstream forecast"
+              echo
+              echo "The latest commit of this PR adds no conflicts with QGIS upstream and modifies no upstream file outside the allowlist."
+            } > "${body_file}"
+          else
+            echo "Nothing to report on the PR."
+            exit 0
+          fi
+
+          if [ -n "${existing}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F "body=@${body_file}" > /dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -F "body=@${body_file}" > /dev/null
+          fi
