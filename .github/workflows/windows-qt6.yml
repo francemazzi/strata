@@ -193,13 +193,17 @@ jobs:
                 -D VCPKG_HOST_TRIPLET=x64-windows-release
           )
 
+          # A rebuild without the SDK compiles every port. Drop each port's buildtree
+          # and package dir once it is installed and cached, or C: runs out of space.
+          VCPKG_REBUILD_INSTALL_OPTIONS="--x-buildtrees-root=C:/src;--clean-buildtrees-after-build;--clean-packages-after-build"
+
           if [ -n "${WINDOWS_SDK_PATH:-}" ]; then
             VCPKG_OPTS+=(-D "SDK_PATH=${WINDOWS_SDK_PATH}")
           else
             echo "::warning::Windows SDK unavailable; rebuilding dependencies from vcpkg (this can take several hours)."
             VCPKG_OPTS+=(
                 -D WITH_VCPKG=ON
-                -D VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:/src"
+                -D "VCPKG_INSTALL_OPTIONS=${VCPKG_REBUILD_INSTALL_OPTIONS}"
                 -D NUGET_BINARY_SOURCE_MODE=readwrite
                 -D "NUGET_USERNAME=${GITHUB_ACTOR}"
                 -D NUGET_SOURCE="https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
@@ -233,7 +237,7 @@ jobs:
                 "${VCPKG_OPTS[@]}"
 
           if [ -z "${WINDOWS_SDK_PATH:-}" ]; then
-            cmake -D VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:/src" "${BUILD_DIR}"
+            cmake -D "VCPKG_INSTALL_OPTIONS=${VCPKG_REBUILD_INSTALL_OPTIONS}" "${BUILD_DIR}"
           fi
 
       - name: 🌋 Build
