@@ -369,6 +369,8 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaiworkspacecloud.cpp
     ai/qgsaivisualcontextutils.cpp
     ai/qgsaiworkspacetrust.cpp
+    ai/remote/qgsairemotedesktopbridge.cpp
+    ../runner/strataremoteprotocol.cpp
     ai/tools/qgsaiattributetabletools.cpp
     ai/tools/qgsaidatabasetools.cpp
     ai/discovery/qgsaidiscoveryclient.cpp
@@ -650,6 +652,8 @@ target_include_directories(qgis_app PUBLIC
   ${CMAKE_SOURCE_DIR}/src/app/ai
   ${CMAKE_SOURCE_DIR}/src/app/ai/tools
   ${CMAKE_SOURCE_DIR}/src/app/ai/index
+  ${CMAKE_SOURCE_DIR}/src/app/ai/remote
+  ${CMAKE_SOURCE_DIR}/src/runner
   ${CMAKE_SOURCE_DIR}/src/app/decorations
   ${CMAKE_SOURCE_DIR}/src/app/devtools
   ${CMAKE_SOURCE_DIR}/src/app/georeferencer

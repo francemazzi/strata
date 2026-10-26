@@ -115,6 +115,7 @@ using namespace Qt::StringLiterals;
 #include "ai/qgsaifilecontextprovider.h"
 #include "ai/qgsaimessagelogbuffer.h"
 #include "ai/qgsaimodelrouter.h"
+#include "ai/remote/qgsairemotedesktopbridge.h"
 #include "ai/qgsaireviewpatchengine.h"
 #include "ai/tools/qgsaiattributetabletools.h"
 #include "ai/tools/qgsaidatabasetools.h"
@@ -1531,6 +1532,14 @@ QgisApp::QgisApp(
   mAiToolRegistry->registerTool( std::make_unique<QgsAiSearchWorkspaceTool>( mAiWorkspaceIndex.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiReindexWorkspaceTool>( mAiWorkspaceIndex.get() ) );
   mAiToolRegistry->registerTool( std::make_unique<QgsAiReindexLayersTool>( mAiWorkspaceIndex.get() ) );
+  mAiRemoteDesktopBridge = std::make_unique<QgsAiRemoteDesktopBridge>( QgsProject::instance(), mAiToolRegistry.get(), this );
+  connect( mAiRemoteDesktopBridge.get(), &QgsAiRemoteDesktopBridge::taskStarted, this, [this]( const QString &taskId, const QString &capability ) {
+    mInfoBar->pushInfo( tr( "Remote STRATA task" ), tr( "%1 is reading this project (%2). Project CRS and layer metadata will leave this machine." ).arg( taskId, capability ) );
+  } );
+  connect( mAiRemoteDesktopBridge.get(), &QgsAiRemoteDesktopBridge::taskFinished, this, [this]( const QString &taskId, bool success ) {
+    mInfoBar->pushMessage( tr( "Remote STRATA task" ), success ? tr( "%1 completed." ).arg( taskId ) : tr( "%1 failed or was rejected." ).arg( taskId ), success ? Qgis::MessageLevel::Success : Qgis::MessageLevel::Warning );
+  } );
+  mAiRemoteDesktopBridge->start();
   mAiIndexingScheduler = std::make_unique<QgsAiIndexingScheduler>( mAiWorkspaceIndex.get(), this );
   mAiLayerIndexCoordinator = std::make_unique<QgsAiLayerIndexCoordinator>( mAiWorkspaceIndex.get(), this );
   mAiIndexingActivity = std::make_unique<QgsAiIndexingActivity>( mAiWorkspaceIndex.get(), mAiIndexingScheduler.get(), mAiLayerIndexCoordinator.get(), this );
