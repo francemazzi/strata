@@ -246,6 +246,7 @@ mark_as_advanced(WITH_CORE)
 
 if(WITH_CORE)
   option(ENABLE_AI_ASSISTANT "Build the integrated multi-agent AI assistant for QGIS desktop" ON)
+  option(WITH_STRATA_RUNNER "Build the outbound-only STRATA remote runner" ON)
 
   # Try to configure and build GRASS plugin by default
   foreach (GRASS_SEARCH_VERSION 7 8)

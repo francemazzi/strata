@@ -26,6 +26,9 @@ add_subdirectory(test)
 
 if (WITH_DESKTOP)
   add_subdirectory(app)
+  if (WITH_STRATA_RUNNER)
+    add_subdirectory(runner)
+  endif()
   add_subdirectory(plugins)
 endif()
 
