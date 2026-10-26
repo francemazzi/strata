@@ -231,9 +231,19 @@ jobs:
                   fi
                 done
 
+                # The DYLD paths below also reach Homebrew tools. vcpkg's pkgconf port
+                # ships libpkgconf.8.dylib like Homebrew's pkgconf, but in an older
+                # 3.0.x, so Homebrew's pkg-config would load it and abort on a missing
+                # symbol. Run it through a wrapper that clears the DYLD paths.
+                HOST_PKG_CONFIG="$(command -v pkg-config)"
+                PKG_CONFIG_WRAPPER="${RUNNER_TEMP}/strata-pkg-config"
+                printf '#!/bin/sh\nunset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH\nexec "%s" "$@"\n' "${HOST_PKG_CONFIG}" > "${PKG_CONFIG_WRAPPER}"
+                chmod +x "${PKG_CONFIG_WRAPPER}"
+                export PKG_CONFIG="${PKG_CONFIG_WRAPPER}"
+
                 export DYLD_LIBRARY_PATH="${VCPKG_LIB_DIR}:${DYLD_LIBRARY_PATH:-}"
                 export DYLD_FALLBACK_LIBRARY_PATH="${VCPKG_LIB_DIR}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-                cmake -D VCPKG_INSTALL_OPTIONS="" build
+                cmake -D VCPKG_INSTALL_OPTIONS="" -D "PKG_CONFIG_EXECUTABLE=${PKG_CONFIG_WRAPPER}" build
 
       - name: 📑 Upload vcpkg build logs
         id: upload-build-logs

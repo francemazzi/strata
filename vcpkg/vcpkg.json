@@ -2,13 +2,13 @@
   "vcpkg-configuration": {
     "default-registry": {
       "kind": "git",
-      "baseline": "a0400024711b283056538ac19ced80b91a83c24c",
+      "baseline": "b3ae22aef2b857af6e80d756c13f15db12be4e8a",
       "repository": "https://github.com/microsoft/vcpkg"
     },
     "registries": [
       {
         "kind": "git",
-        "baseline": "b2f7537dda5bce38b0f43e6391a308b8a52ca920",
+        "baseline": "783012f7fdf4dbc99cbab8715350e92462cf1e3e",
         "repository": "https://github.com/open-vcpkg/python-registry",
         "packages": [
           "arrow",
@@ -247,6 +247,7 @@
           "name": "gdal",
           "default-features": true,
           "features": [
+            "archive",
             "arrow-adbc",
             "kea",
             "parquet",
