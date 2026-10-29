@@ -2623,9 +2623,9 @@ QString QgsAiModelRouter::emptyCompletionErrorMessage()
 
 QString QgsAiModelRouter::defaultPlanEndpoint()
 {
-  // Production Cloud Run backend (strata-be, europe-west1). Local dev overrides
+  // Production backend behind the Raspberry tunnel. Local dev overrides
   // via STRATA_PLAN_ENDPOINT or run-strata-dev.sh.
-  return u"https://strata-be-372580174147.europe-west1.run.app/ai/messages"_s;
+  return u"https://api.getstrata.org/ai/messages"_s;
 }
 
 QString QgsAiModelRouter::resolvedPlanEndpoint( const QString &persistedEndpoint )
@@ -2636,6 +2636,15 @@ QString QgsAiModelRouter::resolvedPlanEndpoint( const QString &persistedEndpoint
 
   const QString trimmed = persistedEndpoint.trimmed();
   if ( trimmed.isEmpty() || trimmed.contains( u"example.invalid"_s, Qt::CaseInsensitive ) || trimmed.contains( u"localhost"_s, Qt::CaseInsensitive ) || trimmed.contains( u"127.0.0.1"_s ) )
+    return defaultPlanEndpoint();
+
+  // Upgrade saved production profiles when the retired Cloud Run endpoint is present.
+  // Custom backends and explicit environment overrides retain their configured URL.
+  const QUrl endpoint( trimmed );
+  const bool retiredProductionHost = endpoint.host() == u"strata-be-372580174147.europe-west1.run.app"_s
+                                     || endpoint.host() == u"strata-be-bobznhj7xa-ew.a.run.app"_s;
+  if ( endpoint.scheme() == u"https"_s && retiredProductionHost && endpoint.port( 443 ) == 443
+       && endpoint.path() == u"/ai/messages"_s && !endpoint.hasQuery() && !endpoint.hasFragment() && endpoint.userInfo().isEmpty() )
     return defaultPlanEndpoint();
 
   return trimmed;

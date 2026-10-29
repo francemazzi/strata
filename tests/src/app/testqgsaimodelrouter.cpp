@@ -1284,6 +1284,7 @@ void TestQgsAiModelRouter::preDispatchFailureIsQueued()
 void TestQgsAiModelRouter::resolvedPlanEndpointDefaultsToProduction()
 {
   const QString prod = QgsAiModelRouter::defaultPlanEndpoint();
+  QCOMPARE( prod, u"https://api.getstrata.org/ai/messages"_s );
   const QByteArray savedEnv = qgetenv( "STRATA_PLAN_ENDPOINT" );
   qunsetenv( "STRATA_PLAN_ENDPOINT" );
   const auto restoreEnv = qScopeGuard( [savedEnv]() {
@@ -1294,9 +1295,16 @@ void TestQgsAiModelRouter::resolvedPlanEndpointDefaultsToProduction()
   QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( QString() ), prod );
   QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( u"http://localhost:3001/ai/messages"_s ), prod );
   QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( u"https://example.invalid/ai/messages"_s ), prod );
+  QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( u"https://strata-be-372580174147.europe-west1.run.app/ai/messages"_s ), prod );
+  QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( u"https://strata-be-bobznhj7xa-ew.a.run.app/ai/messages"_s ), prod );
+  const QString custom = u"https://custom.example.org/ai/messages"_s;
+  QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( custom ), custom );
+  const QString differentPath = u"https://strata-be-372580174147.europe-west1.run.app/custom"_s;
+  QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( differentPath ), differentPath );
 
   qputenv( "STRATA_PLAN_ENDPOINT", "http://localhost:3001/ai/messages" );
   QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( prod ), u"http://localhost:3001/ai/messages"_s );
+  QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( u"https://strata-be-372580174147.europe-west1.run.app/ai/messages"_s ), u"http://localhost:3001/ai/messages"_s );
 
   qunsetenv( "STRATA_PLAN_ENDPOINT" );
   QCOMPARE( QgsAiModelRouter::resolvedPlanEndpoint( prod ), prod );
