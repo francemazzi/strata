@@ -1,6 +1,6 @@
 # Strata 1.7.0
 
-Strata Cloud now uses `https://api.getstrata.org`. This release updates the desktop default and automatically resolves saved profiles using the two retired production Google Cloud Run addresses to the new endpoint. Custom backend URLs and explicit `STRATA_PLAN_ENDPOINT` overrides remain supported.
+Strata Cloud now uses `https://api.getstrata.org`. This release updates the desktop default and automatically resolves saved profiles using the two retired production Google Cloud Run addresses to the new endpoint. Custom backend URLs and explicit `STRATA_PLAN_ENDPOINT` overrides remain supported. The production launcher and website feedback form also use the new API origin.
 
 ## Updating an existing installation
 

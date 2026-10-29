@@ -9,5 +9,5 @@
 # endpoint inherited from the shell from selecting the wrong environment.
 
 STRATA_BACKEND_LOCAL="${STRATA_BACKEND_LOCAL:-http://localhost:3001}"
-# Cloud Run: strata-be, project strata-dev-qgis (372580174147), region europe-west1.
-STRATA_BACKEND_PROD="${STRATA_BACKEND_PROD:-https://strata-be-372580174147.europe-west1.run.app}"
+# Stable production origin, served by the Raspberry deployment.
+STRATA_BACKEND_PROD="${STRATA_BACKEND_PROD:-https://api.getstrata.org}"

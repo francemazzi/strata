@@ -1,5 +1,5 @@
 (function () {
-  const FEEDBACK_URL = "https://strata-be-372580174147.europe-west1.run.app/v1/feedback";
+  const FEEDBACK_URL = "https://api.getstrata.org/v1/feedback";
   const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
   function t(key) {

@@ -129,13 +129,13 @@ For desktop launches, always use one of the existing mode scripts rather than st
 ./scripts/run-strata-prod.sh
 ```
 
-`run-strata-dev.sh` uses `http://localhost:3001`, starts `../strata-be` when necessary, and waits for `/health/ready`. `run-strata-prod.sh` uses `https://strata-be-372580174147.europe-west1.run.app/ai/messages`. The scripts deliberately ignore an inherited `STRATA_PLAN_ENDPOINT`; set `STRATA_BACKEND_LOCAL` or `STRATA_BACKEND_PROD` only when deliberately targeting another environment. `STRATA_PLAN_TOKEN` remains available for supplying a desktop token during development.
+`run-strata-dev.sh` uses `http://localhost:3001`, starts `../strata-be` when necessary, and waits for `/health/ready`. `run-strata-prod.sh` uses `https://api.getstrata.org/ai/messages`. The scripts deliberately ignore an inherited `STRATA_PLAN_ENDPOINT`; set `STRATA_BACKEND_LOCAL` or `STRATA_BACKEND_PROD` only when deliberately targeting another environment. `STRATA_PLAN_TOKEN` remains available for supplying a desktop token during development.
 
 ### Strata Cloud endpoint defaults
 
 The desktop app **always defaults to production** Strata Cloud:
 
-`https://strata-be-372580174147.europe-west1.run.app/ai/messages`
+`https://api.getstrata.org/ai/messages`
 
 Localhost is used only when you launch via `run-strata-dev.sh` (which sets `STRATA_PLAN_ENDPOINT`). Stale `localhost` or `example.invalid` values saved in local settings are automatically reset to production on the next launch.
 
