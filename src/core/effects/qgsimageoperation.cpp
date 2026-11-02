@@ -986,7 +986,10 @@ bool QgsImageOperation::isBlankImage( const QImage &image )
     case QImage::Format_BGR888:
     case QImage::Format_RGBX16FPx4:
     case QImage::Format_RGBX32FPx4:
+// STRATA-PATCH: Format_CMYK8888 only exists from Qt 6.8; the Linux AppImage builds against Ubuntu's Qt 6.4.
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 8, 0 )
     case QImage::Format_CMYK8888:
+#endif
     case QImage::NImageFormats:
       return false;
 
