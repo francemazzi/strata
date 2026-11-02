@@ -1,12 +1,14 @@
 name: Setup Vcpkg
 description: Initialize vcpkg tool, does not checkout the registry
-  # TODO, set VCPKG_BASE_VERSION based on this
-  # inputs:
-  #  vcpkg-version:
-  #    description: Enter vcpkg version tag or stable or latest
-  #    required: false
-  #    default: latest
-  #    type: string
+
+# STRATA-PATCH: pin vcpkg-tool. aka.ms/vcpkg-init.* follows the latest release, and every new
+# release changes the ABI hash of all packages, so the NuGet binary cache misses everything and
+# macOS builds hit the 6 hour limit. Raise the version outside a release, then warm the cache.
+inputs:
+  vcpkg-tool-version:
+    description: microsoft/vcpkg-tool release tag to install
+    required: false
+    default: '2026-10-29'
 
 runs:
   using: composite
@@ -14,9 +16,11 @@ runs:
     - name: Setup vcpkg
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        VCPKG_TOOL_VERSION: ${{ inputs.vcpkg-tool-version }}
       run: |
         export VCPKG_ROOT=$HOME/.vcpkg
-        wget https://aka.ms/vcpkg-init.sh -O /tmp/vcpkg-init.sh
+        wget https://github.com/microsoft/vcpkg-tool/releases/download/$VCPKG_TOOL_VERSION/vcpkg-init -O /tmp/vcpkg-init.sh
         . /tmp/vcpkg-init.sh
         echo "VCPKG_ROOT=$VCPKG_ROOT" >> $GITHUB_ENV
         echo "$VCPKG_ROOT" >> $GITHUB_PATH
@@ -24,8 +28,10 @@ runs:
     - name: Setup vcpkg
       if: runner.os == 'Windows'
       shell: powershell
+      env:
+        VCPKG_TOOL_VERSION: ${{ inputs.vcpkg-tool-version }}
       run: |
         $env:VCPKG_ROOT = "C:/.vcpkg"
-        iex (iwr -useb https://aka.ms/vcpkg-init.ps1)
+        iex (iwr -useb "https://github.com/microsoft/vcpkg-tool/releases/download/$env:VCPKG_TOOL_VERSION/vcpkg-init.ps1")
         echo "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
         echo "$env:VCPKG_ROOT" >> $env:GITHUB_PATH

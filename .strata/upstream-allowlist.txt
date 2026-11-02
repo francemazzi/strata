@@ -19,6 +19,7 @@
 .github/ISSUE_TEMPLATE/20_documentation.yml
 .github/ISSUE_TEMPLATE/config.yml
 .github/actions/get-workflow-artifact-ids/action.yml
+.github/actions/setup-vcpkg/action.yml
 .github/workflows/build-macos-qt6.yml
 .github/workflows/check-user-reported-qgis-version.yml
 .github/workflows/ogc.yml
