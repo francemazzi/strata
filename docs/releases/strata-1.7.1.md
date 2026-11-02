@@ -18,7 +18,7 @@ The web console remains at https://app.getstrata.org and drawing conversion at h
 
 ## Why 1.7.1 replaces 1.7.0
 
-1.7.0 was never published. Its Linux AppImage did not build, because QGIS code merged in the upstream sync used a curve type that only exists from GEOS 3.15, while the AppImage builds against the GEOS of Ubuntu 24.04. 1.7.1 is 1.7.0 plus that build fix, so all three platforms come from one source revision as the release verification requires.
+1.7.0 was never published. Its Linux AppImage did not build, because QGIS code merged in the upstream sync used a curve type that only exists from GEOS 3.15 and an image format that only exists from Qt 6.8, while the AppImage builds against the GEOS and Qt of Ubuntu 24.04. 1.7.1 is 1.7.0 plus those two build fixes, so all three platforms come from one source revision as the release verification requires.
 
 ## Other changes since 1.6.8
 
