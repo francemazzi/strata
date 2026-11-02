@@ -1989,7 +1989,13 @@ std::unique_ptr<QgsSimpleCurve> QgsGeos::sequenceToSimpleCurve( const GEOSGeomet
   GEOSContextHandle_t context = QgsGeosContext::get();
 
   const int geometryType = GEOSGeomTypeId_r( context, geos );
-  if ( !( geometryType == GEOS_LINESTRING || geometryType == GEOS_LINEARRING || geometryType == GEOS_CIRCULARSTRING ) )
+  // STRATA-PATCH: GEOS_CIRCULARSTRING only exists from GEOS 3.15; the Linux AppImage builds against older system GEOS.
+#if GEOS_VERSION_NUM >= GEOS_COMPUTE_VERSION( 3, 15, 0 )
+  const bool isCircularString = geometryType == GEOS_CIRCULARSTRING;
+#else
+  const bool isCircularString = false;
+#endif
+  if ( !( geometryType == GEOS_LINESTRING || geometryType == GEOS_LINEARRING || isCircularString ) )
     return nullptr;
 
   const GEOSCoordSequence *cs = GEOSGeom_getCoordSeq_r( context, geos );
@@ -2032,7 +2038,7 @@ std::unique_ptr<QgsSimpleCurve> QgsGeos::sequenceToSimpleCurve( const GEOSGeomet
   {
     simpleCurve = std::make_unique<QgsLineString>( xOut, yOut, zOut, mOut );
   }
-  else if ( geometryType == GEOS_CIRCULARSTRING )
+  else if ( isCircularString )
   {
     simpleCurve = std::make_unique<QgsCircularString>( xOut, yOut, zOut, mOut );
   }

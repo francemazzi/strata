@@ -153,6 +153,7 @@ src/app/qml/images/qgis.svg
 src/auth/CMakeLists.txt
 src/core/CMakeLists.txt
 src/core/auth/qgsauthmanager.cpp
+src/core/geometry/qgsgeos.cpp
 src/core/pdf/qgspdfrenderer.cpp
 src/core/pdf/qgspdfrenderer.h
 src/core/processing/qgsprocessingparameters.cpp
