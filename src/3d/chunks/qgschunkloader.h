@@ -36,6 +36,17 @@
 
 #define SIP_NO_FILE
 
+// STRATA-PATCH: QtFuture::makeReadyValueFuture only exists from Qt 6.6; the Linux AppImage builds against Ubuntu's Qt 6.4.
+#if QT_VERSION < QT_VERSION_CHECK( 6, 6, 0 )
+namespace QtFuture
+{
+  template<typename T> QFuture<std::decay_t<T>> makeReadyValueFuture( T &&value )
+  {
+    return QtFuture::makeReadyFuture( std::forward<T>( value ) );
+  }
+} // namespace QtFuture
+#endif
+
 /**
  * \ingroup qgis_3d
  * \brief Result of running \ref QgsChunkLoader::loadChunk
