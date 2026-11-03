@@ -21,8 +21,11 @@
 
 #include <QString>
 
+#include <functional>
+
 using namespace Qt::StringLiterals;
 
+class QgsAiChatHistoryStore;
 class QgsAiFileContextProvider;
 class QgsMapCanvas;
 class QgsProject;
@@ -166,6 +169,29 @@ class APP_EXPORT QgsAiCaptureMapCanvasTool : public QgsAiTool
     QgsMapCanvas *mCanvas = nullptr;
     QWidget *mConsentParent = nullptr;
     int mRenderTimeoutMs = DEFAULT_RENDER_TIMEOUT_MS;
+};
+
+/**
+ * read_chat_history: lists the other chats saved with the project, or returns the chosen ones
+ * compactly (prompts, replies, tool calls with arguments and outcome), so the agent can document
+ * or reuse work done in earlier chats.
+ */
+class APP_EXPORT QgsAiReadChatHistoryTool : public QgsAiTool
+{
+  public:
+    //! \a currentChatId returns the open chat, which is left out because the model already sees it.
+    QgsAiReadChatHistoryTool( QgsAiChatHistoryStore *store, std::function<QString()> currentChatId );
+
+    QString name() const override { return u"read_chat_history"_s; }
+    QString description() const override;
+    QJsonObject schema() const override;
+    QgsAiToolResult execute( const QJsonObject &args ) override;
+    bool isAvailable() const override;
+    QString availabilityReason() const override;
+
+  private:
+    QgsAiChatHistoryStore *mStore = nullptr;
+    std::function<QString()> mCurrentChatId;
 };
 
 #endif // QGSAIREADTOOLS_H

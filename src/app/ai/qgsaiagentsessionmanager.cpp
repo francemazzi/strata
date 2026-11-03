@@ -383,10 +383,10 @@ namespace
   QStringList reviewerReadOnlyTools()
   {
     return QStringList {
-      u"echo"_s,           u"read_file"_s,      u"search_files"_s,         u"list_files"_s,       u"list_project_layers"_s, u"get_active_canvas_extent"_s,  u"capture_map_canvas"_s,
-      u"describe_layer"_s, u"query_features"_s, u"identify_features_at"_s, u"read_message_log"_s, u"index_status"_s,        u"search_workspace"_s,          u"web_search"_s,
-      u"web_fetch"_s,      u"catalog_search"_s, u"discovery_resolve"_s,    u"discovery_search"_s, u"discovery_status"_s,    u"list_database_connections"_s, u"describe_database_schema"_s,
-      u"query_sql"_s,
+      u"echo"_s,           u"read_file"_s,         u"search_files"_s,         u"list_files"_s,       u"list_project_layers"_s, u"get_active_canvas_extent"_s,  u"capture_map_canvas"_s,
+      u"describe_layer"_s, u"query_features"_s,    u"identify_features_at"_s, u"read_message_log"_s, u"index_status"_s,        u"search_workspace"_s,          u"web_search"_s,
+      u"web_fetch"_s,      u"catalog_search"_s,    u"discovery_resolve"_s,    u"discovery_search"_s, u"discovery_status"_s,    u"list_database_connections"_s, u"describe_database_schema"_s,
+      u"query_sql"_s,      u"read_chat_history"_s,
     };
   }
 
@@ -3422,7 +3422,8 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
     toolMessage.metadata.insert( u"tool_description"_s, call.args.value( u"description"_s ).toString() );
     toolMessage.metadata.insert( u"tool_code"_s, call.args.value( u"code"_s ).toString() );
   }
-  if ( result.success && call.name == "capture_map_canvas"_L1 && result.output.isObject() )
+  // tools that return an image the model should see: a map capture, or the first page of an exported layout
+  if ( result.success && ( call.name == "capture_map_canvas"_L1 || call.name == "export_map"_L1 ) && result.output.isObject() )
   {
     const QJsonObject image = result.output.toObject().value( u"image"_s ).toObject();
     const QString imagePath = image.value( u"path"_s ).toString();
