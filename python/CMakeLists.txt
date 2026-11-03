@@ -111,11 +111,14 @@ endif()
 # single mapped type whose annotation and conversion body match the SIP version.
 if(${SIP_VERSION_STR} VERSION_LESS 6.11.0)
   set(SIP_DISABLE_FEATURES ${SIP_DISABLE_FEATURES} MOVABLE_MAPPED_TYPE)
+  set(SIP_MOVABLE_STR "")
   set(SIP_UNIQUE_PTR_MAPPED_TYPE_ANNOTATIONS "")
   set(SIP_UNIQUE_PTR_UTILITY_INCLUDE "")
   set(SIP_UNIQUE_PTR_CONVERT_TO_TYPE_CODE [[  // only one way for now...
   return 0;]])
 else()
+  # STRATA-PATCH: upstream mapped types still use @SIP_MOVABLE_STR@ (std::vector<std::unique_ptr<T>>).
+  set(SIP_MOVABLE_STR "Movable,")
   set(SIP_UNIQUE_PTR_MAPPED_TYPE_ANNOTATIONS "Movable,")
   set(SIP_UNIQUE_PTR_UTILITY_INCLUDE "#include <utility>      // For std::move().")
   set(SIP_UNIQUE_PTR_CONVERT_TO_TYPE_CODE [[  const sipTypeDef *sip_type = sipFindType("TYPE");
