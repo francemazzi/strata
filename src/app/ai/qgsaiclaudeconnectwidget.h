@@ -19,7 +19,7 @@
 
 #include <QWidget>
 
-class QgsAiClaudeOAuthClient;
+class QgsAiClaudeCodeAuth;
 class QgsAiModelRouter;
 class QFrame;
 class QLabel;
@@ -33,6 +33,7 @@ class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
     explicit QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QWidget *parent = nullptr );
     QString modelText() const;
     QString pendingApiKey() const;
+    bool usesSubscription() const;
   signals:
     void cloudRequested();
     void useRequested();
@@ -52,7 +53,7 @@ class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
     void refreshStatus();
 
     QgsAiModelRouter *mRouter = nullptr;
-    QgsAiClaudeOAuthClient *mLogin = nullptr;
+    QgsAiClaudeCodeAuth *mLogin = nullptr;
     QFrame *mStatusFrame = nullptr;
     QLabel *mStatusTitle = nullptr;
     QLabel *mStatus = nullptr;
@@ -60,6 +61,8 @@ class APP_EXPORT QgsAiClaudeConnectWidget : public QWidget
     QPushButton *mLogoutButton = nullptr;
     QLineEdit *mApiKeyEdit = nullptr;
     QComboBox *mModelCombo = nullptr;
+    QComboBox *mSubscriptionModel = nullptr;
+    QComboBox *mCredentialMode = nullptr;
     ConnectionState mConnectionState = ConnectionState::Disconnected;
 };
 #endif

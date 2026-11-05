@@ -405,6 +405,8 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     void sessionListChanged();
 
   private:
+    QJsonObject executeExternalToolCall( const QString &name, const QJsonObject &args, const QString &callId );
+    bool mExternalToolCall = false;
     void startProviderAttempt( QgsAiModelRouter::Provider provider );
     bool needsManagedTaskApproval( QgsAiModelRouter::Provider provider ) const;
     void createManagedAgentRun();
@@ -492,6 +494,7 @@ class APP_EXPORT QgsAiAgentSessionManager : public QObject
     QString mApprovalCallId;
     bool mApprovalGranted = false;
     bool mMapContextIncluded = true;
+    QString mLastResponseModel;
     QgsAiModelRouter::Provider mActiveProvider = QgsAiModelRouter::Provider::OpenAi;
     QString mCurrentPrompt;
     QList<QgsAiChatContextFile> mCurrentContextFiles;

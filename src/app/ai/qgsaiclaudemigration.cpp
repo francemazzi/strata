@@ -14,6 +14,7 @@
  ***************************************************************************/
 
 #include "qgsaiclaudemigration.h"
+#include "qgsaisecretstore.h"
 
 #include "qgsapplication.h"
 #include "qgsauthmanager.h"
@@ -30,8 +31,18 @@ using namespace Qt::StringLiterals;
 void QgsAiClaudeMigration::run()
 {
   QgsSettings settings;
-  // Retired setup-token leftovers only. The loopback login under
-  // ai/provider/claude/login/ is a different credential and stays in place.
+  if ( settings.value( u"ai/provider/claude/credentialMode"_s ).toString() == "oauth"_L1 )
+  {
+    if ( !settings.contains( u"ai/provider/claude/code/model"_s ) )
+      settings.setValue( u"ai/provider/claude/code/model"_s, settings.value( u"ai/provider/claude/model"_s, u"sonnet"_s ) );
+    settings.setValue( u"ai/provider/claude/credentialMode"_s, u"claudeCode"_s );
+    settings.setValue( u"ai/provider/claude/code/reconnectRequired"_s, true );
+    if ( settings.value( u"ai/activeProvider"_s ).toString() == "Claude"_L1 )
+      settings.setValue( u"ai/security/providerSelectionRequired"_s, true );
+  }
+  for ( const QString &name : { u"refreshToken"_s, u"accessToken"_s, u"expiresAt"_s } )
+    QgsAiSecretStore::removeSecret( u"ai/provider/claude/login/"_s + name );
+  // Retired setup-token leftovers.
   for ( const QString &key : { u"ai/provider/claude/subscriptionToken"_s, u"ai/provider/claude/oauth/refreshToken"_s } )
   {
     auto *auth = QgsApplication::authManager();

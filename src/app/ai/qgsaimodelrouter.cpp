@@ -18,7 +18,7 @@
 #include <algorithm>
 
 #include "qgsaiclaudemigration.h"
-#include "qgsaiclaudeoauthclient.h"
+#include "qgsaiclaudecoderuntime.h"
 #include "qgsaicodexoauthclient.h"
 #include "qgsaisecretstore.h"
 #include "qgsaitoolregistry.h"
@@ -1116,9 +1116,13 @@ bool QgsAiModelRouter::hasStoredOAuthRefreshToken( Provider provider ) const
 {
   if ( provider == Provider::Codex )
     return QgsAiCodexOAuthClient::hasRefreshToken();
-  if ( provider == Provider::Claude )
-    return QgsAiClaudeOAuthClient::hasRefreshToken();
+
   return false;
+}
+
+bool QgsAiModelRouter::hasClaudeCodeLogin() const
+{
+  return QgsAiClaudeCodeAuth::isConfigured();
 }
 
 QString QgsAiModelRouter::defaultClaudeModel()
@@ -1133,6 +1137,8 @@ bool QgsAiModelRouter::requiresProviderSelection() const
 
 QString QgsAiModelRouter::credentialStatus( Provider provider ) const
 {
+  if ( provider == Provider::Claude && providerSettings( provider ).credentialMode == CredentialMode::ClaudeCode )
+    return mVerifiedProviders.contains( provider ) ? tr( "Connection verified" ) : hasClaudeCodeLogin() ? tr( "Configured" ) : tr( "Reconnect Claude" );
   const QString key = provider == Provider::Plan ? planSessionTokenSettingKey() : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey() : apiKeySettingKey( provider );
   const auto state = QgsAiSecretStore::storageState( key );
   if ( state == QgsAiSecretStore::StorageState::Failed )
@@ -1170,8 +1176,8 @@ bool QgsAiModelRouter::hasConfiguredCredential( Provider provider ) const
   }
 
   const ProviderSettings settings = mProviderSettings.value( provider );
-  if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::OAuth )
-    return QgsAiClaudeOAuthClient::hasRefreshToken();
+  if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::ClaudeCode )
+    return hasClaudeCodeLogin();
 
   return hasStoredApiKey( provider ) || !storedApiKey( provider ).isEmpty();
 }
@@ -1193,8 +1199,18 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
     if ( !model.isEmpty() )
       providerSettings.model = normalizedModelForProvider( provider, model );
 
-    const QString credentialMode = settings.value( credentialModeSettingKey( provider ), providerSettings.credentialMode == CredentialMode::OAuth ? u"oauth"_s : u"apiKey"_s ).toString().trimmed();
-    providerSettings.credentialMode = credentialMode.compare( u"oauth"_s, Qt::CaseInsensitive ) == 0 ? CredentialMode::OAuth : CredentialMode::ApiKey;
+    const QString credentialMode = settings
+                                     .value(
+                                       credentialModeSettingKey( provider ),
+                                       providerSettings.credentialMode == CredentialMode::ClaudeCode ? u"claudeCode"_s
+                                       : providerSettings.credentialMode == CredentialMode::OAuth    ? u"oauth"_s
+                                                                                                     : u"apiKey"_s
+                                     )
+                                     .toString()
+                                     .trimmed();
+    providerSettings.credentialMode = credentialMode == "claudeCode"_L1 ? CredentialMode::ClaudeCode : credentialMode == "oauth"_L1 ? CredentialMode::OAuth : CredentialMode::ApiKey;
+    if ( provider == Provider::Claude && providerSettings.credentialMode == CredentialMode::ClaudeCode )
+      providerSettings.model = settings.value( u"ai/provider/claude/code/model"_s, u"sonnet"_s ).toString();
     if ( provider == Provider::Codex )
       providerSettings.credentialMode = CredentialMode::OAuth;
     if ( provider == Provider::OpenRouter )
@@ -1249,9 +1265,9 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
     else
     {
       providerSettings.authConfigId.clear();
-      const bool hasCredential = provider == Provider::Codex                                ? QgsAiCodexOAuthClient::hasRefreshToken()
-                                 : provider == Provider::Claude && providerSettings.credentialMode == CredentialMode::OAuth ? QgsAiClaudeOAuthClient::hasRefreshToken()
-                                                                                            : !storedApiKey( provider ).isEmpty();
+      const bool hasCredential = provider == Provider::Codex                                                                     ? QgsAiCodexOAuthClient::hasRefreshToken()
+                                 : provider == Provider::Claude && providerSettings.credentialMode == CredentialMode::ClaudeCode ? hasClaudeCodeLogin()
+                                                                                                                                 : !storedApiKey( provider ).isEmpty();
       providerSettings.enabled = settings.value( enabledSettingKey( provider ), hasCredential ).toBool();
     }
 
@@ -1277,7 +1293,14 @@ void QgsAiModelRouter::persistProviderSettings( Provider provider, const Provide
   appSettings.setValue( endpointSettingKey( provider ), settings.endpoint.trimmed() );
   appSettings.setValue( modelSettingKey( provider ), normalizedModelForProvider( provider, settings.model ).trimmed() );
   appSettings.setValue( enabledSettingKey( provider ), settings.enabled );
-  appSettings.setValue( credentialModeSettingKey( provider ), settings.credentialMode == CredentialMode::OAuth ? u"oauth"_s : u"apiKey"_s );
+  appSettings.setValue(
+    credentialModeSettingKey( provider ),
+    settings.credentialMode == CredentialMode::ClaudeCode ? u"claudeCode"_s
+    : settings.credentialMode == CredentialMode::OAuth    ? u"oauth"_s
+                                                          : u"apiKey"_s
+  );
+  if ( provider == Provider::Claude )
+    appSettings.setValue( settings.credentialMode == CredentialMode::ClaudeCode ? u"ai/provider/claude/code/model"_s : u"ai/provider/claude/apiModel"_s, settings.model );
   if ( provider == Provider::OpenRouter )
     appSettings.setValue( autoRoutingSettingKey( provider ), settings.autoRouting );
 
@@ -1301,6 +1324,37 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
   mRequests.insert( context.requestId, context );
 
   const QString requestId = context.requestId;
+  if ( provider == Provider::Claude && providerSettings( provider ).credentialMode == CredentialMode::ClaudeCode )
+  {
+    QTimer::singleShot( 0, this, [this, requestId]() {
+      if ( !mRequests.contains( requestId ) )
+        return;
+      auto &pending = mRequests[requestId];
+      auto *runtime = new QgsAiClaudeCodeRuntime( this );
+      pending.claudeRuntime = runtime;
+      connect( runtime, &QgsAiClaudeCodeRuntime::progress, this, [this, requestId]( const QString &text ) {
+        if ( mRequests.contains( requestId ) )
+          emit requestProgress( requestId, text );
+      } );
+      connect( runtime, &QgsAiClaudeCodeRuntime::usageReported, this, [this, requestId]( const QString &model, const QgsAiUsage &usage ) {
+        if ( mRequests.contains( requestId ) )
+          emit usageReported( requestId, providerDisplayName( Provider::Claude ), model, usage );
+      } );
+      connect( runtime, &QgsAiClaudeCodeRuntime::finished, this, [this, requestId]( bool ok, const QString &text, const QString &error, int status ) {
+        if ( !mRequests.contains( requestId ) )
+          return;
+        const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - mRequests[requestId].firstAttemptAtMs;
+        finishRequest( requestId, ok, text, error, status, 0, false, elapsed );
+      } );
+      const QJsonObject payload = QJsonDocument::fromJson( buildRequestPayload( Provider::Claude, pending.messages, true ) ).object();
+      runtime->start( payload, [this, requestId]( const QString &name, const QJsonObject &args, const QString &callId ) {
+        if ( !mRequests.contains( requestId ) || !mExternalToolExecutor )
+          return QgsAiClaudeMcpBridge::toolResult( tr( "The Strata turn is no longer active." ), true );
+        return mExternalToolExecutor( name, args, callId );
+      } );
+    } );
+    return requestId;
+  }
   QgsAiSecretStore::loadSecretsAsync(
     this,
     [this, requestId]() {
@@ -1371,6 +1425,8 @@ bool QgsAiModelRouter::storeApiKey( Provider provider, const QString &apiKey, QS
     return false;
   }
   settings.authConfigId.clear();
+  if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::ClaudeCode )
+    settings.model = QgsSettings().value( u"ai/provider/claude/apiModel"_s, defaultClaudeModel() ).toString();
   settings.credentialMode = CredentialMode::ApiKey;
   settings.enabled = true;
   setProviderSettings( provider, settings );
@@ -1379,10 +1435,16 @@ bool QgsAiModelRouter::storeApiKey( Provider provider, const QString &apiKey, QS
 
 bool QgsAiModelRouter::setCredentialMode( Provider provider, CredentialMode mode, QString *errorMessage )
 {
-  if ( provider == Provider::Claude && mode == CredentialMode::OAuth && !QgsAiClaudeOAuthClient::hasRefreshToken() )
+  if ( mode == CredentialMode::ClaudeCode && ( provider != Provider::Claude || !hasClaudeCodeLogin() ) )
   {
     if ( errorMessage )
-      *errorMessage = tr( "Connect Claude in provider settings before choosing subscription login." );
+      *errorMessage = tr( "Connect your Claude subscription in Models & Providers first." );
+    return false;
+  }
+  if ( provider == Provider::Claude && mode == CredentialMode::OAuth )
+  {
+    if ( errorMessage )
+      *errorMessage = tr( "Reconnect your Claude subscription using the official Claude Code sign-in." );
     return false;
   }
   if ( provider == Provider::Plan )
@@ -1399,8 +1461,13 @@ bool QgsAiModelRouter::setCredentialMode( Provider provider, CredentialMode mode
   }
 
   ProviderSettings settings = mProviderSettings.value( provider );
+  if ( provider == Provider::Claude && settings.credentialMode != mode )
+    settings.model
+      = QgsSettings()
+          .value( mode == CredentialMode::ClaudeCode ? u"ai/provider/claude/code/model"_s : u"ai/provider/claude/apiModel"_s, mode == CredentialMode::ClaudeCode ? u"sonnet"_s : defaultClaudeModel() )
+          .toString();
   settings.credentialMode = mode;
-  const bool hasCredential = mode == CredentialMode::OAuth ? hasStoredOAuthRefreshToken( provider ) : !storedApiKey( provider ).isEmpty();
+  const bool hasCredential = mode == CredentialMode::ClaudeCode ? hasClaudeCodeLogin() : mode == CredentialMode::OAuth ? hasStoredOAuthRefreshToken( provider ) : !storedApiKey( provider ).isEmpty();
   settings.enabled = hasCredential || settings.enabled;
   setProviderSettings( provider, settings );
   return true;
@@ -1551,14 +1618,11 @@ bool QgsAiModelRouter::applyAuthentication( Provider provider, QNetworkRequest &
     return true;
   }
 
-  if ( provider == Provider::Claude && settings.credentialMode == CredentialMode::OAuth )
+  if ( provider == Provider::Claude && settings.credentialMode != CredentialMode::ApiKey )
   {
-    QgsAiClaudeOAuthClient::AccessToken token;
-    if ( !QgsAiClaudeOAuthClient::refreshAccessToken( token, errorMessage ) )
-      return false;
-    request.setRawHeader( "Authorization", u"Bearer %1"_s.arg( token.token ).toUtf8() );
-    request.setRawHeader( "anthropic-beta", QgsAiClaudeOAuthClient::oauthBetaHeader().toUtf8() );
-    return true;
+    if ( errorMessage )
+      *errorMessage = tr( "Claude subscriptions are handled by the official Claude Code application, not direct API requests." );
+    return false;
   }
 
   const QString apiKey = storedApiKey( provider );
@@ -1713,6 +1777,13 @@ void QgsAiModelRouter::queueFailedRequestFinish( const QString &requestId, const
 
 void QgsAiModelRouter::clearRequestTransport( RequestContext &context )
 {
+  if ( context.claudeRuntime )
+  {
+    context.claudeRuntime->cancel();
+    context.claudeRuntime->deleteLater();
+    context.claudeRuntime = nullptr;
+  }
+
   if ( context.watchdogTimer )
   {
     context.watchdogTimer->stop();

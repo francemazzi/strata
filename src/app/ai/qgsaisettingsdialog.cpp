@@ -453,7 +453,7 @@ namespace
            || modelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
            || modelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
            || modelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
-           || modelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
+           || modelRouter->hasClaudeCodeLogin()
            || !qEnvironmentVariable( "OPENAI_API_KEY" ).trimmed().isEmpty()
            || !qEnvironmentVariable( "OPENROUTER_API_KEY" ).trimmed().isEmpty()
            || !qEnvironmentVariable( "ANTHROPIC_API_KEY" ).trimmed().isEmpty();
@@ -733,7 +733,7 @@ QWidget *QgsAiSettingsDialog::buildAccountPage()
 QWidget *QgsAiSettingsDialog::buildProvidersPage()
 {
   QVBoxLayout *contentLayout = nullptr;
-  QWidget *page = createPage( tr( "Models & Providers" ), tr( "Bring-your-own-key providers used when the Plan account is not active." ), contentLayout );
+  QWidget *page = createPage( tr( "Models & Providers" ), tr( "Connect your providers and choose the engine used in the chat. Your Strata account stays separate." ), contentLayout );
 
   auto *active
     = new QLabel( tr( "Active provider: %1 · %2" ).arg( mModelRouter->providerDisplayName( mModelRouter->activeProvider() ), mModelRouter->credentialStatus( mModelRouter->activeProvider() ) ), page );
@@ -3309,9 +3309,9 @@ bool QgsAiSettingsDialog::applySettings()
   QgsAiModelRouter::ProviderSettings claudeSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Claude );
   claudeSettings.endpoint = mClaudeEndpoint->text().trimmed();
   claudeSettings.model = mClaudeConnectWidget->modelText();
-  const bool claudeSubscription = pendingClaudeKey.isEmpty() && mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude );
-  claudeSettings.credentialMode = claudeSubscription ? QgsAiModelRouter::CredentialMode::OAuth : QgsAiModelRouter::CredentialMode::ApiKey;
-  claudeSettings.enabled = !pendingClaudeKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude ) || claudeSubscription;
+  const bool claudeSubscription = mClaudeConnectWidget->usesSubscription();
+  claudeSettings.credentialMode = claudeSubscription ? QgsAiModelRouter::CredentialMode::ClaudeCode : QgsAiModelRouter::CredentialMode::ApiKey;
+  claudeSettings.enabled = claudeSubscription ? mModelRouter->hasClaudeCodeLogin() : mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude );
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Claude, claudeSettings );
 
   QgsSettings gisSaveSettings;

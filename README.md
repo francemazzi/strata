@@ -112,11 +112,11 @@ Provider credential options:
 - **OpenRouter**: [openrouter.ai/keys](https://openrouter.ai/keys)
 - **Anthropic**: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Codex/ChatGPT**: in the settings dialog, choose “Get Codex device code”, open the page shown, and complete sign-in. The Codex model uses `gpt-5.5`.
-- **Claude subscription**: in the settings dialog, under **Claude** choose **Connect Claude**. Strata opens the browser, receives the approval on this computer, and stores the token in the system keychain. Strata does not launch Claude Code or read its credentials. An Anthropic API key remains available under advanced provider settings; API usage is billed separately from a Claude subscription.
+- **Claude subscription**: under **Models & Providers → Claude**, choose **Claude subscription** and **Connect Claude subscription**. Sign-in is handled by the unmodified official Claude Code application (2.1.283 or later); install or locate it from the same panel if needed. Choose Sonnet, Opus, Haiku or an explicit model supported by your plan, then **Use in this chat**. The Strata account and active provider remain separate. An Anthropic API key is an explicit alternative and is billed separately from a Claude subscription.
 
 New provider credentials are stored in the operating system keychain. If secure storage is unavailable, choose **Retry** or **Use only for this session**; session credentials are forgotten when Strata closes. Existing credentials are migrated only after the keychain copy has been written and read back successfully. A locked legacy vault is preserved and shown as **Protection incomplete** until migration succeeds. Chat and index encryption keys remain in the existing QGIS vault.
 
-Provider selection remains explicit. **Configured** means credentials are available; **Connection verified** requires a successful response. Upgrading from an active Claude subscription pauses sending until you choose another provider. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
+Provider selection remains explicit. **Configured** means credentials are available; **Connection verified** requires a successful response. Users of the old direct Claude OAuth connection must reconnect through the official Claude Code sign-in. Connecting a provider never changes the active provider automatically. Credentials are never sent to any server other than the provider or Strata Cloud endpoint you choose.
 
 
 For desktop launches, always use one of the existing mode scripts rather than starting the binary directly:
@@ -352,3 +352,7 @@ There are several channels where you can find help and support for QGIS:
 [Contribution guidelines for this project](CONTRIBUTING.md)
 
 </details>
+
+### Claude subscription runtime
+
+Claude Code owns authentication in a dedicated profile under Strata's profile directory. Strata does not collect, exchange, or read Claude subscription tokens. Legacy Strata-owned OAuth credentials are retired; Anthropic API keys remain intact. The CLI runs in restricted print mode with native tools disabled and only an authenticated, turn-scoped local Strata MCP server. GIS tools keep Strata's approval, verification, cancellation, and undo rules. CLI conversations are not persisted; the existing Strata history supplies context on each turn. No automatic switch to another billed provider occurs after errors. Model availability and usage limits are controlled by Anthropic and the user's plan.

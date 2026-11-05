@@ -7,7 +7,7 @@
 #include <memory>
 
 #include "ai/qgsaiagentsessionmanager.h"
-#include "ai/qgsaiclaudeoauthclient.h"
+#include "ai/qgsaiclaudecodeauth.h"
 #include "ai/qgsaicodexoauthclient.h"
 #include "ai/qgsaimodelrouter.h"
 #include "ai/qgsaisecretstore.h"
@@ -224,8 +224,8 @@ class TestQgsAiModelRouter : public QObject
   private slots:
     void initTestCase();
     void init() { installTestSecretBackend(); }
-    void claudeSubscriptionAuthenticatesWithBearer();
-    void claudeLoginSurvivesRouterReconstruction();
+    void claudeSubscriptionRejectsDirectHttp();
+    void legacyClaudeLoginRequiresOfficialReconnect();
     void buildPayloadForOpenAi();
     void buildPayloadForOpenRouterCostOptimized();
     void buildPayloadForOpenRouterToolUseOptimized();
@@ -310,45 +310,43 @@ void TestQgsAiModelRouter::initTestCase()
   loadEnvFileIfPresent();
 }
 
-void TestQgsAiModelRouter::claudeSubscriptionAuthenticatesWithBearer()
+void TestQgsAiModelRouter::claudeSubscriptionRejectsDirectHttp()
 {
   const auto guard = isolateProviderState();
-  const QString expiresAt = QString::number( QDateTime::currentMSecsSinceEpoch() + 60LL * 60LL * 1000LL );
-  QVERIFY( QgsAiSecretStore::writeSecret( QgsAiClaudeOAuthClient::accessTokenSettingKey(), u"access-test"_s ) );
-  QVERIFY( QgsAiSecretStore::writeSecret( QgsAiClaudeOAuthClient::refreshTokenSettingKey(), u"refresh-test"_s ) );
-  QVERIFY( QgsAiSecretStore::writeSecret( QgsAiClaudeOAuthClient::expiresAtSettingKey(), expiresAt ) );
   QgsAiModelRouter router;
   QString error;
-  QVERIFY( router.setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error ) );
+  QVERIFY( !router.setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error ) );
+  auto provider = router.providerSettings( QgsAiModelRouter::Provider::Claude );
+  provider.credentialMode = QgsAiModelRouter::CredentialMode::ClaudeCode;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Claude, provider );
   QNetworkRequest request( QUrl( u"https://api.anthropic.com/v1/messages"_s ) );
-  QVERIFY( router.applyAuthentication( QgsAiModelRouter::Provider::Claude, request, &error ) );
-  QCOMPARE( QString::fromUtf8( request.rawHeader( "Authorization" ) ), u"Bearer access-test"_s );
-  QVERIFY( !request.hasRawHeader( "x-api-key" ) );
-  QCOMPARE( QString::fromUtf8( request.rawHeader( "anthropic-beta" ) ), QgsAiClaudeOAuthClient::oauthBetaHeader() );
+  QVERIFY( !router.applyAuthentication( QgsAiModelRouter::Provider::Claude, request, &error ) );
+  QVERIFY( !request.hasRawHeader( "Authorization" ) );
+  QVERIFY( !request.hasRawHeader( "anthropic-beta" ) );
   qputenv( "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-retired-test" );
   const auto env = qScopeGuard( []() { qunsetenv( "CLAUDE_CODE_OAUTH_TOKEN" ); } );
   QVERIFY( !router.storeApiKey( QgsAiModelRouter::Provider::Claude, u"sk-ant-oat01-retired-test"_s, &error ) );
   QVERIFY( !router.buildRequestPayload( QgsAiModelRouter::Provider::Claude, {}, false ).contains( "You are Claude Code" ) );
 }
 
-void TestQgsAiModelRouter::claudeLoginSurvivesRouterReconstruction()
+void TestQgsAiModelRouter::legacyClaudeLoginRequiresOfficialReconnect()
 {
   const auto guard = isolateProviderState();
-  QVERIFY( QgsAiSecretStore::writeSecret( QgsAiClaudeOAuthClient::refreshTokenSettingKey(), u"refresh-kept"_s ) );
+  QVERIFY( QgsAiSecretStore::writeSecret( u"ai/provider/claude/login/refreshToken"_s, u"refresh-kept"_s ) );
   QgsSettings settings;
   settings.setValue( u"ai/provider/claude/credentialMode"_s, u"oauth"_s );
   settings.setValue( u"ai/provider/claude/enabled"_s, true );
   settings.setValue( u"ai/provider/claude/subscriptionToken"_s, u"retired-token"_s );
   settings.setValue( u"ai/activeProvider"_s, u"Claude"_s );
   QgsAiModelRouter router;
-  QVERIFY( !router.requiresProviderSelection() );
-  QVERIFY( router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
-  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
+  QVERIFY( router.requiresProviderSelection() );
+  QVERIFY( !router.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ClaudeCode );
   QVERIFY( !settings.contains( u"ai/provider/claude/subscriptionToken"_s ) );
   QgsAiModelRouter reloaded;
-  QVERIFY( !reloaded.requiresProviderSelection() );
-  QVERIFY( reloaded.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
-  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::OAuth );
+  QVERIFY( reloaded.requiresProviderSelection() );
+  QVERIFY( !reloaded.hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude ) );
+  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ClaudeCode );
 }
 
 void TestQgsAiModelRouter::buildPayloadForOpenAi()

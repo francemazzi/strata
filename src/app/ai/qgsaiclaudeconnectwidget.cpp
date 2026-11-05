@@ -15,7 +15,9 @@
 
 #include "qgsaiclaudeconnectwidget.h"
 
-#include "qgsaiclaudeoauthclient.h"
+#include "qgsaiclaudecodeauth.h"
+#include "qgssettings.h"
+#include <QFileDialog>
 #include "qgsaimodelrouter.h"
 #include "qgscollapsiblegroupbox.h"
 
@@ -27,6 +29,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QUrl>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "moc_qgsaiclaudeconnectwidget.cpp"
@@ -54,8 +57,24 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   statusLayout->addWidget( mStatus );
   layout->addWidget( mStatusFrame );
 
-  mLogin = new QgsAiClaudeOAuthClient( this );
-  mConnectButton = new QPushButton( tr( "Connect Claude" ), this );
+  mCredentialMode = new QComboBox( this );
+  mCredentialMode->setObjectName( u"aiClaudeCredentialMode"_s );
+  mCredentialMode->addItem( tr( "Claude subscription" ), true );
+  mCredentialMode->addItem( tr( "Anthropic API key" ), false );
+  mCredentialMode->setCurrentIndex(
+    router && router->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ApiKey && router->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
+      ? 1
+      : 0
+  );
+  layout->addWidget( mCredentialMode );
+  mSubscriptionModel = new QComboBox( this );
+  mSubscriptionModel->setObjectName( u"aiClaudeSubscriptionModel"_s );
+  mSubscriptionModel->setEditable( true );
+  mSubscriptionModel->addItems( { u"sonnet"_s, u"opus"_s, u"haiku"_s } );
+  mSubscriptionModel->setCurrentText( QgsSettings().value( u"ai/provider/claude/code/model"_s, u"sonnet"_s ).toString() );
+  layout->addWidget( mSubscriptionModel );
+  mLogin = new QgsAiClaudeCodeAuth( this );
+  mConnectButton = new QPushButton( tr( "Connect Claude subscription" ), this );
   mConnectButton->setObjectName( u"aiClaudeConnectButton"_s );
   mLogoutButton = new QPushButton( tr( "Log out" ), this );
   mLogoutButton->setObjectName( u"aiClaudeLogoutButton"_s );
@@ -67,34 +86,39 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   layout->addWidget( buttons );
 
   connect( mConnectButton, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::startLogin );
-  connect( mLogin, &QgsAiClaudeOAuthClient::loginSucceeded, this, [this]() {
-    QString error;
-    if ( mRouter && !mRouter->setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::OAuth, &error ) )
-    {
-      QgsAiClaudeOAuthClient::clearLogin();
-      setConnectionState( ConnectionState::Error, tr( "Claude connected, but Strata could not activate the subscription." ), error );
-      return;
-    }
-    setConnectionState( ConnectionState::Connected );
-  } );
-  connect( mLogin, &QgsAiClaudeOAuthClient::loginFailed, this, [this]( const QgsAiClaudeOAuthError &error ) {
-    QString message = error.userMessage;
-    if ( error.retryAfterSeconds > 0 )
-      message += tr( " Try again in about %1 seconds." ).arg( error.retryAfterSeconds );
-    setConnectionState( error.category == QgsAiClaudeOAuthError::Category::RateLimited ? ConnectionState::RateLimited : ConnectionState::Error, message, error.technicalDetail );
+  connect( mLogin, &QgsAiClaudeCodeAuth::statusChanged, this, [this]( bool ready, const QString &message ) {
+    const int wait = QgsAiClaudeCodeAuth::cooldownSeconds();
+    setConnectionState(
+      !ready && wait > 0 ? ConnectionState::RateLimited
+      : ready            ? ConnectionState::Connected
+                         : ConnectionState::Disconnected,
+      !ready && wait > 0 ? tr( "Wait %1 seconds before trying Claude again." ).arg( wait ) : message
+    );
+    if ( !ready && wait > 0 )
+      QTimer::singleShot( wait * 1000, this, [this]() { refreshStatus(); } );
   } );
   connect( mLogoutButton, &QPushButton::clicked, this, [this]() {
     if ( mConnectionState == ConnectionState::Waiting )
     {
       mLogin->cancel();
-      setConnectionState( ConnectionState::Disconnected );
+      refreshStatus();
       return;
     }
-    mLogin->cancel();
-    QgsAiClaudeOAuthClient::clearLogin();
-    if ( mRouter )
-      mRouter->setCredentialMode( QgsAiModelRouter::Provider::Claude, QgsAiModelRouter::CredentialMode::ApiKey );
-    setConnectionState( ConnectionState::Disconnected );
+    setConnectionState( ConnectionState::Waiting, tr( "Signing out of the Claude connection used by Strata…" ) );
+    mLogin->logout();
+  } );
+  auto *install = new QPushButton( tr( "Install or update Claude Code" ), this );
+  install->setObjectName( u"aiClaudeInstallButton"_s );
+  layout->addWidget( install );
+  connect( install, &QPushButton::clicked, this, []() { QDesktopServices::openUrl( QUrl( u"https://code.claude.com/docs/en/setup"_s ) ); } );
+  auto *executable = new QPushButton( tr( "Locate Claude Code…" ), this );
+  layout->addWidget( executable );
+  connect( executable, &QPushButton::clicked, this, [this]() {
+    const QString path = QFileDialog::getOpenFileName( this, tr( "Select the official Claude Code executable" ), QgsAiClaudeCodeAuth::executablePath() );
+    if ( path.isEmpty() )
+      return;
+    QgsSettings().setValue( u"ai/provider/claude/code/executable"_s, path );
+    refreshStatus();
   } );
 
   auto *cloud = new QPushButton( tr( "Sign in to Strata Cloud" ), this );
@@ -119,48 +143,53 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   mModelCombo->setEditable( true );
   mModelCombo->addItems( { u"claude-sonnet-5"_s, u"claude-opus-4-8"_s, u"claude-haiku-4-5"_s } );
   if ( router )
-    mModelCombo->setCurrentText( router->providerSettings( QgsAiModelRouter::Provider::Claude ).model );
+    mModelCombo->setCurrentText(
+      QgsSettings()
+        .value(
+          u"ai/provider/claude/apiModel"_s,
+          router->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ApiKey ? router->providerSettings( QgsAiModelRouter::Provider::Claude ).model
+                                                                                                                                    : QgsAiModelRouter::defaultClaudeModel()
+        )
+        .toString()
+    );
   form->addWidget( mModelCombo );
   auto *use = new QPushButton( tr( "Use in this chat" ), advanced );
   use->setObjectName( u"aiClaudeUseButton"_s );
-  form->addWidget( use );
+  layout->addWidget( use );
   connect( use, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::useRequested );
+  connect( mCredentialMode, qOverload<int>( &QComboBox::currentIndexChanged ), this, [this, advanced]( int ) {
+    mSubscriptionModel->setEnabled( usesSubscription() );
+    advanced->setCollapsed( usesSubscription() );
+  } );
+  mSubscriptionModel->setEnabled( usesSubscription() );
   refreshStatus();
 }
 
 void QgsAiClaudeConnectWidget::startLogin()
 {
-  QString error;
-  if ( !mLogin->start( &error ) )
-  {
-    setConnectionState( ConnectionState::Error, error );
-    return;
-  }
-
   setConnectionState( ConnectionState::Waiting );
-  if ( QDesktopServices::openUrl( QUrl( mLogin->currentAuthorizeUrl() ) ) )
-    return;
+  mLogin->login();
+}
 
-  mLogin->cancel();
-  setConnectionState( ConnectionState::Error, tr( "Strata could not open the browser. Check your default browser and try again." ) );
+bool QgsAiClaudeConnectWidget::usesSubscription() const
+{
+  return mCredentialMode->currentData().toBool();
 }
 
 QString QgsAiClaudeConnectWidget::modelText() const
 {
-  return mModelCombo->currentText().trimmed();
+  return ( usesSubscription() ? mSubscriptionModel : mModelCombo )->currentText().trimmed();
 }
 
 QString QgsAiClaudeConnectWidget::pendingApiKey() const
 {
-  return mApiKeyEdit->text().trimmed();
+  return usesSubscription() ? QString() : mApiKeyEdit->text().trimmed();
 }
 
 void QgsAiClaudeConnectWidget::refreshStatus()
 {
-  if ( QgsAiClaudeOAuthClient::hasRefreshToken() )
-    setConnectionState( ConnectionState::Connected );
-  else
-    setConnectionState( ConnectionState::Disconnected );
+  setConnectionState( ConnectionState::Waiting, tr( "Checking the official Claude Code connection…" ) );
+  mLogin->checkStatus();
 }
 
 void QgsAiClaudeConnectWidget::setConnectionState( ConnectionState state, const QString &message, const QString &technicalDetail )
@@ -173,17 +202,20 @@ void QgsAiClaudeConnectWidget::setConnectionState( ConnectionState state, const 
   {
     case ConnectionState::Disconnected:
       title = tr( "Claude not connected" );
-      body = tr( "Connect in the browser to use your Claude subscription in Strata." );
+      if ( body.isEmpty() )
+        body = tr( "Connect your Claude subscription through the official Claude Code sign-in." );
       color = u"#718078"_s;
       break;
     case ConnectionState::Waiting:
       title = tr( "Waiting for Claude" );
-      body = tr( "Approve the connection in the browser. Strata will update automatically." );
+      if ( body.isEmpty() )
+        body = tr( "Complete the official Claude Code sign-in in the browser. Strata will update automatically." );
       color = u"#2f78a0"_s;
       break;
     case ConnectionState::Connected:
       title = tr( "Claude connected" );
-      body = tr( "Your Claude subscription is ready to use." );
+      if ( body.isEmpty() )
+        body = tr( "Claude is connected. Choose a model and select Use in this chat." );
       color = u"#16835c"_s;
       break;
     case ConnectionState::RateLimited:
@@ -207,8 +239,8 @@ void QgsAiClaudeConnectWidget::setConnectionState( ConnectionState state, const 
   const bool waiting = state == ConnectionState::Waiting;
   const bool connected = state == ConnectionState::Connected;
   const bool retry = state == ConnectionState::RateLimited || state == ConnectionState::Error;
-  mConnectButton->setEnabled( !waiting && !connected );
-  mConnectButton->setText( retry ? tr( "Try again" ) : tr( "Connect Claude" ) );
+  mConnectButton->setEnabled( !waiting && !connected && QgsAiClaudeCodeAuth::cooldownSeconds() == 0 );
+  mConnectButton->setText( retry ? tr( "Try again" ) : tr( "Connect Claude subscription" ) );
   mLogoutButton->setEnabled( waiting || connected );
   mLogoutButton->setText( waiting ? tr( "Cancel" ) : tr( "Log out" ) );
 }

@@ -19,6 +19,7 @@
 #include "qgis_app.h"
 #include "qgsaimodels.h"
 
+#include <functional>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -29,6 +30,7 @@
 #include <QUrl>
 
 class QgsAiToolRegistry;
+class QgsAiClaudeCodeRuntime;
 class QNetworkRequest;
 class QTimer;
 
@@ -50,7 +52,8 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     enum class CredentialMode
     {
       ApiKey,
-      OAuth
+      OAuth,
+      ClaudeCode
     };
     Q_ENUM( CredentialMode )
 
@@ -154,6 +157,9 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QString sanitizeErrorText( const QString &errorText ) const;
     bool hasStoredApiKey( Provider provider ) const;
     bool hasStoredOAuthRefreshToken( Provider provider ) const;
+    bool hasClaudeCodeLogin() const;
+    using ExternalToolExecutor = std::function<QJsonObject( const QString &, const QJsonObject &, const QString & )>;
+    void setExternalToolExecutor( ExternalToolExecutor executor ) { mExternalToolExecutor = std::move( executor ); }
     void setOpenRouterRoutingProfile( OpenRouterRoutingProfile profile ) { mOpenRouterRoutingProfile = profile; }
     OpenRouterRoutingProfile openRouterRoutingProfile() const { return mOpenRouterRoutingProfile; }
 
@@ -255,6 +261,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         QString stopReason;                       // "end_turn", "tool_use", "stop", etc.
         QList<PendingToolCall> toolCalls;         // collected during streaming/parse
         QMap<int, int> streamItemIndexToToolCall; // Claude content_block index OR OpenAI output_index/tool_calls index → toolCalls index
+        QgsAiClaudeCodeRuntime *claudeRuntime = nullptr;
         QNetworkReply *reply = nullptr;
         QTimer *watchdogTimer = nullptr;
         QString preDispatchError;
@@ -314,6 +321,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QSet<Provider> mVerifiedProviders;
     Provider mActiveProvider = Provider::OpenAi;
     QMap<QString, RequestContext> mRequests;
+    ExternalToolExecutor mExternalToolExecutor;
     QgsAiToolRegistry *mToolRegistry = nullptr;
     bool mToolUseEnabled = false;
     bool mAllowedToolsFilterEnabled = false;

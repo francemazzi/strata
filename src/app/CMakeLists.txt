@@ -344,8 +344,9 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaichathistorystore.cpp
     ai/qgsaiclaudemigration.cpp
     ai/qgsaiclaudeconnectwidget.cpp
-    ai/qgsaiclaudeoautherror.cpp
-    ai/qgsaiclaudeoauthclient.cpp
+    ai/qgsaiclaudecodeauth.cpp
+    ai/qgsaiclaudemcpbridge.cpp
+    ai/qgsaiclaudecoderuntime.cpp
     ai/qgsaicodexoauthclient.cpp
     ai/qgsaifilecontextprovider.cpp
     ai/qgsaigissuggestionengine.cpp

@@ -1383,10 +1383,30 @@ void QgsAiChatDockWidget::rebuildModelMenu()
   QVector<ModelEntry> models;
   if ( mModelRouter )
   {
-    for ( const ModelEntry &entry : predefinedModels() )
+    for ( ModelEntry entry : predefinedModels() )
     {
       if ( entry.provider != QgsAiModelRouter::Provider::Plan && mModelRouter->isProviderAvailable( entry.provider ) )
+      {
+        if ( entry.provider == QgsAiModelRouter::Provider::Claude && mModelRouter->providerSettings( entry.provider ).credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode )
+        {
+          if ( entry.model.startsWith( "claude-sonnet-"_L1 ) )
+          {
+            entry.model = u"sonnet"_s;
+            entry.displayName = tr( "Claude Sonnet · subscription" );
+          }
+          else if ( entry.model.startsWith( "claude-opus-"_L1 ) )
+          {
+            entry.model = u"opus"_s;
+            entry.displayName = tr( "Claude Opus · subscription" );
+          }
+          else if ( entry.model.startsWith( "claude-haiku-"_L1 ) )
+          {
+            entry.model = u"haiku"_s;
+            entry.displayName = tr( "Claude Haiku · subscription" );
+          }
+        }
         models.append( entry );
+      }
     }
     if ( mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan ) )
     {
@@ -3381,7 +3401,7 @@ void QgsAiChatDockWidget::onModelSelected( QAction *action )
 {
   if ( !action || !mModelRouter )
     return;
-  const ModelEntry entry = action->data().value<ModelEntry>();
+  ModelEntry entry = action->data().value<ModelEntry>();
   if ( entry.displayName.isEmpty() )
     return;
 
@@ -3389,6 +3409,15 @@ void QgsAiChatDockWidget::onModelSelected( QAction *action )
   // disabling the others — every synced provider stays synced so switching back
   // and forth (e.g. Codex <-> OpenRouter) is instant and reversible.
   QgsAiModelRouter::ProviderSettings settings = mModelRouter->providerSettings( entry.provider );
+  if ( entry.provider == QgsAiModelRouter::Provider::Claude && settings.credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode )
+  {
+    if ( entry.model.startsWith( "claude-sonnet-"_L1 ) )
+      entry.model = u"sonnet"_s;
+    else if ( entry.model.startsWith( "claude-opus-"_L1 ) )
+      entry.model = u"opus"_s;
+    else if ( entry.model.startsWith( "claude-haiku-"_L1 ) )
+      entry.model = u"haiku"_s;
+  }
   settings.model = entry.model;
   settings.enabled = true;
   mModelRouter->setProviderSettings( entry.provider, settings );
@@ -4242,7 +4271,7 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
     mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi )
     || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenRouter )
     || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex )
-    || mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Claude )
+    || mModelRouter->hasClaudeCodeLogin()
     || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
     || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan )
   )

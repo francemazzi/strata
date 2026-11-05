@@ -15,8 +15,10 @@
 
 #include "qgsaicrsutils.h"
 #include "qgsaiagentsessionmanager.h"
+#include "qgsaiclaudemcpbridge.h"
 
 #include <algorithm>
+#include <utility>
 #include <cmath>
 #include <utility>
 
@@ -596,6 +598,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
 
   if ( mRouter )
   {
+    const QPointer<QgsAiAgentSessionManager> guard( this );
+    mRouter->setExternalToolExecutor( [guard]( const QString &name, const QJsonObject &args, const QString &id ) {
+      return guard ? guard->executeExternalToolCall( name, args, id ) : QgsAiClaudeMcpBridge::toolResult( u"The Strata session has closed."_s, true );
+    } );
     connect( mRouter, &QgsAiModelRouter::toolCallsRequested, this, &QgsAiAgentSessionManager::onToolCallsRequested );
 
     connect( mRouter, &QgsAiModelRouter::retryWaiting, this, [this]( const QString &id, qint64 retryAt, int seconds, int number ) {
@@ -625,9 +631,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       emit requestStateChanged( u"retrying"_s, tr( "Provider busy: retry %1/3 on the same model in %2 s. Cancel to stop." ).arg( number ).arg( seconds ) );
     } );
 
-    connect( mRouter, &QgsAiModelRouter::usageReported, this, [this]( const QString &requestId, const QString &, const QString &, const QgsAiUsage &usage ) {
+    connect( mRouter, &QgsAiModelRouter::usageReported, this, [this]( const QString &requestId, const QString &, const QString &model, const QgsAiUsage &usage ) {
       if ( requestId != mActiveRequestId )
         return;
+      mLastResponseModel = model;
       mSessionUsage.add( usage );
       emit sessionUsageChanged( mSessionUsage );
     } );
@@ -698,7 +705,7 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
         const QgsAiChatMessage assistant = buildAssistantMessage( finalText );
         recordHistoryMessage( assistant );
         QFile::remove( recoveryJournalPath() );
-        emit requestStateChanged( u"completed"_s, u"%1 (%2 ms)"_s.arg( providerName ).arg( latencyMs ) );
+        emit requestStateChanged( u"completed"_s, mLastResponseModel.isEmpty() ? u"%1 (%2 ms)"_s.arg( providerName ).arg( latencyMs ) : u"%1 · %2 (%3 ms)"_s.arg( providerName, mLastResponseModel ).arg( latencyMs ) );
         mActiveRequestId.clear();
         mLastToolRoundHadError = false;
         if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
@@ -1847,6 +1854,7 @@ void QgsAiAgentSessionManager::startProviderAttempt( QgsAiModelRouter::Provider 
   mRouter->setPlanClientSessionId( mDesktopClientSessionId );
 
   mActiveProvider = provider;
+  mLastResponseModel.clear();
   const QList<QgsAiChatMessage> messages = buildOutgoingMessages();
 
   mStreamedText.clear();
@@ -1870,6 +1878,8 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildAssistantMessage( const QString 
   reply.role = QgsAiChatRole::Assistant;
   reply.content = text;
   reply.timestamp = QDateTime::currentDateTimeUtc();
+  if ( !mLastResponseModel.isEmpty() )
+    reply.metadata.insert( u"response_model"_s, mLastResponseModel );
   applyAssistantUiMetadata( reply );
   return reply;
 }
@@ -1992,7 +2002,9 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
     if ( providerName == "Codex"_L1 && ( lower.contains( "missing codex refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
       return u"Codex sign-in is missing or expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 && ( lower.contains( "missing claude refresh token"_L1 ) || lower.contains( "oauth"_L1 ) || lower.contains( "refresh token"_L1 ) ) )
-      return u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
+      return mRouter && mRouter->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode
+               ? sanitized
+               : u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
     if ( providerName == "Plan Account"_L1 && lower.contains( "session token"_L1 ) )
       return u"Plan Account sign-in is missing or expired. Log out below, then sign in again and retry."_s;
   }
@@ -2004,7 +2016,9 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
     if ( providerName == "Codex"_L1 )
       return u"Codex sign-in has expired. Log out below, then sign in again and retry."_s;
     if ( providerName == "Claude"_L1 )
-      return u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
+      return mRouter && mRouter->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode
+               ? sanitized
+               : u"Claude API authentication failed. Check your Anthropic API key in Provider Settings."_s;
     return u"%1 authentication failed. Check the API key or OAuth login in Provider Settings."_s.arg( providerName );
   }
   if ( httpStatus == 403 )
@@ -3440,6 +3454,47 @@ QgsAiChatMessage QgsAiAgentSessionManager::buildToolResultMessage( const QgsAiTo
   return toolMessage;
 }
 
+QJsonObject QgsAiAgentSessionManager::executeExternalToolCall( const QString &name, const QJsonObject &args, const QString &callId )
+{
+  if ( mActiveRequestId.isEmpty() || mActiveProvider != QgsAiModelRouter::Provider::Claude || mExternalToolCall )
+    return QgsAiClaudeMcpBridge::toolResult( tr( "The Strata turn is inactive or another tool is running." ), true );
+  const QString requestId = mActiveRequestId;
+  const quint64 generation = mSessionGeneration;
+  const QScopedValueRollback<bool> external( mExternalToolCall, true );
+  const QString assistantText = std::exchange( mStreamedText, QString() );
+  onToolCallsRequested( requestId, u"Claude"_s, assistantText, { QgsAiToolCall { callId, name, args } } );
+  if ( generation == mSessionGeneration && mActiveRequestId == requestId )
+  {
+    for ( auto it = mHistory.crbegin(); it != mHistory.crend(); ++it )
+      if ( it->role == QgsAiChatRole::Tool && it->metadata.value( u"tool_call_id"_s ).toString() == callId )
+      {
+        QJsonObject result = QgsAiClaudeMcpBridge::toolResult( it->content, it->metadata.value( u"is_error"_s ).toBool() );
+        // Reuse the router's consent, decoding and image-size limits for map captures.
+        if ( it->metadata.contains( u"visual_context_image_path"_s ) )
+        {
+          const QJsonArray messages = QJsonDocument::fromJson( mRouter->buildRequestPayload( QgsAiModelRouter::Provider::Claude, { *it }, false ) ).object().value( u"messages"_s ).toArray();
+          QJsonArray content = result.value( u"content"_s ).toArray();
+          for ( const QJsonValue &message : messages )
+            for ( const QJsonValue &block : message.toObject().value( u"content"_s ).toArray() )
+              for ( const QJsonValue &item : block.toObject().value( u"content"_s ).toArray() )
+                if ( item.toObject().value( u"type"_s ) == "image"_L1 )
+                {
+                  const QJsonObject source = item.toObject().value( u"source"_s ).toObject();
+                  content.append( QJsonObject { { u"type"_s, u"image"_s }, { u"data"_s, source.value( u"data"_s ) }, { u"mimeType"_s, source.value( u"media_type"_s ) } } );
+                }
+          result.insert( u"content"_s, content );
+        }
+        return result;
+      }
+  }
+  // A budget, policy, cancellation or project change stopped the turn. Do not let the CLI continue it.
+  QTimer::singleShot( 0, mRouter, [router = QPointer<QgsAiModelRouter>( mRouter ), requestId]() {
+    if ( router )
+      router->cancelRequest( requestId );
+  } );
+  return QgsAiClaudeMcpBridge::toolResult( tr( "Strata stopped this turn. Review the chat before continuing; completed actions must not be repeated." ), true );
+}
+
 void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, const QString &providerName, const QString &assistantText, const QList<QgsAiToolCall> &calls )
 {
   if ( requestId != mActiveRequestId )
@@ -3776,6 +3831,9 @@ void QgsAiAgentSessionManager::onToolCallsRequested( const QString &requestId, c
     emit requestRunningChanged( false );
     return;
   }
+
+  if ( mExternalToolCall )
+    return; // The official CLI owns continuation; the MCP result resumes its loop.
 
   // Continue the conversation with the same provider (no fallback rotation mid-loop).
   mActiveRequestId.clear();
