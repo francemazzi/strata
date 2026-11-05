@@ -44,6 +44,7 @@
 #include "qgsvariantutils.h"
 #include "qgsvectorfilewriter.h"
 #include "qgsvectorlayer.h"
+#include "qgsvirtualpointcloudprovider.h"
 
 #include <QRegularExpression>
 #include <QString>
@@ -9741,8 +9742,11 @@ QgsProcessingParameterAnnotationLayer *QgsProcessingParameterAnnotationLayer::fr
   return new QgsProcessingParameterAnnotationLayer( name, description, definition.isEmpty() ? QVariant() : definition, isOptional );
 }
 
-QgsProcessingParameterPointCloudDestination::QgsProcessingParameterPointCloudDestination( const QString &name, const QString &description, const QVariant &defaultValue, bool optional, bool createByDefault )
+QgsProcessingParameterPointCloudDestination::QgsProcessingParameterPointCloudDestination(
+  const QString &name, const QString &description, const QVariant &defaultValue, bool optional, bool createByDefault, Qgis::PointCloudOutputsTypes allowedPointCloudOutputs
+)
   : QgsProcessingDestinationParameter( name, description, defaultValue, optional, createByDefault )
+  , mAllowedPointCloudOutputs( allowedPointCloudOutputs )
 {}
 
 QgsProcessingParameterDefinition *QgsProcessingParameterPointCloudDestination::clone() const
@@ -9813,6 +9817,29 @@ QString QgsProcessingParameterPointCloudDestination::valueAsPythonString( const 
   return QgsProcessingUtils::stringToPythonLiteral( value.toString() );
 }
 
+QString QgsProcessingParameterPointCloudDestination::asPythonString( const QgsProcessing::PythonOutputType outputType ) const
+{
+  switch ( outputType )
+  {
+    case QgsProcessing::PythonOutputType::PythonQgsProcessingAlgorithmSubclass:
+    {
+      QString code = u"QgsProcessingParameterPointCloudDestination('%1', %2"_s.arg( name(), QgsProcessingUtils::stringToPythonLiteral( description() ) );
+      if ( mFlags & Qgis::ProcessingParameterFlag::Optional )
+        code += ", optional=True"_L1;
+
+      code += u", createByDefault=%1"_s.arg( createByDefault() ? u"True"_s : u"False"_s );
+
+      if ( mAllowedPointCloudOutputs != Qgis::PointCloudOutputsTypes::All )
+        code += u", allowedPointCloudOutputs=Qgis.PointCloudOutputsTypes.%1"_s.arg( qgsEnumValueToKey( mAllowedPointCloudOutputs ) );
+
+      QgsProcessingContext c;
+      code += u", defaultValue=%1)"_s.arg( valueAsPythonString( mDefault, c ) );
+      return code;
+    }
+  }
+  return QString();
+}
+
 QgsProcessingOutputDefinition *QgsProcessingParameterPointCloudDestination::toOutputDefinition() const
 {
   return new QgsProcessingOutputPointCloudLayer( name(), description() );
@@ -9820,7 +9847,11 @@ QgsProcessingOutputDefinition *QgsProcessingParameterPointCloudDestination::toOu
 
 QString QgsProcessingParameterPointCloudDestination::defaultFileExtension() const
 {
-  if ( auto *lOriginalProvider = originalProvider() )
+  if ( mAllowedPointCloudOutputs == Qgis::PointCloudOutputsTypes::OnlyVPC )
+  {
+    return QgsVirtualPointCloudProvider::defaultVpcExtension();
+  }
+  else if ( auto *lOriginalProvider = originalProvider() )
   {
     return lOriginalProvider->defaultPointCloudFileExtension();
   }
@@ -9847,7 +9878,11 @@ QString QgsProcessingParameterPointCloudDestination::createFileFilter() const
 
 QStringList QgsProcessingParameterPointCloudDestination::supportedOutputPointCloudLayerExtensions() const
 {
-  if ( auto *lOriginalProvider = originalProvider() )
+  if ( mAllowedPointCloudOutputs == Qgis::PointCloudOutputsTypes::OnlyVPC )
+  {
+    return QgsVirtualPointCloudProvider::supportedVpcExtensions();
+  }
+  else if ( auto *lOriginalProvider = originalProvider() )
   {
     return lOriginalProvider->supportedOutputPointCloudLayerExtensions();
   }
@@ -9860,6 +9895,20 @@ QStringList QgsProcessingParameterPointCloudDestination::supportedOutputPointClo
     QString ext = QgsProcessingUtils::defaultPointCloudExtension();
     return QStringList() << ext;
   }
+}
+
+QVariantMap QgsProcessingParameterPointCloudDestination::toVariantMap() const
+{
+  QVariantMap map = QgsProcessingDestinationParameter::toVariantMap();
+  map.insert( u"allowed_point_cloud_outputs"_s, qgsEnumValueToKey( mAllowedPointCloudOutputs ) );
+  return map;
+}
+
+bool QgsProcessingParameterPointCloudDestination::fromVariantMap( const QVariantMap &map )
+{
+  QgsProcessingDestinationParameter::fromVariantMap( map );
+  mAllowedPointCloudOutputs = qgsEnumKeyToValue( map.value( u"allowed_point_cloud_outputs"_s ).toString(), Qgis::PointCloudOutputsTypes::All );
+  return true;
 }
 
 QgsProcessingParameterPointCloudDestination *QgsProcessingParameterPointCloudDestination::fromScriptCode( const QString &name, const QString &description, bool isOptional, const QString &definition )
