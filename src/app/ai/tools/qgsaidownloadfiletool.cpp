@@ -206,7 +206,7 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
   // dialog but the pertinent fields (URL, dest, cap) are right there in the prompt.
   {
     QString question = QObject::tr(
-                         "The AI assistant wants to download:\n\n"
+                         "Strata Assistant wants to download:\n\n"
                          "  URL: %1\n"
                          "  Destination: %2\n"
                          "  Max size: %3\n"
@@ -221,7 +221,7 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
       question += QObject::tr( "\nWarning: the destination has an executable file extension (.%1). Only allow this if you expect to download a program.\n" ).arg( suffix );
 
     question += QObject::tr( "\nAllow the download?" );
-    QMessageBox::StandardButton answer = QMessageBox::question( mDialogParent, QObject::tr( "AI: confirm file download" ), question, QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
+    QMessageBox::StandardButton answer = QMessageBox::question( mDialogParent, QObject::tr( "Strata Assistant: confirm file download" ), question, QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
     if ( answer != QMessageBox::Yes )
     {
       QgsMessageLog::logMessage( u"download_file rejected by user (url=%1)"_s.arg( urlForLog( url ) ), u"AI/Download"_s, Qgis::MessageLevel::Info, false );

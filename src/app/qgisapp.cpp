@@ -1462,7 +1462,7 @@ QgisApp::QgisApp(
   endProfile();
 
 #ifdef HAVE_AI_ASSISTANT
-  startProfile( tr( "AI assistant dock" ) );
+  startProfile( tr( "Strata Assistant dock" ) );
   // Diagnostics for scripts/ai/run_scenarios.py: log interface stalls and the AI work behind them.
   if ( const int stallThresholdMs = qEnvironmentVariableIntValue( "STRATA_AI_GUI_STALL_MS" ); stallThresholdMs > 0 )
     qgsAiSetGuiStallMonitorThreshold( stallThresholdMs );
@@ -1686,25 +1686,25 @@ QgisApp::QgisApp(
     if ( mAiIndexingActivity )
       mAiIndexingActivity->refresh();
   } );
-  mAiChatDock->setWindowTitle( tr( "AI Assistant" ) );
+  mAiChatDock->setWindowTitle( tr( "Strata Assistant" ) );
   mAiChatDock->setObjectName( u"AiAssistant"_s );
   addDockWidget( Qt::RightDockWidgetArea, mAiChatDock );
   mAiChatDock->hide();
 
-  mActionAiAssistant = new QAction( tr( "AI Assistant" ), this );
+  mActionAiAssistant = new QAction( tr( "Strata Assistant" ), this );
   mActionAiAssistant->setObjectName( u"mActionAiAssistant"_s );
   mActionAiAssistant->setCheckable( true );
   mActionAiAssistant->setIcon( QIcon( u":/images/icons/strata-icon-512x512.png"_s ) );
-  mActionAiAssistant->setToolTip( tr( "Show or hide Strata AI Assistant" ) );
+  mActionAiAssistant->setToolTip( tr( "Show or hide Strata Assistant" ) );
   connect( mActionAiAssistant, &QAction::toggled, mAiChatDock, &QgsDockWidget::setUserVisible );
   connect( mAiChatDock, &QgsDockWidget::visibilityChanged, mActionAiAssistant, &QAction::setChecked );
   mPluginMenu->addAction( mActionAiAssistant );
   // Opens the chat with the cursor in the message box. Ctrl+L and Ctrl+Shift+L already belong
   // to the Data Source Manager and SpatiaLite; the shortcut can be changed in the settings.
-  QAction *askAiAction = new QAction( tr( "Ask the AI Assistant" ), this );
+  QAction *askAiAction = new QAction( tr( "Ask Strata Assistant" ), this );
   askAiAction->setObjectName( u"mActionAskAiAssistant"_s );
   askAiAction->setShortcut( QKeySequence( tr( "Ctrl+Shift+K" ) ) );
-  askAiAction->setToolTip( tr( "Open the AI Assistant and type a message (%1)" ).arg( askAiAction->shortcut().toString( QKeySequence::NativeText ) ) );
+  askAiAction->setToolTip( tr( "Open Strata Assistant and type a message (%1)" ).arg( askAiAction->shortcut().toString( QKeySequence::NativeText ) ) );
   connect( askAiAction, &QAction::triggered, this, [this]() {
     mAiChatDock->setUserVisible( true );
     mAiChatDock->focusPrompt();
@@ -6413,7 +6413,7 @@ void QgisApp::fileExit()
   const bool stopAiTool = mAiSessionManager && qgsAiHasActiveBackgroundTool();
   if ( stopAiTool )
   {
-    if ( QMessageBox::question( this, tr( "AI Assistant" ), tr( "The AI assistant is still running a tool. Quit anyway and stop it?" ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No )
+    if ( QMessageBox::question( this, tr( "Strata Assistant" ), tr( "Strata Assistant is still running a tool. Quit anyway and stop it?" ), QMessageBox::Yes | QMessageBox::No, QMessageBox::No )
          != QMessageBox::Yes )
       return;
     mAiSessionManager->cancelActiveRequest();

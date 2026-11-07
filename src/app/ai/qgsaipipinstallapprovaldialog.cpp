@@ -27,7 +27,7 @@
 QgsAiPipInstallApprovalDialog::QgsAiPipInstallApprovalDialog( const QStringList &packages, const QString &reason, QWidget *parent )
   : QDialog( parent )
 {
-  setWindowTitle( tr( "AI: confirm Python package install" ) );
+  setWindowTitle( tr( "Strata Assistant: confirm Python package install" ) );
   resize( 640, 420 );
   setSizeGripEnabled( true );
   setModal( true );
@@ -39,7 +39,7 @@ QgsAiPipInstallApprovalDialog::QgsAiPipInstallApprovalDialog( const QStringList 
   intro->setWordWrap( true );
   const QString why = reason.trimmed().isEmpty() ? tr( "(no reason provided)" ) : reason.trimmed();
   intro->setText( tr(
-                    "The AI assistant wants to install the following Python package(s) into the user-scope "
+                    "Strata Assistant wants to install the following Python package(s) into the user-scope "
                     "site-packages of the Python interpreter that runs PyQGIS (pip install --user).\n\n"
                     "Reason: %1"
   )

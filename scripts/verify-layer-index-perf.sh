@@ -26,7 +26,7 @@ echo "   Note time until the UI is responsive and whether Task Manager shows"
 echo "   sequential 'Index AI layers' tasks."
 echo
 echo "2. Indexing OFF (isolates QGIS load cost from Strata AI indexing)"
-echo "   AI Assistant → settings → disable automatic layer indexing"
+echo "   Strata Assistant → settings → disable automatic layer indexing"
 echo "   (setting key: strata/index/enable_layer_indexing)"
 echo "   Repeat the same open/add steps and compare."
 echo

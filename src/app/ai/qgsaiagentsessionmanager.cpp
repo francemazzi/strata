@@ -396,14 +396,14 @@ namespace
   {
     const QString argsText = QString::fromUtf8( QJsonDocument( args ).toJson( QJsonDocument::Indented ) ).left( 4000 );
     const QString message = QObject::tr(
-                              "The AI assistant wants to run a tool that can change the project or workspace.\n\n"
+                              "Strata Assistant wants to run a tool that can change the project or workspace.\n\n"
                               "Tool: %1\n"
                               "Risk: %2\n\n"
                               "Arguments:\n%3\n\n"
                               "Allow this tool call?"
     )
                               .arg( toolName, QgsAiToolRiskLevelName( riskLevel ), argsText );
-    return QMessageBox::question( nullptr, QObject::tr( "AI: approve tool call" ), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No ) == QMessageBox::Yes;
+    return QMessageBox::question( nullptr, QObject::tr( "Strata Assistant: approve tool call" ), message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No ) == QMessageBox::Yes;
   }
 
   QStringList intersectTools( const QStringList &candidateTools, const QStringList &managedAllowedTools )

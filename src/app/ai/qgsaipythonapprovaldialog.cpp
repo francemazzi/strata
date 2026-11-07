@@ -62,7 +62,7 @@ QgsAiPythonApprovalDialog::QgsAiPythonApprovalDialog( const QString &description
 QgsAiPythonApprovalDialog::QgsAiPythonApprovalDialog( const QString &description, const QString &code, bool canRememberSessionApproval, QWidget *parent )
   : QDialog( parent )
 {
-  setWindowTitle( tr( "AI: confirm Python execution" ) );
+  setWindowTitle( tr( "Strata Assistant: confirm Python execution" ) );
   resize( 900, 600 );
   setSizeGripEnabled( true );
   setModal( true );
@@ -96,7 +96,7 @@ QgsAiPythonApprovalDialog::QgsAiPythonApprovalDialog( const QString &description
   intro->setWordWrap( true );
   const QString why = description.trimmed().isEmpty() ? tr( "(no description provided)" ) : description.trimmed();
   intro->setText( tr(
-                    "The AI assistant wants to run the following PyQGIS code in this QGIS session.\n"
+                    "Strata Assistant wants to run the following PyQGIS code in this QGIS session.\n"
                     "It runs with the same privileges as the GUI: it can read/write files, modify the project, and call any QGIS API.\n\n"
                     "Reason: %1"
   )

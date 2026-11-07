@@ -753,7 +753,7 @@ namespace
 Q_DECLARE_METATYPE( ModelEntry )
 
 QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManager, QgsAiModelRouter *modelRouter, QgsAiReviewPatchEngine *reviewEngine, QWidget *parent )
-  : QgsDockWidget( tr( "AI Assistant" ), parent )
+  : QgsDockWidget( tr( "Strata Assistant" ), parent )
   , mSessionManager( sessionManager )
   , mModelRouter( modelRouter )
   , mReviewEngine( reviewEngine )
@@ -3436,7 +3436,7 @@ void QgsAiChatDockWidget::ensureWorkspaceTrustDecision()
   box.setIcon( QMessageBox::Question );
   box.setWindowTitle( tr( "Trust this workspace?" ) );
   box.setText( tr(
-                 "The AI assistant is about to work in:\n%1\n\n"
+                 "Strata Assistant is about to work in:\n%1\n\n"
                  "Trusted workspaces can load AI rules/skills files (.strata/rules, .strata/skills) "
                  "into the assistant's instructions and enable the risky tools "
                  "(run_python, install_python_package, download_file).\n\n"
@@ -4288,7 +4288,7 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
 
   QPushButton *settingsButton = new QPushButton( tr( "Open AI onboarding" ) );
   QgsMessageBarItem *item
-    = new QgsMessageBarItem( tr( "AI Assistant" ), tr( "Sign in to Strata Cloud, configure a provider API key, then review privacy, model, indexing and demo setup before using the agent." ), settingsButton, Qgis::MessageLevel::Info, 0, messageBar );
+    = new QgsMessageBarItem( tr( "Strata Assistant" ), tr( "Sign in to Strata Cloud, configure a provider API key, then review privacy, model, indexing and demo setup before using the agent." ), settingsButton, Qgis::MessageLevel::Info, 0, messageBar );
 
   connect( settingsButton, &QPushButton::clicked, this, [this, messageBar, item]() {
     openProviderSettings();

@@ -16,7 +16,7 @@ body:
     attributes:
       label: What happened?
       description: Describe the problem in a simple way.
-      placeholder: "Example: I asked the AI assistant to load a layer, but nothing happened."
+      placeholder: "Example: I asked Strata Assistant to load a layer, but nothing happened."
     validations:
       required: true
 
@@ -36,7 +36,7 @@ body:
       placeholder: |
         1. Open Strata
         2. Load this type of file/layer
-        3. Ask the AI assistant to...
+        3. Ask Strata Assistant to...
         4. The error appears
     validations:
       required: false
@@ -46,7 +46,7 @@ body:
     attributes:
       label: Where is the problem?
       options:
-        - AI assistant
+        - Strata Assistant
         - Map/layers
         - Project loading/saving
         - Installation/startup
