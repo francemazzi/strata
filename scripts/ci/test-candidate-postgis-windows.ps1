@@ -71,16 +71,15 @@ try {
   foreach ($key in @('PROJ_DATA', 'PROJ_LIB', 'GDAL_DATA')) { [Environment]::SetEnvironmentVariable($key, $null) }
 
   $desktop = Join-Path $root 'bin\Strata.exe'
-  # The GUI executable prints the version but does not exit with 0 on Windows,
-  # so only the text is checked; the suite itself runs with the bundled Python.
-  $version = (& $desktop --version 2>&1 | Out-String).Trim()
-  Write-Host "Strata.exe --version (exit $LASTEXITCODE): $version"
-  if (-not $version.Contains("Strata $Version (based on QGIS ")) { throw "Candidate application version mismatch: $version" }
+  # PowerShell variable names ignore case: keep the output apart from $Version.
+  $versionText = (& $desktop --version 2>&1 | Out-String).Trim()
+  Write-Host "Strata.exe --version (exit $LASTEXITCODE): $versionText"
+  if ($LASTEXITCODE -ne 0 -or -not $versionText.Contains("Strata $Version (based on QGIS ")) { throw "Candidate application version mismatch: $versionText" }
   & $python[0].FullName (Join-Path $PSScriptRoot 'run_candidate_postgis.py')
   if ($LASTEXITCODE -ne 0) { throw 'Candidate PostGIS regression failed' }
   $result = Get-Content $env:STRATA_CRS_CANDIDATE_OUT -Raw | ConvertFrom-Json
   if (-not $result.success -or $result.source_sha -ne $SourceSha) { throw 'Invalid candidate receipt' }
-  $result | Add-Member -NotePropertyName application_version -NotePropertyValue $version
+  $result | Add-Member -NotePropertyName application_version -NotePropertyValue $versionText
   $result | Add-Member -NotePropertyName asset_sha256 -NotePropertyValue $digest
   $result | ConvertTo-Json -Depth 8 | Set-Content $env:STRATA_CRS_CANDIDATE_OUT -Encoding utf8
 } finally {
