@@ -1,0 +1,177 @@
+name: Strata candidate PostGIS check
+# Runs a release tag's PostGIS CRS regression suite with the packaged Linux
+# AppImage and Windows zip of that release (draft or published), each against a
+# disposable PostGIS database. Manual only; it reads the release and never
+# changes it. Receipts are uploaded as workflow artifacts. A pull request that
+# changes the check runs it against the latest published release.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/strata-candidate-postgis.yml
+      - scripts/ci/run_candidate_postgis.py
+      - scripts/ci/test_candidate_postgis.py
+      - scripts/ci/test-candidate-postgis-windows.ps1
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify, e.g. strata-v1.8.1
+        required: true
+        type: string
+      platform:
+        description: Platforms to test
+        type: choice
+        options: [all, linux, windows]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    if: inputs.platform != 'windows'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # reading a draft release needs push access
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: strata_crs_candidate
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55013:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      INPUT_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve the candidate and its test suite
+        id: candidate
+        run: |
+          TAG="${INPUT_TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          [[ "$TAG" =~ ^strata-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::Tag must look like strata-vX.Y.Z"; exit 1; }
+          sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          # The suite comes from the tag, so the check matches what was released.
+          git show "${sha}:tests/src/python/test_provider_postgres_crs.py" > "$RUNNER_TEMP/test_provider_postgres_crs.py"
+          {
+            echo "tag=${TAG}"
+            echo "version=${BASH_REMATCH[1]}"
+            echo "sha=${sha}"
+            echo "asset=Strata-${BASH_REMATCH[1]}-x86_64.AppImage"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the AppImage and check its release digest
+        env:
+          ASSET: ${{ steps.candidate.outputs.asset }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > candidate-release.json
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET"
+          python3 - "$ASSET" <<'PYCODE'
+          import hashlib, json, pathlib, sys
+          name = sys.argv[1]
+          assets = json.loads(pathlib.Path("candidate-release.json").read_text())["assets"]
+          matches = [a for a in assets if a["name"] == name]
+          assert len(matches) == 1, f"{name} must appear exactly once in the release"
+          with open(name, "rb") as file:
+              digest = hashlib.file_digest(file, "sha256").hexdigest()
+          assert matches[0]["digest"] == "sha256:" + digest, "asset digest mismatch"
+          PYCODE
+          chmod +x "$ASSET"
+
+      - name: Install a virtual display for the packaged desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libegl1 libopengl0 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0
+
+      - name: Verify the packaged CRS catalog
+        env:
+          ASSET: ${{ steps.candidate.outputs.asset }}
+        run: xvfb-run -a python3 scripts/ci/verify_crs_runtime.py "./$ASSET" --output crs-runtime-linux.json
+
+      - name: Run the PostGIS CRS suite with the packaged PyQGIS
+        env:
+          ASSET: ${{ steps.candidate.outputs.asset }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          STRATA_CANDIDATE_TAG: ${{ steps.candidate.outputs.tag }}
+          STRATA_CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          STRATA_CRS_TEST_DB: host=127.0.0.1 port=55013 dbname=strata_crs_candidate user=postgres sslmode=disable
+        run: >-
+          xvfb-run -a python3 scripts/ci/test_candidate_postgis.py "./$ASSET"
+          --version "$VERSION"
+          --test-source "$RUNNER_TEMP/test_provider_postgres_crs.py"
+          --asset "$ASSET"
+          --output postgis-candidate-linux.json
+
+      - name: Upload receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: postgis-candidate-linux
+          path: |
+            postgis-candidate-linux.json
+            crs-runtime-linux.json
+            candidate-release.json
+          if-no-files-found: warn
+
+  windows:
+    if: inputs.platform != 'linux'
+    runs-on: windows-2022
+    timeout-minutes: 40
+    permissions:
+      contents: write # reading a draft release needs push access
+    env:
+      INPUT_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve the candidate and its test suite
+        id: candidate
+        shell: bash
+        run: |
+          TAG="${INPUT_TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          [[ "$TAG" =~ ^strata-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::Tag must look like strata-vX.Y.Z"; exit 1; }
+          sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          git show "${sha}:tests/src/python/test_provider_postgres_crs.py" > "$RUNNER_TEMP/test_provider_postgres_crs.py"
+          {
+            echo "tag=${TAG}"
+            echo "version=${BASH_REMATCH[1]}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run the PostGIS CRS suite with the packaged PyQGIS
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SOURCE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: >-
+          ./scripts/ci/test-candidate-postgis-windows.ps1
+          -Tag $env:TAG -Version $env:VERSION -SourceSha $env:SOURCE_SHA
+          -TestSource (Join-Path $env:RUNNER_TEMP 'test_provider_postgres_crs.py')
+
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: postgis-candidate-windows
+          path: postgis-candidate-windows.json
+          if-no-files-found: warn
