@@ -71,8 +71,11 @@ try {
   foreach ($key in @('PROJ_DATA', 'PROJ_LIB', 'GDAL_DATA')) { [Environment]::SetEnvironmentVariable($key, $null) }
 
   $desktop = Join-Path $root 'bin\Strata.exe'
-  $version = (& $desktop --version | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or -not $version.Contains("Strata $Version (based on QGIS ")) { throw "Candidate application version mismatch: $version" }
+  # The GUI executable prints the version but does not exit with 0 on Windows,
+  # so only the text is checked; the suite itself runs with the bundled Python.
+  $version = (& $desktop --version 2>&1 | Out-String).Trim()
+  Write-Host "Strata.exe --version (exit $LASTEXITCODE): $version"
+  if (-not $version.Contains("Strata $Version (based on QGIS ")) { throw "Candidate application version mismatch: $version" }
   & $python[0].FullName (Join-Path $PSScriptRoot 'run_candidate_postgis.py')
   if ($LASTEXITCODE -ne 0) { throw 'Candidate PostGIS regression failed' }
   $result = Get-Content $env:STRATA_CRS_CANDIDATE_OUT -Raw | ConvertFrom-Json
