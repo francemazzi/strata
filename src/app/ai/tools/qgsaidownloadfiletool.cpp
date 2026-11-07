@@ -69,6 +69,29 @@ namespace
 
     return QDir( contextProvider->workspaceRoot() ).relativeFilePath( absolutePath );
   }
+
+  // Agents often build Overpass or Nominatim queries by hand and leave reserved
+  // characters such as '[', ']' or '"' unescaped in the query string, which
+  // QUrl::StrictMode rejects. Percent-encode only the query and the fragment, keep
+  // characters RFC 3986 allows there (and '%', so existing escapes are not encoded
+  // twice), then validate strictly again. Scheme, host and path are not touched, so
+  // the scheme, host and credential checks that follow apply unchanged.
+  QUrl downloadUrlWithEncodedQuery( const QString &urlString )
+  {
+    const qsizetype queryIndex = urlString.indexOf( '?'_L1 );
+    if ( queryIndex < 0 )
+      return QUrl();
+
+    const auto encode = []( const QString &part ) { return QString::fromLatin1( part.toUtf8().toPercentEncoding( QByteArrayLiteral( "!$&'()*+,;=:@/?%" ) ) ); };
+    const qsizetype fragmentIndex = urlString.indexOf( '#'_L1, queryIndex + 1 );
+    const QString query = urlString.mid( queryIndex + 1, fragmentIndex < 0 ? -1 : fragmentIndex - queryIndex - 1 );
+    QString candidate = urlString.left( queryIndex + 1 ) + encode( query );
+    if ( fragmentIndex >= 0 )
+      candidate += '#'_L1 + encode( urlString.mid( fragmentIndex + 1 ) );
+
+    const QUrl url( candidate, QUrl::StrictMode );
+    return url.isValid() ? url : QUrl();
+  }
 } //namespace
 
 QgsAiDownloadFileTool::QgsAiDownloadFileTool( QgsAiFileContextProvider *contextProvider, QWidget *dialogParent )
@@ -104,7 +127,7 @@ QString QgsAiDownloadFileTool::description() const
 QJsonObject QgsAiDownloadFileTool::schema() const
 {
   QJsonObject properties;
-  properties.insert( u"url"_s, prop( u"string"_s, u"The HTTPS URL to fetch. Public HTTP URLs are refused; localhost HTTP is allowed for development."_s ) );
+  properties.insert( u"url"_s, prop( u"string"_s, u"The HTTPS URL to fetch. Public HTTP URLs are refused; localhost HTTP is allowed for development. Unescaped reserved characters in the query string (e.g. '[', ']', '\"' in Overpass queries) are percent-encoded automatically."_s ) );
   properties.insert( u"dest_path"_s, prop( u"string"_s, u"Destination path, relative to the workspace root (e.g. 'data/pomponesco.geojson'). Writes outside the workspace are refused."_s ) );
   properties.insert( u"expected_sha256"_s, prop( u"string"_s, u"Optional expected SHA-256 hex digest. If supplied, the file is deleted and the tool fails on mismatch."_s ) );
   QJsonObject maxBytesProp;
@@ -129,9 +152,14 @@ QgsAiToolResult QgsAiDownloadFileTool::execute( const QJsonObject &args )
   if ( urlString.isEmpty() )
     return QgsAiToolResult::error( u"Argument 'url' is required."_s );
 
-  const QUrl url( urlString, QUrl::StrictMode );
+  QUrl url( urlString, QUrl::StrictMode );
   if ( !url.isValid() )
-    return QgsAiToolResult::error( u"URL is not valid: '%1'."_s.arg( urlString ) );
+    url = downloadUrlWithEncodedQuery( urlString );
+  if ( !url.isValid() )
+    return QgsAiToolResult::error(
+      u"URL is not valid: '%1'. Percent-encode special characters in the query string, "
+      "for example '[' as %5B, ']' as %5D and '\"' as %22 in Overpass queries."_s.arg( urlString )
+    );
   const QString scheme = url.scheme().toLower();
   if ( scheme != "http"_L1 && scheme != "https"_L1 )
     return QgsAiToolResult::error( u"Only http and https URLs are allowed (got '%1')."_s.arg( scheme ) );
