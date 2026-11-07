@@ -154,6 +154,13 @@ jobs:
           # To make ccache work properly with precompiled headers
           ccache --set-config sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime
 
+      # STRATA-PATCH: pcre2 fetches the sljit gitlink from api.github.com without a token and
+      # gets 403 on shared runner IPs. Prefetch it with the job token (never fails the build).
+      - name: 🔑 Prefetch vcpkg GitHub API downloads
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/vcpkg-prefetch-github-api.sh vcpkg/vcpkg.json
+
       - name: 🌱 Install dependencies and generate project files
         env:
           X_VCPKG_ASSET_SOURCES: x-azurl,https://assetcache.open-vcpkg.org/assetcache,,read
