@@ -161,6 +161,7 @@ using namespace Qt::StringLiterals;
 #include "qgsmaplayerfactory.h"
 #include "qgsprocessingwidgetcontext.h"
 #include "qgsprocessingmodelprovider.h"
+#include "qgsmodeldesignerdialog.h"
 #include "processing/qgsprocessingtoolboxdock.h"
 
 #include "qgsbrowserwidget.h"
@@ -392,6 +393,7 @@ using namespace Qt::StringLiterals;
 #include "qgslayoutatlas.h"
 #include "qgslayoutcustomdrophandler.h"
 #include "qgslayoutdesignerdialog.h"
+#include "qgsprocessingmodelalgorithm.h"
 #include "qgslayoutitemguiregistry.h"
 #include "qgslayoutmanager.h"
 #include "qgslayoutqptdrophandler.h"
@@ -2121,7 +2123,7 @@ QgisApp::QgisApp(
     toggleMapTips( true );
   }
 
-  connect( mActionModelDesigner, &QAction::triggered, mAppProcessingUtils.get(), &QgsAppProcessingUtils::openModelDesigner );
+  connect( mActionModelDesigner, &QAction::triggered, mAppProcessingUtils.get(), [this] { mAppProcessingUtils->openModelDesignerDialog( nullptr ); } );
   connect( mProcessingHistoryAction, &QAction::triggered, mAppProcessingUtils.get(), &QgsAppProcessingUtils::openHistory );
 
   mPythonMacrosEnabled = false;
@@ -4983,6 +4985,7 @@ void QgisApp::setupConnections()
   connect( this, &QgisApp::initializationCompleted, this, [this] {
     fileOpenAfterLaunch();
     connect( QgsProject::instance(), &QgsProject::layersAdded, this, &QgisApp::showMapCanvas );
+    connect( this, &QgisApp::newProject, this, &QgisApp::showMapCanvas );
   } );
 
   // Connect warning dialog from project reading
