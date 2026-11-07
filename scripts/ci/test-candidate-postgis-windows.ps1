@@ -47,8 +47,17 @@ Copy-Item "$work\postgis\postgis-bundle-pg14-3.6.1x64\*" $pgRoot -Recurse -Force
 $data = Join-Path $work 'database'
 & "$pgBin\initdb.exe" -D $data -U postgres -A trust --encoding=UTF8
 if ($LASTEXITCODE -ne 0) { throw 'initdb failed' }
-& "$pgBin\pg_ctl.exe" -D $data -l "$work\postgres.log" -o '-p 55013 -h 127.0.0.1' -w start
-if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL start failed' }
+# The runner's first start occasionally exits early: show the server log and retry once.
+$pgLog = Join-Path $work 'postgres.log'
+$started = $false
+foreach ($attempt in 1..2) {
+  & "$pgBin\pg_ctl.exe" -D $data -l $pgLog -o '-p 55013 -h 127.0.0.1' -w -t 120 start
+  if ($LASTEXITCODE -eq 0) { $started = $true; break }
+  Write-Host "PostgreSQL start attempt $attempt failed. Server log:"
+  if (Test-Path $pgLog) { Get-Content $pgLog | Write-Host }
+  Start-Sleep -Seconds 5
+}
+if (-not $started) { throw 'PostgreSQL start failed' }
 try {
   & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55013 -U postgres strata_crs_candidate
   if ($LASTEXITCODE -ne 0) { throw 'Database creation failed' }
