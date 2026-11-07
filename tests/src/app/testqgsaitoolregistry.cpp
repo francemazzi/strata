@@ -215,6 +215,9 @@ class TestQgsAiToolRegistry : public QObject
     void processingSourceCanBeSelectedOrFiltered();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
+    void downloadFileEncodesRawOverpassQuery();
+    void downloadFileKeepsEncodedQuery();
+    void downloadFileInvalidUrlHintsPercentEncoding();
 };
 
 void TestQgsAiToolRegistry::initTestCase()
@@ -2007,6 +2010,53 @@ void TestQgsAiToolRegistry::trustGatingHidesRiskyTools()
   // Revoking trust hides it once more.
   QgsAiWorkspaceTrust::setState( tempDir.path(), QgsAiWorkspaceTrust::State::Untrusted );
   QVERIFY( !registry.availableToolNames().contains( u"download_file"_s ) );
+}
+
+namespace
+{
+  // download_file validates the URL before the destination. A destination outside
+  // the workspace therefore reports the destination error only when the URL was
+  // accepted, without opening the approval dialog or touching the network.
+  QgsAiToolResult downloadOutsideWorkspace( const QString &url )
+  {
+    QTemporaryDir tempDir;
+    QgsAiWorkspaceTrust::setState( tempDir.path(), QgsAiWorkspaceTrust::State::Trusted );
+    QgsAiFileContextProvider contextProvider( tempDir.path() );
+    QgsAiDownloadFileTool tool( &contextProvider, nullptr );
+    QJsonObject args;
+    args.insert( u"url"_s, url );
+    args.insert( u"dest_path"_s, u"../outside-workspace.geojson"_s );
+    return tool.execute( args );
+  }
+} // namespace
+
+void TestQgsAiToolRegistry::downloadFileEncodesRawOverpassQuery()
+{
+  const QgsAiToolResult result = downloadOutsideWorkspace( u"https://overpass-api.de/api/interpreter?data=[out:json][timeout:25];nwr[name~\"Garzaia\",i](around:5000,44.93,10.61);out body;"_s );
+  QVERIFY( !result.success );
+  QVERIFY2( !result.errorMessage.contains( u"URL is not valid"_s ), qPrintable( result.errorMessage ) );
+  QVERIFY2( result.errorMessage.contains( u"outside the workspace"_s ), qPrintable( result.errorMessage ) );
+}
+
+void TestQgsAiToolRegistry::downloadFileKeepsEncodedQuery()
+{
+  const QgsAiToolResult result = downloadOutsideWorkspace( u"https://overpass-api.de/api/interpreter?data=%5Bout%3Ajson%5D%3B#map"_s );
+  QVERIFY( !result.success );
+  QVERIFY2( result.errorMessage.contains( u"outside the workspace"_s ), qPrintable( result.errorMessage ) );
+}
+
+void TestQgsAiToolRegistry::downloadFileInvalidUrlHintsPercentEncoding()
+{
+  // No query string to repair: still refused, with the hint.
+  QgsAiToolResult result = downloadOutsideWorkspace( u"ht!tp://[invalid"_s );
+  QVERIFY( !result.success );
+  QVERIFY2( result.errorMessage.contains( u"URL is not valid"_s ), qPrintable( result.errorMessage ) );
+  QVERIFY2( result.errorMessage.contains( u"Percent-encode"_s ), qPrintable( result.errorMessage ) );
+
+  // Encoding the query does not repair a broken host.
+  result = downloadOutsideWorkspace( u"https://exa mple.org/data?q=[x]"_s );
+  QVERIFY( !result.success );
+  QVERIFY2( result.errorMessage.contains( u"URL is not valid"_s ), qPrintable( result.errorMessage ) );
 }
 
 QGSTEST_MAIN( TestQgsAiToolRegistry )

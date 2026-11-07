@@ -95,6 +95,13 @@ QMenu::item:disabled
   color: @muted;
 }
 
+QMenu::separator
+{
+  height: 1px;
+  background: @border;
+  margin: 0.25em 0.45em;
+}
+
 QToolBar
 {
   spacing: 0.12em;
