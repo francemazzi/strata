@@ -166,6 +166,15 @@ jobs:
           ./scripts/ci/test-windows-signing-service.ps1
           ./scripts/ci/prepare-nsis-signing.ps1
 
+      # STRATA-PATCH: pcre2 fetches the sljit gitlink from api.github.com without a token and
+      # gets 403 on shared runner IPs. Only needed when vcpkg rebuilds (no SDK); never fails.
+      - name: 🔑 Prefetch vcpkg GitHub API downloads
+        if: ${{ env.USE_WINDOWS_SDK != 'true' || steps.download-sdk.outcome != 'success' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/vcpkg-prefetch-github-api.sh vcpkg/vcpkg.json
+
       - name: 🌱 Install dependencies and generate project files
         id: cmake-configure
         shell: bash
