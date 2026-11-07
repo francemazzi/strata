@@ -80,7 +80,7 @@ Strata Cloud is the recommended setup when you want managed AI models, credit ac
 You can create and use a Strata Cloud account in two ways:
 
 - **From the web app**: register at [app.getstrata.org/registrati](https://app.getstrata.org/registrati), then sign in at [app.getstrata.org](https://app.getstrata.org).
-- **From Strata Desktop**: open **AI Assistant → ⚙ settings → Account**, choose **Sign up** or **Log in**, and enter email + password.
+- **From Strata Desktop**: open **Strata Assistant → ⚙ settings → Account**, choose **Sign up** or **Log in**, and enter email + password.
 
 Current account policy:
 
@@ -101,7 +101,7 @@ Credential and data policy:
 ## Configure AI on first launch
 
 1. Open Strata.
-2. Menu **View → Panels → AI Assistant**.
+2. Menu **View → Panels → Strata Assistant**.
 3. Click the **⚙ settings** icon in the top-right corner of the panel.
 4. In **Account**, log in or create a **Strata Cloud** account for managed models and credits.
 5. If you prefer BYOK, configure a provider under the provider settings instead: OpenAI/OpenRouter/Anthropic API key, or **Codex/ChatGPT** login.

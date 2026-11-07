@@ -23,7 +23,7 @@ body:
     id: idea
     attributes:
       label: What would you like Strata to do?
-      placeholder: "Example: I would like to ask the AI assistant to prepare the raster calculation and generate the output layer."
+      placeholder: "Example: I would like to ask Strata Assistant to prepare the raster calculation and generate the output layer."
     validations:
       required: true
 
@@ -32,7 +32,7 @@ body:
     attributes:
       label: Feature area
       options:
-        - AI assistant
+        - Strata Assistant
         - GIS automation
         - Data loading
         - Analysis workflow

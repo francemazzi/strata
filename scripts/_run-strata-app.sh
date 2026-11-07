@@ -61,7 +61,7 @@ echo "Strata Plan backend: ${STRATA_PLAN_ENDPOINT}" >&2
 
 # Performance tips (dev builds):
 # - Layer auto-indexing can add background work after add/open layer; disable in
-#   AI Assistant settings (strata/index/enable_layer_indexing) to compare load time.
+#   Strata Assistant settings (strata/index/enable_layer_indexing) to compare load time.
 # - Run ./scripts/verify-layer-index-perf.sh for a structured on/off comparison.
 # - Remove stale SVG paths: ./scripts/clean-stale-svg-paths.sh
 # - Skip Python plugins when profiling startup: ./scripts/run-strata-dev.sh -- -P
