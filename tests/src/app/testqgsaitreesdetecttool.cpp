@@ -68,6 +68,7 @@ class TestQgsAiTreesDetectTool : public QObject
   private slots:
     void init();
     void cleanup();
+    void asksBeforeEditsButNotInAgentMode();
     void validatesArgumentsWithoutNetwork();
     void pollsAndReturnsVerifiedArtifact();
     void acceptsOmittedRegion();
@@ -87,6 +88,18 @@ void TestQgsAiTreesDetectTool::init()
 void TestQgsAiTreesDetectTool::cleanup()
 {
   clearPlanSettings();
+}
+
+void TestQgsAiTreesDetectTool::asksBeforeEditsButNotInAgentMode()
+{
+  // Ask-before-edits lists only read-only tools and tools with an approval.
+  // Agent mode asks only for tools whose changes cannot be undone.
+  QgsAiModelRouter router;
+  const QgsAiTreesDetectTool tool( &router );
+  QVERIFY( tool.requiresApproval() );
+  QCOMPARE( tool.approvalMode(), QgsAiToolApprovalMode::Generic );
+  QCOMPARE( tool.riskLevel(), QgsAiToolRiskLevel::Medium );
+  QVERIFY( tool.canBeUndone() );
 }
 
 void TestQgsAiTreesDetectTool::validatesArgumentsWithoutNetwork()

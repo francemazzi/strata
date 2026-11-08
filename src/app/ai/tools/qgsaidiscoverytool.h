@@ -17,9 +17,19 @@ class APP_EXPORT QgsAiDiscoveryTool : public QgsAiTool
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
     bool isAvailable() const override;
-    bool requiresApproval() const override { return mName == "discovery_run"_L1; }
-    QgsAiToolApprovalMode approvalMode() const override { return requiresApproval() ? QgsAiToolApprovalMode::SelfApproved : QgsAiToolApprovalMode::None; }
-    QgsAiToolRiskLevel riskLevel() const override { return requiresApproval() ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low; }
+
+    /**
+     * discovery_run asks in its own preview dialog. discovery_cancel stops a remote job,
+     * so Ask-before-edits offers it with the generic approval.
+     */
+    bool requiresApproval() const override { return mName == "discovery_run"_L1 || mName == "discovery_cancel"_L1; }
+    QgsAiToolApprovalMode approvalMode() const override
+    {
+      if ( mName == "discovery_run"_L1 )
+        return QgsAiToolApprovalMode::SelfApproved;
+      return mName == "discovery_cancel"_L1 ? QgsAiToolApprovalMode::Generic : QgsAiToolApprovalMode::None;
+    }
+    QgsAiToolRiskLevel riskLevel() const override { return mName == "discovery_run"_L1 ? QgsAiToolRiskLevel::High : QgsAiToolRiskLevel::Low; }
 
   private:
     QString mName;

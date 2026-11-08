@@ -38,6 +38,14 @@ class APP_EXPORT QgsAiDataHubExtractTool : public QgsAiTool
     QString description() const override;
     QJsonObject schema() const override;
     QgsAiToolResult execute( const QJsonObject &args ) override;
+
+    /**
+     * The extract starts a Strata Cloud job that uses the plan quota, so Ask-before-edits
+     * offers it with the generic approval. It leaves the project unchanged, so Agent mode
+     * runs it without asking.
+     */
+    bool requiresApproval() const override { return true; }
+    QgsAiToolRiskLevel riskLevel() const override { return QgsAiToolRiskLevel::Medium; }
     bool isAvailable() const override;
     QString availabilityReason() const override;
 
