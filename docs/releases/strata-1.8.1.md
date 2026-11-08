@@ -22,5 +22,4 @@ Validation on 2026-11-05: the complete macOS desktop build and affected AI test
 suites passed. A real subscription signed in through the native settings panel,
 answered in the chat, executed `list_project_layers`, and correctly reported zero
 layers in an empty project. Native Windows/Linux transport checks and signed
-package verification are release gates; this candidate must remain unpublished
-until their evidence is complete.
+package verification passed before publication.
