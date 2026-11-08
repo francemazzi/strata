@@ -87,6 +87,7 @@ typedef SInt32 SRefCon;
 
 #include "qgscustomization.h"
 #include "qgssettings.h"
+#include "qgssettingsentry.h"
 #include "qgsfontutils.h"
 #include "qgsmessagelog.h"
 #include "qgspythonrunner.h"
@@ -1228,9 +1229,10 @@ int main( int argc, char *argv[] )
 
   if ( !globalsettingsfile.isEmpty() )
   {
-    bool ok = QgsSettings::setGlobalSettingsPath( globalsettingsfile );
+    const bool ok1 = QgsSettingsEntryBase::setGlobalSettingsPath( globalsettingsfile );
+    const bool ok2 = QgsSettings::setGlobalSettingsPath( globalsettingsfile );
 
-    if ( !ok )
+    if ( !ok1 || !ok2 )
     {
       preApplicationWarningMessages << QObject::tr( "Invalid globalsettingsfile path: %1" ).arg( globalsettingsfile ), u"QGIS"_s;
     }
