@@ -5,7 +5,10 @@
 #include "ai/discovery/qgsaidiscoverycontroller.h"
 #include "ai/discovery/qgsaidiscoveryimport.h"
 #include "ai/discovery/qgsaidiscoverypreview.h"
+#include "ai/qgsaiagentsessionmanager.h"
+#include "ai/qgsaireviewpatchengine.h"
 #include "ai/tools/qgsaidiscoverytool.h"
+#include "ai/tools/qgsaitoolregistry.h"
 #include "qgsaifilecontextprovider.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaisecretstoretestutils.h"
@@ -48,6 +51,7 @@ class TestQgsAiDiscoveryWorkflow : public QObject
     void previewSelectionDownloadImport();
     void missingProviderIsAnImportFailure();
     void nativeCrsMismatchProducesPartialImport();
+    void askBeforeEditsOffersCancelWithApproval();
 };
 void TestQgsAiDiscoveryWorkflow::previewSelectionDownloadImport_data()
 {
@@ -205,6 +209,57 @@ void TestQgsAiDiscoveryWorkflow::nativeCrsMismatchProducesPartialImport()
   QCOMPARE( result.outcome.value( u"rejectedLayers"_s ).toInt(), 1 );
   QCOMPARE( result.layers[0]->crs().authid(), u"EPSG:4326"_s );
   qDeleteAll( result.layers );
+}
+void TestQgsAiDiscoveryWorkflow::askBeforeEditsOffersCancelWithApproval()
+{
+  // The run asks in its own preview, the cancel through the generic tool approval.
+  QgsAiDiscoveryTool run( u"discovery_run"_s, nullptr );
+  QgsAiDiscoveryTool cancel( u"discovery_cancel"_s, nullptr );
+  QgsAiDiscoveryTool status( u"discovery_status"_s, nullptr );
+  QCOMPARE( run.approvalMode(), QgsAiToolApprovalMode::SelfApproved );
+  QCOMPARE( run.riskLevel(), QgsAiToolRiskLevel::High );
+  QVERIFY( cancel.requiresApproval() );
+  QCOMPARE( cancel.approvalMode(), QgsAiToolApprovalMode::Generic );
+  QCOMPARE( cancel.riskLevel(), QgsAiToolRiskLevel::Low );
+  QVERIFY( !status.requiresApproval() );
+  QCOMPARE( status.approvalMode(), QgsAiToolApprovalMode::None );
+
+  QTemporaryDir root;
+  QVERIFY( root.isValid() );
+  QgsAiModelRouter router;
+  QVERIFY( router.setPlanSessionToken( u"strata_synthetic_opaque"_s ) );
+  auto settings = router.providerSettings( QgsAiModelRouter::Provider::Plan );
+  settings.endpoint = u"http://127.0.0.1:9/ai/messages"_s;
+  settings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Plan, settings );
+  QgsProject project;
+  QgsAiFileContextProvider files( root.path() );
+  QgsAiDiscoveryController controller( &router, &files, nullptr, &project );
+  QVERIFY( controller.available() );
+
+  QgsAiToolRegistry registry;
+  for ( const QString &name : { u"discovery_resolve"_s, u"discovery_search"_s, u"discovery_status"_s, u"discovery_run"_s, u"discovery_cancel"_s } )
+    registry.registerTool( std::make_unique<QgsAiDiscoveryTool>( name, &controller ) );
+  router.setToolRegistry( &registry );
+
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( &router, &files, &reviewEngine );
+  manager.setToolRegistry( &registry );
+  QgsAiAgentBehaviorSettings behavior = manager.agentBehaviorSettings();
+  behavior.allowCustomActions = true;
+  manager.setAgentBehaviorSettings( behavior );
+
+  manager.setActiveAgent( u"ask_before_edits"_s );
+  QStringList allowed = manager.allowedToolNamesForActiveAgent();
+  QVERIFY2( allowed.contains( u"discovery_cancel"_s ), qPrintable( allowed.join( ',' ) ) );
+  QVERIFY( allowed.contains( u"discovery_run"_s ) );
+  QVERIFY( allowed.contains( u"discovery_status"_s ) );
+
+  manager.setActiveAgent( u"reviewer"_s );
+  allowed = manager.allowedToolNamesForActiveAgent();
+  QVERIFY( allowed.contains( u"discovery_status"_s ) );
+  QVERIFY( !allowed.contains( u"discovery_cancel"_s ) );
+  QVERIFY( !allowed.contains( u"discovery_run"_s ) );
 }
 QGSTEST_MAIN( TestQgsAiDiscoveryWorkflow )
 #include "testqgsaidiscoveryworkflow.moc"

@@ -64,6 +64,7 @@ class TestQgsAiDataHubExtractTool : public QObject
   private slots:
     void init();
     void cleanup();
+    void asksBeforeEditsButNotInAgentMode();
     void validatesArgumentsWithoutNetwork();
     void pollsAndReturnsVerifiedArtifact();
     void pollsAndReturnsVerifiedZipArtifact();
@@ -83,6 +84,18 @@ void TestQgsAiDataHubExtractTool::init()
 void TestQgsAiDataHubExtractTool::cleanup()
 {
   clearPlanSettings();
+}
+
+void TestQgsAiDataHubExtractTool::asksBeforeEditsButNotInAgentMode()
+{
+  // Ask-before-edits lists only read-only tools and tools with an approval.
+  // Agent mode asks only for tools whose changes cannot be undone.
+  QgsAiModelRouter router;
+  const QgsAiDataHubExtractTool tool( &router );
+  QVERIFY( tool.requiresApproval() );
+  QCOMPARE( tool.approvalMode(), QgsAiToolApprovalMode::Generic );
+  QCOMPARE( tool.riskLevel(), QgsAiToolRiskLevel::Medium );
+  QVERIFY( tool.canBeUndone() );
 }
 
 void TestQgsAiDataHubExtractTool::validatesArgumentsWithoutNetwork()
