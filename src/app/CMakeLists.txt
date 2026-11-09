@@ -350,6 +350,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaicodexoauthclient.cpp
     ai/qgsaifilecontextprovider.cpp
     ai/qgsaigissuggestionengine.cpp
+    ai/qgsailocalservercatalog.cpp
     ai/qgsaimodelrouter.cpp
     ai/qgsaimodels.cpp
     ai/qgsaioauthcallbackpage.cpp

@@ -103,6 +103,7 @@ Credential and data policy:
 - Strata Cloud desktop tokens use the system keychain. When it is unavailable, the user can retry or explicitly keep the token in memory for the current session. New credentials are never saved unencrypted in local settings.
 - Cloud context sync is opt-in. Strata only uploads explicitly approved safe context, and blocks geometry, coordinates, WKT, and datasource URI payloads before upload.
 - BYOK remains available for OpenAI, OpenRouter, Anthropic and Codex/ChatGPT if you prefer to use your own provider credentials.
+- A local Ollama server can be used instead of a cloud provider. Prompts, project context and tool results then stay on your machine, as long as the configured server address is a local one.
 
 ---
 
@@ -120,6 +121,7 @@ Provider credential options:
 - **OpenRouter**: [openrouter.ai/keys](https://openrouter.ai/keys)
 - **Anthropic**: [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Codex/ChatGPT**: in the settings dialog, choose “Get Codex device code”, open the page shown, and complete sign-in. The Codex model uses `gpt-5.5`.
+- **Ollama (local models)**: start Ollama yourself; Strata does not start it, install it or download models. While the server is running, the model menu of the chat shows an **Ollama (local)** section with the installed models that support tool calling (embedding models and chat models without tool support are left out). Pick one there, or under **Models & Providers → Ollama (local)**, where you can also set the context window requested from the server (`num_ctx`, 32768 tokens by default and never more than the model supports) and, under **Advanced endpoints**, the server address (default `http://127.0.0.1:11434`, or `OLLAMA_HOST` when set). No API key is involved. Local models are slower and less reliable at tool calling than the cloud ones: prefer the largest tool-capable model your machine can run.
 - **Claude subscription**: under **Models & Providers → Claude**, choose **Claude subscription** and **Connect Claude subscription**. Sign-in is handled by the unmodified official Claude Code application (2.1.283 or later); install or locate it from the same panel if needed. Choose Sonnet, Opus, Haiku or an explicit model supported by your plan, then **Use in this chat**. The Strata account and active provider remain separate. An Anthropic API key is an explicit alternative and is billed separately from a Claude subscription.
 
 New provider credentials are stored in the operating system keychain. If secure storage is unavailable, choose **Retry** or **Use only for this session**; session credentials are forgotten when Strata closes. Existing credentials are migrated only after the keychain copy has been written and read back successfully. A locked legacy vault is preserved and shown as **Protection incomplete** until migration succeeds. Chat and index encryption keys remain in the existing QGIS vault.

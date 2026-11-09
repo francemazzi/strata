@@ -176,6 +176,10 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QCheckBox *mOpenRouterAutoRouting = nullptr;
     QLineEdit *mCodexEndpoint = nullptr;
     QLineEdit *mCodexModel = nullptr;
+    QLineEdit *mOllamaEndpoint = nullptr;
+    QComboBox *mOllamaModel = nullptr;
+    QSpinBox *mOllamaNumCtx = nullptr;
+    QLabel *mOllamaStatus = nullptr;
     QLabel *mCodexStatus = nullptr;
     QgsAiCodexOAuthClient::DeviceCode mCodexDeviceCode;
     QLineEdit *mClaudeEndpoint = nullptr;

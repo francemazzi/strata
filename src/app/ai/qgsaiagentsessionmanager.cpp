@@ -1993,6 +1993,8 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
 
   if ( httpStatus == 0 )
   {
+    if ( lower.contains( "watchdog timed out"_L1 ) && providerName == "Ollama"_L1 )
+      return u"Ollama did not finish in time. Large local models are slow to load and to answer: retry, pick a smaller model, or raise ai/provider/ollama/timeoutSeconds in settings."_s;
     if ( lower.contains( "watchdog timed out"_L1 ) )
       return u"%1 request timed out. Retry, switch provider, or increase ai/network/watchdogSeconds in settings."_s.arg( providerName );
     if ( lower.contains( "endpoint is not configured"_L1 ) || lower.contains( "endpoint is a placeholder"_L1 ) )
@@ -3293,7 +3295,10 @@ QList<QgsAiChatMessage> QgsAiAgentSessionManager::buildOutgoingMessages() const
   systemMessage.timestamp = QDateTime::currentDateTimeUtc();
   result.append( systemMessage );
 
-  QList<QgsAiChatMessage> history = trimHistoryByTokenBudget( HISTORY_TOKEN_BUDGET );
+  // A local model has a far smaller window than the cloud ones: size the history
+  // to what is left once the system prompt and the tool schemas are counted.
+  const int historyBudget = mRouter ? mRouter->historyTokenBudget( mActiveProvider, HISTORY_TOKEN_BUDGET, static_cast<int>( systemMessage.content.size() ) ) : HISTORY_TOKEN_BUDGET;
+  QList<QgsAiChatMessage> history = trimHistoryByTokenBudget( historyBudget );
   if ( QgsAiVisualContextUtils::hasVisualConsent() )
   {
     QStringList attachedImagePaths;

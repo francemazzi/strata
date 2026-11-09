@@ -162,8 +162,9 @@ Cosa evitare:
 - [x] Dock assistant production-grade (`qgsaichatdockwidget`)
 - [x] Router 5 provider LLM + Strata Cloud Plan (`qgsaimodelrouter`, `qgsaiplanclient`)
 - [ ] Provider modello locale — anticipato dalla Fase 7: blocker esplicito per PA ed enterprise (need: 12). Analisi lug 2026: 6° provider nel router custom (`qgsaimodelrouter`), nessun framework richiesto; effort ~2–3 settimane inclusa qualificazione
-  - [ ] Adapter **Ollama API nativa `/api/chat`** (streaming NDJSON, parsing banale via `QNetworkAccessManager`) — NON il layer OpenAI-compat: bug documentati di tool call perse in streaming e `num_ctx` ignorato
-  - [ ] `num_ctx` esplicito 32–64k per richiesta + detection `done_reason=length` con errore chiaro (il default 4k sotto 24 GiB è il killer silenzioso dell'agente)
+  - [x] Adapter **Ollama API nativa `/api/chat`** (streaming NDJSON, parsing banale via `QNetworkAccessManager`) — NON il layer OpenAI-compat: bug documentati di tool call perse in streaming e `num_ctx` ignorato
+  - [x] `num_ctx` esplicito 32–64k per richiesta + detection `done_reason=length` con errore chiaro (il default 4k sotto 24 GiB è il killer silenzioso dell'agente)
+  - [x] Rilevamento del server in esecuzione e catalogo dei modelli installati con supporto ai tool (`qgsailocalservercatalog`): sezione "Ollama (local)" nel menu modelli solo a server attivo; budget della cronologia calcolato sulla finestra di contesto
   - [ ] Tool call serializzate (le parallele sono inaffidabili su tutti i modelli open) + set tool ridotto per turno (~10–15 max, i modelli piccoli degradano oltre)
   - [ ] Allowlist modelli per RAM rilevata: 8 GB → Qwen3.5 4B / Gemma 4 E4B (≥95% su suite tool-calling); 16 GB → 8–9B Q4; 32 GB → Qwen3.6 35B-A3B / gpt-oss-20b; blocco DeepSeek R1 distill e Llama 4 con messaggio esplicativo
   - [ ] Endpoint generico OpenAI-compat secondario (llama.cpp `--jinja`, LM Studio) senza affidarsi a `tool_choice`/`parallel_tool_calls`

@@ -37,6 +37,7 @@
 #include "qgsaigissuggestionengine.h"
 #include "qgsaimessagelogbuffer.h"
 #include "qgsaimodelrouter.h"
+#include "qgsailocalservercatalog.h"
 #include "qgsaiopenroutermodelcatalog.h"
 #include "qgsaiplanclient.h"
 #include "qgsairulesskillscloudclient.h"
@@ -641,7 +642,8 @@ void QgsAiSettingsDialog::accept()
     {
       if ( !mModelRouter->isProviderUsable( *mRequestedProvider ) )
       {
-        QMessageBox::information( this, tr( "Configure a provider" ), tr( "Enter an API key before using this provider." ) );
+        QMessageBox::
+          information( this, tr( "Configure a provider" ), QgsAiModelRouter::isLocalProvider( *mRequestedProvider ) ? tr( "Start the local server and choose one of its models before using this provider." ) : tr( "Enter an API key before using this provider." ) );
         return;
       }
       mModelRouter->setActiveProvider( *mRequestedProvider );
@@ -990,6 +992,62 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   } );
   addUseButton( QgsAiModelRouter::Provider::Codex, u"aiCodexUseButton"_s );
 
+  // ---- Ollama ----
+  // Strata only detects a server that is already running: it never starts
+  // Ollama, installs it or downloads models.
+  contentLayout->addWidget( sectionHeader( tr( "Ollama (local)" ), page ) );
+  const QgsAiModelRouter::ProviderSettings ollamaSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Ollama );
+  mOllamaEndpoint = new QLineEdit( ollamaSettings.endpoint, page );
+  mOllamaEndpoint->setObjectName( u"aiOllamaEndpointLineEdit"_s );
+  mOllamaEndpoint->setPlaceholderText( QgsAiLocalServerCatalog::defaultOllamaBaseUrl() );
+  mOllamaStatus = new QLabel( page );
+  mOllamaStatus->setObjectName( u"aiOllamaStatusLabel"_s );
+  mOllamaStatus->setWordWrap( true );
+  mOllamaModel = new QComboBox( page );
+  mOllamaModel->setObjectName( u"aiOllamaModelComboBox"_s );
+  mOllamaNumCtx = new QSpinBox( page );
+  mOllamaNumCtx->setObjectName( u"aiOllamaNumCtxSpinBox"_s );
+  mOllamaNumCtx->setRange( 2048, 1048576 );
+  mOllamaNumCtx->setSingleStep( 4096 );
+  mOllamaNumCtx->setValue( QgsSettings().value( u"ai/provider/ollama/numCtx"_s, 32768 ).toInt() );
+  QPushButton *ollamaRefreshButton = new QPushButton( tr( "Refresh" ), page );
+  ollamaRefreshButton->setObjectName( u"aiOllamaRefreshButton"_s );
+
+  QgsAiLocalServerCatalog *ollamaCatalog = mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama );
+  const auto updateOllama = [this, ollamaCatalog]() {
+    QString status = mModelRouter->credentialStatus( QgsAiModelRouter::Provider::Ollama );
+    if ( !QgsAiLocalServerCatalog::isLoopbackUrl( ollamaCatalog->baseUrl() ) )
+      status += u"\n"_s + tr( "This server is not on this computer: prompts and project data sent to the model leave this machine." );
+    mOllamaStatus->setText( status );
+
+    // Keep the saved model selected even while the server is stopped.
+    QString selected = mOllamaModel->currentData().toString();
+    if ( selected.isEmpty() )
+      selected = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Ollama ).model;
+    mOllamaModel->clear();
+    const QList<QgsAiLocalServerCatalog::ModelInfo> models = ollamaCatalog->models();
+    for ( const QgsAiLocalServerCatalog::ModelInfo &model : models )
+      mOllamaModel->addItem( model.displayLabel(), model.id );
+    if ( !selected.isEmpty() && mOllamaModel->findData( selected ) < 0 )
+      mOllamaModel->addItem( tr( "%1 (not available)" ).arg( selected ), selected );
+    mOllamaModel->setCurrentIndex( mOllamaModel->findData( selected ) );
+  };
+  connect( ollamaCatalog, &QgsAiLocalServerCatalog::changed, this, updateOllama );
+  connect( ollamaRefreshButton, &QPushButton::clicked, this, [this, ollamaCatalog]() {
+    // Probe the address being edited, so a new server can be tried before saving.
+    const QString edited = QgsAiLocalServerCatalog::normalizedBaseUrl( mOllamaEndpoint->text(), 11434 );
+    ollamaCatalog->setBaseUrl( edited.isEmpty() ? QgsAiLocalServerCatalog::defaultOllamaBaseUrl() : edited );
+    ollamaCatalog->refresh( true );
+  } );
+  updateOllama();
+  ollamaCatalog->refresh();
+
+  contentLayout->addWidget( settingRow( tr( "Status" ), tr( "Strata lists the models of a running Ollama server. It does not start Ollama or download models." ), mOllamaStatus, page ) );
+  contentLayout->addWidget( settingRow( tr( "Model" ), tr( "Only installed models that support tool calling are listed." ), mOllamaModel, page ) );
+  contentLayout->addWidget( settingRow( tr( "Context window" ), tr( "Tokens requested from Ollama (num_ctx), capped to what the model supports. Larger values use more memory." ), mOllamaNumCtx, page ) );
+  contentLayout->addWidget( settingRow( tr( "Server" ), QString(), ollamaRefreshButton, page ) );
+  addUseButton( QgsAiModelRouter::Provider::Ollama, u"aiOllamaUseButton"_s );
+
   // ---- Advanced endpoints ----
   QgsCollapsibleGroupBox *advancedEndpoints = new QgsCollapsibleGroupBox( tr( "Advanced endpoints" ), page );
   QFormLayout *endpointsForm = new QFormLayout( advancedEndpoints );
@@ -997,6 +1055,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   endpointsForm->addRow( tr( "OpenRouter endpoint" ), mOpenRouterEndpoint );
   endpointsForm->addRow( tr( "Codex endpoint" ), mCodexEndpoint );
   endpointsForm->addRow( tr( "Claude endpoint" ), mClaudeEndpoint );
+  endpointsForm->addRow( tr( "Ollama server" ), mOllamaEndpoint );
   advancedEndpoints->setCollapsed( true );
   contentLayout->addWidget( advancedEndpoints );
 
@@ -3211,6 +3270,13 @@ bool QgsAiSettingsDialog::applySettings()
   codexSettings.credentialMode = QgsAiModelRouter::CredentialMode::OAuth;
   codexSettings.enabled = QgsAiCodexOAuthClient::hasRefreshToken();
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Codex, codexSettings );
+
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, mOllamaNumCtx->value() );
+  QgsAiModelRouter::ProviderSettings ollamaSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Ollama );
+  ollamaSettings.endpoint = mOllamaEndpoint->text().trimmed();
+  ollamaSettings.model = mOllamaModel->currentData().toString();
+  ollamaSettings.enabled = !ollamaSettings.model.isEmpty();
+  mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Ollama, ollamaSettings );
 
   QgsAiModelRouter::ProviderSettings planSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Plan );
   planSettings.endpoint = mAccountWidget->planEndpoint();
