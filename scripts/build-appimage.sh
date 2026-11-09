@@ -236,6 +236,10 @@ echo "==> Configuring CMake (Release, ENABLE_AI_ASSISTANT=ON)"
 # the Python Console and AI run_python/install_python_package support.
 # WITH_AUTH=ON (default): QCA Qt6 built from source above and installed
 # under /usr/local. CMake's FindQCA picks it up automatically.
+# WITH_WAYLAND=OFF: QGIS turns Wayland support on by default on Linux and then
+# requires Qt6 WaylandClient and wayland-protocols. linuxdeploy-plugin-qt only
+# bundles the xcb platform plugin, so the AppImage runs through X11/XWayland and
+# the native Wayland code (3D pointer lock) would never run.
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${APPDIR}/usr" \
@@ -248,6 +252,7 @@ cmake -S . -B build -G Ninja \
   -DWITH_3D=ON \
   -DWITH_QTWEBENGINE=ON \
   -DWITH_PDAL=OFF \
+  -DWITH_WAYLAND=OFF \
   -DENABLE_TESTS=OFF \
   -DUSE_CCACHE=ON \
   -DENABLE_UNITY_BUILDS=ON \
