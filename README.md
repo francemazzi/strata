@@ -23,7 +23,15 @@ QGIS is a full-featured, user-friendly, free-and-open-source (FOSS) geographical
 
 QGIS is part of the Open-Source Geospatial Foundation ([OSGeo](https://www.osgeo.org/)), offering a range of complementary open-source GIS software projects.
 
+### Strata contributors
+
+Commits on this fork:
+
+- [fraSma](https://github.com/francemazzi)
+- [Valerio Sota](https://github.com/valeriosota)
+
 - [Download](#download)
+- [Strata contributors](#strata-contributors)
 - [Demo](#demo--see-it-in-action)
 - [Strata Cloud](#strata-cloud-login-and-registration)
 - [Configure AI](#configure-ai-on-first-launch)
