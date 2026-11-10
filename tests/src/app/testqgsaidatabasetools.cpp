@@ -60,6 +60,7 @@ class TestQgsAiDatabaseTools : public QObject
     void listConnectionsOmitsPassword();
     void listConnectionsEmptyNote();
     void querySqlRejectsWritesWithoutConnecting();
+    void querySqlSaysItDoesNotLoadLayers();
     void executeSqlRequiresSql();
     void describeUnknownConnectionListsSavedNames();
     void exportMissingLayer();
@@ -381,6 +382,30 @@ void TestQgsAiDatabaseTools::querySqlRejectsWritesWithoutConnecting()
   QVERIFY( !result.success );
   QVERIFY( result.errorMessage.contains( u"query_sql"_s ) );
   QVERIFY( result.errorMessage.contains( u"execute_sql"_s ) );
+}
+
+void TestQgsAiDatabaseTools::querySqlSaysItDoesNotLoadLayers()
+{
+  // query_sql only returns rows. Asked to load a layer, it says so before touching the database,
+  // instead of returning a truncated preview that reads as if the layer had been added.
+  QgsProject project;
+  QgsAiDatabaseSqlTool tool( &project, true );
+  QJsonObject args;
+  args.insert( u"connection_name"_s, u"missing"_s );
+  args.insert( u"sql"_s, u"SELECT fid, geom FROM public.house_numbers"_s );
+  args.insert( u"load_as_layer"_s, true );
+  args.insert( u"layer_name"_s, u"house_numbers_by_distance"_s );
+  const QgsAiToolResult result = tool.execute( args );
+  QVERIFY( !result.success );
+  QVERIFY2( result.errorMessage.contains( u"execute_sql"_s ) && result.errorMessage.contains( u"load_as_layer"_s ), qPrintable( result.errorMessage ) );
+  QVERIFY( project.mapLayers().isEmpty() );
+  QVERIFY( tool.description().contains( u"execute_sql"_s ) );
+
+  // without the request it goes on to the connection as before
+  args.insert( u"load_as_layer"_s, false );
+  const QgsAiToolResult plain = tool.execute( args );
+  QVERIFY( !plain.success );
+  QVERIFY2( !plain.errorMessage.contains( u"load_as_layer"_s ), qPrintable( plain.errorMessage ) );
 }
 
 void TestQgsAiDatabaseTools::executeSqlRequiresSql()

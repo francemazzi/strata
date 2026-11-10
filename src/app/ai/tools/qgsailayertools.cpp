@@ -36,6 +36,7 @@
 #include "qgsclassificationcustom.h"
 #include "qgsclassificationmethod.h"
 #include "qgsclassificationmethodregistry.h"
+#include "qgscolorbrewerpalette.h"
 #include "qgscolorrampimpl.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
@@ -95,6 +96,7 @@
 #include "qgssinglesymbolrenderer.h"
 #include "qgsstyle.h"
 #include "qgssymbol.h"
+#include "qgssymbollayerutils.h"
 #include "qgstaskmanager.h"
 #include "qgsvectorlayer.h"
 #include "qgsvectorlayerfeatureiterator.h"
@@ -635,9 +637,46 @@ namespace
     return map;
   }
 
-  // Single-select enums store their default as a one-element list. parameterAsInt
-  // cannot read that list (it falls back to 0), so unwrap it before validation.
-  QVariantMap normalizeSingleEnumParameters( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters )
+  // One enum option as QGIS stores it: the index, or the option text for static-string enums.
+  // Models often pass the option name ("count", "Flat") instead of its index; names match in any
+  // letter case. Anything unknown is returned unchanged, for validation to report; recognized says
+  // whether the item was read as an option.
+  QVariant enumOptionValue( const QgsProcessingParameterEnum *definition, const QVariant &item, bool *recognized = nullptr )
+  {
+    if ( recognized )
+      *recognized = true;
+    const QStringList options = definition->options();
+    const bool isText = item.userType() == QMetaType::Type::QString;
+    const QString text = item.toString().trimmed();
+    bool isIndex = false;
+    const int index = text.toInt( &isIndex );
+    if ( definition->usesStaticStrings() )
+    {
+      if ( !isText && isIndex && index >= 0 && index < options.size() )
+        return options.at( index );
+    }
+    else if ( isIndex )
+    {
+      return index;
+    }
+    if ( isText )
+    {
+      for ( int i = 0; i < options.size(); ++i )
+      {
+        if ( options.at( i ).compare( text, Qt::CaseInsensitive ) == 0 )
+          return definition->usesStaticStrings() ? QVariant( options.at( i ) ) : QVariant( i );
+      }
+    }
+    if ( recognized )
+      *recognized = false;
+    return item;
+  }
+
+  // Enum parameters as models send them become what QGIS validates. Single-select enums store their
+  // default as a one-element list, which parameterAsInt cannot read (it falls back to 0), so it is
+  // unwrapped. Option names become indexes. A multiple-choice string is split on commas only when it
+  // is not itself an option name: some names contain commas.
+  QVariantMap normalizeEnumParameters( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters )
   {
     QVariantMap normalized = parameters;
     if ( !algorithm )
@@ -647,24 +686,65 @@ namespace
     for ( const QgsProcessingParameterDefinition *definition : definitions )
     {
       const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition );
-      if ( !enumDefinition || enumDefinition->allowMultiple() )
+      if ( !enumDefinition || !normalized.contains( enumDefinition->name() ) )
         continue;
 
       const QVariant value = normalized.value( enumDefinition->name() );
-      if ( value.userType() != QMetaType::Type::QVariantList )
+      QVariantList items;
+      if ( value.userType() == QMetaType::Type::QVariantList || value.userType() == QMetaType::Type::QStringList )
+      {
+        items = value.toList();
+      }
+      else if ( value.userType() == QMetaType::Type::QString )
+      {
+        bool recognized = false;
+        const QVariant whole = enumOptionValue( enumDefinition, value, &recognized );
+        if ( recognized || !enumDefinition->allowMultiple() || !value.toString().contains( u',' ) )
+        {
+          normalized.insert( enumDefinition->name(), whole );
+          continue;
+        }
+        const QStringList parts = value.toString().split( u',' );
+        for ( const QString &part : parts )
+          items << part;
+      }
+      else
+      {
         continue;
+      }
 
-      const QVariantList values = value.toList();
-      if ( values.size() != 1 )
+      if ( !enumDefinition->allowMultiple() )
+      {
+        // several values for a single choice stay a list, for validation to reject
+        if ( items.size() == 1 )
+          normalized.insert( enumDefinition->name(), enumOptionValue( enumDefinition, items.constFirst() ) );
         continue;
-
-      bool ok = false;
-      const int index = values.constFirst().toInt( &ok );
-      if ( !ok )
-        continue;
-      normalized.insert( enumDefinition->name(), index );
+      }
+      QVariantList resolved;
+      for ( const QVariant &item : std::as_const( items ) )
+        resolved << enumOptionValue( enumDefinition, item );
+      normalized.insert( enumDefinition->name(), resolved );
     }
     return normalized;
+  }
+
+  // For each enum parameter whose value QGIS rejects, the options it accepts: QGIS only says
+  // "Incorrect parameter value", which leaves the model guessing.
+  QString enumOptionHints( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, QgsProcessingContext &context )
+  {
+    QStringList hints;
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition );
+      if ( !enumDefinition || !parameters.contains( enumDefinition->name() ) || enumDefinition->checkValueIsAcceptable( parameters.value( enumDefinition->name() ), &context ) )
+        continue;
+      QStringList options;
+      for ( int i = 0; i < enumDefinition->options().size(); ++i )
+        options << ( enumDefinition->usesStaticStrings() ? enumDefinition->options().at( i ) : u"%1 = %2"_s.arg( QString::number( i ), enumDefinition->options().at( i ) ) );
+      hints << u"%1 takes %2: %3."_s.arg( enumDefinition->name(), enumDefinition->allowMultiple() ? u"a list of option indexes or names"_s : u"one option index or name"_s, options.join( "; "_L1 ) );
+    }
+    return hints.join( u' ' );
   }
 
   // A feature source given as {"source", "selected_only", "filter", "feature_limit"} becomes the
@@ -1012,6 +1092,26 @@ namespace
       return nullptr;
     symbol->setColor( QColor::fromHsv( ( index * 67 ) % 360, 180, 220 ) );
     return symbol.release();
+  }
+
+  // a QGIS style ramp (Blues, Viridis…) or a ColorBrewer scheme (Set1, Paired…), letter case ignored
+  std::unique_ptr<QgsColorRamp> namedColorRamp( const QString &name )
+  {
+    QgsStyle *style = QgsStyle::defaultStyle();
+    for ( const QString &styleRamp : style->colorRampNames() )
+    {
+      if ( styleRamp.compare( name, Qt::CaseInsensitive ) == 0 )
+        return style->colorRamp( styleRamp );
+    }
+    for ( const QString &scheme : QgsColorBrewerPalette::listSchemes() )
+    {
+      if ( scheme.compare( name, Qt::CaseInsensitive ) != 0 )
+        continue;
+      const QList<int> variants = QgsColorBrewerPalette::listSchemeVariants( scheme );
+      const int colorCount = variants.isEmpty() ? 5 : *std::max_element( variants.begin(), variants.end() );
+      return std::make_unique<QgsColorBrewerColorRamp>( scheme, colorCount );
+    }
+    return nullptr;
   }
 
   bool applyBasicLabels( QgsVectorLayer *layer, const QJsonValue &labelsValue, const QString &fallbackField, QJsonArray &changes, QString &error )
@@ -2212,7 +2312,7 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   if ( project )
     context->setProject( project );
 
-  QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
+  QVariantMap parameters = normalizeEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
   QString sourceError;
   if ( !resolveFeatureSourceDefinitions( algorithm, parameters, *context, sourceError ) )
     return QgsAiToolResult::error( sourceError );
@@ -2224,7 +2324,11 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
 
   QString checkMessage;
   if ( !algorithm->checkParameterValues( parameters, *context, &checkMessage ) )
-    return QgsAiToolResult::error( checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage );
+  {
+    const QString hints = enumOptionHints( algorithm, parameters, *context );
+    const QString message = checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage;
+    return QgsAiToolResult::error( hints.isEmpty() ? message : message + u' ' + hints );
+  }
 
   if ( !QgsApplication::taskManager() )
     return QgsAiToolResult::error( u"Processing task manager is not available."_s );
@@ -2447,8 +2551,9 @@ QString QgsAiAdvancedStyleTool::description() const
     "plus basic field labeling. Graduated classes come from a QGIS classification mode (default jenks, "
     "natural breaks, which suits skewed values; equal_interval suits evenly spread values) and are colored "
     "with a color ramp, light to dark by default. Class labels are rounded to readable precision. "
-    "The result lists each graduated class with its label, color and feature_count: check the counts, "
-    "since a class holding almost every feature makes the map hard to read. "
+    "Categorized classes take the requested colors and labels in the order given. "
+    "The result lists each class, categorized or graduated, with its label, color and feature_count: check the colors and counts, "
+    "since a class holding almost every feature, or none, makes the map hard to read. "
     "Returns a rollback token that restores the previous renderer, labeling and layer visual settings."
   );
 }
@@ -2462,7 +2567,7 @@ QJsonObject QgsAiAdvancedStyleTool::schema() const
   properties.insert( u"class_count"_s, prop( u"integer"_s, u"Optional number of graduated classes, 1 to 32. Default 5."_s ) );
   properties.insert( u"mode"_s, prop( u"string"_s, u"Optional graduated classification mode: jenks (default), quantile, equal_interval, pretty, stddev or logarithmic."_s ) );
   properties.insert( u"classes"_s, propArray( prop( u"object"_s, u"Graduated: {lower, upper, label?, color?}. Categorized: {value, label?, color?}. Color as #RRGGBB."_s ), u"Optional explicit classes, instead of computing them from mode and class_count."_s ) );
-  properties.insert( u"color_ramp"_s, prop( u"string"_s, u"Optional QGIS color ramp name, e.g. Reds, Blues, YlOrRd, Viridis, RdYlGn. Graduated default: the project default ramp, else white to red. Categorized default: distinct colors."_s ) );
+  properties.insert( u"color_ramp"_s, prop( u"string"_s, u"Optional color ramp: a QGIS style ramp (e.g. Reds, Blues, YlOrRd, Viridis, RdYlGn) or a ColorBrewer scheme (e.g. Set1, Set2, Paired, Dark2); letter case is ignored. Graduated default: the project default ramp, else white to red. Categorized default: distinct colors."_s ) );
   properties.insert( u"invert_ramp"_s, prop( u"boolean"_s, u"Optional: reverse the color ramp."_s ) );
   properties.insert( u"label_precision"_s, prop( u"integer"_s, u"Optional decimal places in graduated class labels. Default: chosen from the class widths, trailing zeros trimmed."_s ) );
   properties.insert( u"labels"_s, prop( u"object"_s, u"Optional labeling config, e.g. {\"enabled\":true,\"field\":\"name\"}."_s ) );
@@ -2520,8 +2625,26 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   }
 
   const QJsonValue classesValue = args.value( u"classes"_s );
+  // explicit classes are an array of objects; older callers pass the class count as classes, as a number or {"count": n}.
+  // Any other shape is an error: falling back to an automatic palette would silently drop the requested colors.
+  const bool legacyClassCountForm = classesValue.isDouble() || ( classesValue.isObject() && classesValue.toObject().contains( u"count"_s ) );
+  if ( !classesValue.isUndefined() && !classesValue.isNull() && !classesValue.isArray() && !legacyClassCountForm )
+    return QgsAiToolResult::error(
+      u"Argument 'classes' must be an array of objects: [{\"value\": \"A\", \"label\": \"A\", \"color\": \"#1a9850\"}] for categorized, "
+      "[{\"lower\": 0, \"upper\": 10, \"color\": \"#1a9850\"}] for graduated. Use class_count for a number of classes."_s
+    );
   const QJsonArray classArray = classesValue.toArray();
-  // older callers pass the class count as classes, as a number or {"count": n}
+  QList<QColor> explicitColors;
+  for ( int i = 0; i < classArray.size(); ++i )
+  {
+    if ( !classArray.at( i ).isObject() )
+      return QgsAiToolResult::error( u"Entry %1 of 'classes' is not an object. Each class is an object such as {\"value\": \"A\", \"color\": \"#1a9850\"}."_s.arg( i + 1 ) );
+    const QString colorText = classArray.at( i ).toObject().value( u"color"_s ).toString().trimmed();
+    const QColor color = colorText.isEmpty() ? QColor() : QgsSymbolLayerUtils::parseColor( colorText );
+    if ( !colorText.isEmpty() && !color.isValid() )
+      return QgsAiToolResult::error( u"Class %1 has a color that cannot be read: '%2'. Use #RRGGBB."_s.arg( QString::number( i + 1 ), colorText ) );
+    explicitColors << color;
+  }
   const int legacyClassCount = classesValue.isDouble() ? classesValue.toInt() : classesValue.toObject().value( u"count"_s ).toInt( 5 );
   const int classCount = std::clamp( args.value( u"class_count"_s ).toInt( legacyClassCount ), 1, 32 );
   const QJsonValue precisionValue = args.value( u"label_precision"_s );
@@ -2539,9 +2662,11 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   const QString rampName = args.value( u"color_ramp"_s ).toString().trimmed();
   if ( !rampName.isEmpty() )
   {
-    ramp = QgsStyle::defaultStyle()->colorRamp( rampName );
+    ramp = namedColorRamp( rampName );
     if ( !ramp )
-      return QgsAiToolResult::error( u"Unknown color ramp '%1'. Available ramps: %2."_s.arg( rampName, QgsStyle::defaultStyle()->colorRampNames().join( ", "_L1 ) ) );
+      return QgsAiToolResult::error(
+        u"Unknown color ramp '%1'. Available ramps: %2. ColorBrewer schemes: %3."_s.arg( rampName, QgsStyle::defaultStyle()->colorRampNames().join( ", "_L1 ), QgsColorBrewerPalette::listSchemes().join( ", "_L1 ) )
+      );
   }
   else if ( renderer == "graduated"_L1 )
   {
@@ -2551,7 +2676,7 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   }
   if ( ramp && args.value( u"invert_ramp"_s ).toBool( false ) )
     ramp->invert();
-  const auto explicitColor = [&classArray]( int index ) { return QColor( classArray.at( index ).toObject().value( u"color"_s ).toString() ); };
+  const auto explicitColor = [&explicitColors]( int index ) { return explicitColors.value( index ); };
 
   QgsLayerTreeLayer *treeNode = project->layerTreeRoot() ? project->layerTreeRoot()->findLayer( layerId ) : nullptr;
   const QJsonObject beforeVisual = layerVisualSummary( layer, treeNode );
@@ -2608,6 +2733,41 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
       symbol->setColor( explicitColor( i ) );
       categorized->updateCategorySymbol( i, symbol.release() );
     }
+
+    // count features per category with the renderer's own key (the value as text), so the counts match the map
+    const QgsCategoryList &styledCategories = categorized->categories();
+    QHash<QString, int> categoryByKey;
+    for ( int i = 0; i < styledCategories.size(); ++i )
+    {
+      const QVariant value = styledCategories.at( i ).value();
+      const QVariantList keys = value.userType() == QMetaType::Type::QVariantList ? value.toList() : QVariantList { value };
+      for ( const QVariant &key : keys )
+        categoryByKey.insert( key.toString(), i );
+    }
+    QVector<long long> counts( styledCategories.size(), 0 );
+    QgsFeatureRequest request;
+    request.setFlags( Qgis::FeatureRequestFlag::NoGeometry ).setSubsetOfAttributes( QgsAttributeList() << fieldIndex );
+    QgsFeatureIterator featureIt = layer->getFeatures( request );
+    QgsFeature feature;
+    while ( featureIt.nextFeature( feature ) )
+    {
+      const QVariant value = feature.attribute( fieldIndex );
+      const auto match = categoryByKey.constFind( QgsVariantUtils::isNull( value ) ? QString() : value.toString() );
+      if ( match != categoryByKey.constEnd() )
+        ++counts[match.value()];
+      else
+        ++unclassifiedCount;
+    }
+    for ( int i = 0; i < styledCategories.size(); ++i )
+    {
+      QJsonObject classJson;
+      classJson.insert( u"value"_s, QJsonValue::fromVariant( styledCategories.at( i ).value() ) );
+      classJson.insert( u"label"_s, styledCategories.at( i ).label() );
+      classJson.insert( u"color"_s, styledCategories.at( i ).symbol()->color().name() );
+      classJson.insert( u"feature_count"_s, counts.at( i ) );
+      classesJson.append( classJson );
+    }
+
     layer->setRenderer( categorized.release() );
     changes.append( u"categorized_renderer"_s );
   }
@@ -2721,8 +2881,9 @@ QgsAiToolResult QgsAiAdvancedStyleTool::execute( const QJsonObject &args )
   output.insert( u"rollback_token"_s, token );
   output.insert( u"rollback"_s, rollbackJson( token, u"restore_layer_style"_s ) );
   if ( renderer == "graduated"_L1 )
-  {
     output.insert( u"mode"_s, classArray.isEmpty() ? mode : u"explicit"_s );
+  if ( !renderer.isEmpty() )
+  {
     output.insert( u"classes"_s, classesJson );
     output.insert( u"unclassified_feature_count"_s, unclassifiedCount );
   }

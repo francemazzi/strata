@@ -23,6 +23,7 @@
 #include "qgsaitestbackgroundprobe.h"
 #include "qgsapplication.h"
 #include "qgscategorizedsymbolrenderer.h"
+#include "qgscolorbrewerpalette.h"
 #include "qgscoordinatereferencesystem.h"
 #include "qgsexception.h"
 #include "qgsexpression.h"
@@ -202,6 +203,7 @@ class TestQgsAiToolRegistry : public QObject
     void styleLayerAppliesNativeChanges();
     void advancedStyleLayerAppliesRenderersLabelsAndRollback();
     void advancedStyleGraduatedClassesAreReadable();
+    void advancedStyleCategoriesUseRequestedColors();
     void createPrintLayoutAndExportMap();
     void exportMarkdownReportToPdf();
     void readChatHistoryListsAndReadsOtherChats();
@@ -213,6 +215,7 @@ class TestQgsAiToolRegistry : public QObject
     void processingPrepareFailureIsAnErrorNotACancel();
     void processingToolDeclaresInputLayers();
     void processingSourceCanBeSelectedOrFiltered();
+    void processingEnumsAcceptOptionNames();
     void clearEmptiesRegistry();
     void trustGatingHidesRiskyTools();
     void downloadFileEncodesRawOverpassQuery();
@@ -1690,6 +1693,87 @@ void TestQgsAiToolRegistry::advancedStyleGraduatedClassesAreReadable()
   QVERIFY( !tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"graduated"_s }, { u"field"_s, u"share"_s }, { u"color_ramp"_s, u"NoSuchRamp"_s } } ).success );
 }
 
+void TestQgsAiToolRegistry::advancedStyleCategoriesUseRequestedColors()
+{
+  // house numbers classed by distance from the road graph: the near class must stay green
+  QgsProject project;
+  QgsVectorLayer *layer = new QgsVectorLayer( u"Point?crs=EPSG:3003&field=distance_class:string"_s, u"Civici"_s, u"memory"_s );
+  QVERIFY( layer->isValid() );
+  QgsFeatureList features;
+  const QStringList values { u"near"_s, u"near"_s, u"near"_s, u"mid"_s, u"mid"_s, u"far"_s, u"unknown"_s };
+  for ( const QString &value : values )
+  {
+    QgsFeature feature( layer->fields() );
+    feature.setAttribute( 0, value );
+    features << feature;
+  }
+  QVERIFY( layer->dataProvider()->addFeatures( features ) );
+  project.addMapLayer( layer );
+  QgsAiAdvancedStyleTool tool( &project );
+  const auto styleWith = [&tool, layer]( const QString &key, const QJsonValue &value ) {
+    return tool.execute( { { u"layer_id"_s, layer->id() }, { u"renderer"_s, u"categorized"_s }, { u"field"_s, u"distance_class"_s }, { key, value } } );
+  };
+
+  const QJsonArray classes {
+    QJsonObject { { u"value"_s, u"near"_s }, { u"label"_s, u"0 - 10 m"_s }, { u"color"_s, u"#1a9850"_s } },
+    QJsonObject { { u"value"_s, u"mid"_s }, { u"label"_s, u"10 - 20 m"_s }, { u"color"_s, u"rgb(253, 174, 97)"_s } },
+    QJsonObject { { u"value"_s, u"far"_s }, { u"color"_s, u"#d7191c"_s } },
+  };
+  const QgsAiToolResult styled = styleWith( u"classes"_s, classes );
+  QVERIFY2( styled.success, qPrintable( styled.errorMessage ) );
+  QgsCategorizedSymbolRenderer *renderer = dynamic_cast<QgsCategorizedSymbolRenderer *>( layer->renderer() );
+  QVERIFY( renderer );
+  const QgsCategoryList categories = renderer->categories();
+  QCOMPARE( categories.size(), 3 );
+  QCOMPARE( categories.at( 0 ).value().toString(), u"near"_s );
+  QCOMPARE( categories.at( 0 ).label(), u"0 - 10 m"_s );
+  QCOMPARE( categories.at( 0 ).symbol()->color().name(), u"#1a9850"_s );
+  QCOMPARE( categories.at( 1 ).label(), u"10 - 20 m"_s );
+  QCOMPARE( categories.at( 1 ).symbol()->color().name(), u"#fdae61"_s );
+  QCOMPARE( categories.at( 2 ).label(), u"far"_s );
+  QCOMPARE( categories.at( 2 ).symbol()->color().name(), u"#d7191c"_s );
+
+  // the result reports what the map draws, so the agent can check it without run_python
+  const QJsonArray reported = styled.output.toObject().value( u"classes"_s ).toArray();
+  QCOMPARE( reported.size(), 3 );
+  QCOMPARE( reported.at( 0 ).toObject().value( u"value"_s ).toString(), u"near"_s );
+  QCOMPARE( reported.at( 0 ).toObject().value( u"label"_s ).toString(), u"0 - 10 m"_s );
+  QCOMPARE( reported.at( 0 ).toObject().value( u"color"_s ).toString(), u"#1a9850"_s );
+  QCOMPARE( reported.at( 0 ).toObject().value( u"feature_count"_s ).toInt(), 3 );
+  QCOMPARE( reported.at( 1 ).toObject().value( u"feature_count"_s ).toInt(), 2 );
+  QCOMPARE( reported.at( 2 ).toObject().value( u"feature_count"_s ).toInt(), 1 );
+  QCOMPARE( styled.output.toObject().value( u"unclassified_feature_count"_s ).toInt(), 1 );
+
+  // a shape the tool does not understand is an error, never a silent automatic palette
+  const QgsAiToolResult wrapped = styleWith( u"classes"_s, QJsonObject { { u"values"_s, classes } } );
+  QVERIFY( !wrapped.success );
+  QVERIFY2( wrapped.errorMessage.contains( u"classes"_s ), qPrintable( wrapped.errorMessage ) );
+  QVERIFY( layer->renderer() == renderer );
+  QVERIFY( !styleWith( u"classes"_s, QJsonArray { u"near"_s, u"far"_s } ).success );
+  QVERIFY( layer->renderer() == renderer );
+
+  // a color the tool cannot read is named in the error, and nothing changes
+  const QgsAiToolResult badColor = styleWith( u"classes"_s, QJsonArray { QJsonObject { { u"value"_s, u"near"_s }, { u"color"_s, u"verde chiaro"_s } } } );
+  QVERIFY( !badColor.success );
+  QVERIFY2( badColor.errorMessage.contains( u"verde chiaro"_s ), qPrintable( badColor.errorMessage ) );
+  QVERIFY( layer->renderer() == renderer );
+
+  // ColorBrewer schemes such as Set1 work by name, in any letter case
+  const QgsAiToolResult set1 = styleWith( u"color_ramp"_s, u"set1"_s );
+  QVERIFY2( set1.success, qPrintable( set1.errorMessage ) );
+  const QList<QColor> set1Colors = QgsColorBrewerPalette::listSchemeColors( u"Set1"_s, 9 );
+  QgsCategorizedSymbolRenderer *set1Renderer = dynamic_cast<QgsCategorizedSymbolRenderer *>( layer->renderer() );
+  QVERIFY( set1Renderer );
+  QCOMPARE( set1Renderer->categories().size(), 4 );
+  for ( const QgsRendererCategory &category : set1Renderer->categories() )
+    QVERIFY2( set1Colors.contains( category.symbol()->color() ), qPrintable( category.symbol()->color().name() ) );
+  QVERIFY2( styleWith( u"color_ramp"_s, u"viridis"_s ).success, "style ramp names ignore letter case" );
+
+  const QgsAiToolResult unknownRamp = styleWith( u"color_ramp"_s, u"NoSuchRamp"_s );
+  QVERIFY( !unknownRamp.success );
+  QVERIFY2( unknownRamp.errorMessage.contains( u"Set1"_s ), qPrintable( unknownRamp.errorMessage ) );
+}
+
 void TestQgsAiToolRegistry::processingSourceCanBeSelectedOrFiltered()
 {
   if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
@@ -1726,6 +1810,98 @@ void TestQgsAiToolRegistry::processingSourceCanBeSelectedOrFiltered()
   QCOMPARE( bufferOf( QJsonObject { { u"source"_s, points->id() }, { u"selected_only"_s, true } } ), 2LL );
   QCOMPARE( bufferOf( QJsonObject { { u"source"_s, points->id() }, { u"filter"_s, u"\"v\" = 3"_s } } ), 1LL );
   QCOMPARE( bufferOf( QJsonObject { { u"selected_only"_s, true } } ), -1LL );
+}
+
+void TestQgsAiToolRegistry::processingEnumsAcceptOptionNames()
+{
+  if ( !QgsApplication::processingRegistry()->providerById( u"native"_s ) )
+    QgsApplication::processingRegistry()->addProvider( new QgsNativeAlgorithms( QgsApplication::processingRegistry() ) );
+
+  // two municipalities and the constraint points inside them: "which municipalities have the most constraints"
+  QgsProject project;
+  QgsVectorLayer *areas = new QgsVectorLayer( u"Polygon?crs=EPSG:3857&field=name:string"_s, u"areas"_s, u"memory"_s );
+  QgsVectorLayer *spots = new QgsVectorLayer( u"Point?crs=EPSG:3857&field=v:integer"_s, u"spots"_s, u"memory"_s );
+  QgsVectorLayer *lines = new QgsVectorLayer( u"LineString?crs=EPSG:3857"_s, u"lines"_s, u"memory"_s );
+  QVERIFY( areas->isValid() && spots->isValid() && lines->isValid() );
+  QgsFeature areaA( areas->fields() );
+  areaA.setAttribute( 0, u"A"_s );
+  areaA.setGeometry( QgsGeometry::fromWkt( u"Polygon ((0 0, 10 0, 10 10, 0 10, 0 0))"_s ) );
+  QgsFeature areaB( areas->fields() );
+  areaB.setAttribute( 0, u"B"_s );
+  areaB.setGeometry( QgsGeometry::fromWkt( u"Polygon ((20 0, 30 0, 30 10, 20 10, 20 0))"_s ) );
+  QVERIFY( areas->dataProvider()->addFeatures( QgsFeatureList() << areaA << areaB ) );
+  QgsFeatureList spotFeatures;
+  const QList<QgsPointXY> spotPoints { QgsPointXY( 2, 2 ), QgsPointXY( 5, 5 ), QgsPointXY( 25, 5 ) };
+  for ( int i = 0; i < spotPoints.size(); ++i )
+  {
+    QgsFeature spot( spots->fields() );
+    spot.setAttribute( 0, i + 1 );
+    spot.setGeometry( QgsGeometry::fromPointXY( spotPoints.at( i ) ) );
+    spotFeatures << spot;
+  }
+  QVERIFY( spots->dataProvider()->addFeatures( spotFeatures ) );
+  QgsFeature line( lines->fields() );
+  line.setGeometry( QgsGeometry::fromWkt( u"LineString (0 0, 100 0)"_s ) );
+  QVERIFY( lines->dataProvider()->addFeature( line ) );
+  project.addMapLayer( areas );
+  project.addMapLayer( spots );
+  project.addMapLayer( lines );
+  QgsAiRunProcessingAlgorithmTool tool( &project );
+
+  const auto run = [&tool]( const QString &algorithmId, const QJsonObject &parameters ) { return tool.execute( { { u"algorithm_id"_s, algorithmId }, { u"parameters"_s, parameters } } ); };
+  const auto outputLayer = [&project]( const QgsAiToolResult &result ) {
+    return qobject_cast<QgsVectorLayer *>( project.mapLayer( result.output.toObject().value( u"loaded_layers"_s ).toArray().at( 0 ).toObject().value( u"id"_s ).toString() ) );
+  };
+  const auto countByArea = []( QgsVectorLayer *layer ) {
+    QMap<QString, int> counts;
+    QgsFeature feature;
+    QgsFeatureIterator it = layer->getFeatures();
+    while ( it.nextFeature( feature ) )
+      counts.insert( feature.attribute( u"name"_s ).toString(), feature.attribute( u"v_count"_s ).toInt() );
+    return counts;
+  };
+  const QMap<QString, int> expectedCounts { { u"A"_s, 2 }, { u"B"_s, 1 } };
+
+  // option names instead of indexes, in any letter case, alone or in a list
+  QJsonObject summary {
+    { u"INPUT"_s, areas->id() },
+    { u"JOIN"_s, spots->id() },
+    { u"PREDICATE"_s, QJsonArray { u"intersect"_s } },
+    { u"JOIN_FIELDS"_s, QJsonArray { u"v"_s } },
+    { u"SUMMARIES"_s, u"Count"_s },
+    { u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s },
+  };
+  const QgsAiToolResult byName = run( u"native:joinbylocationsummary"_s, summary );
+  QVERIFY2( byName.success, qPrintable( byName.errorMessage ) );
+  QVERIFY( outputLayer( byName ) );
+  QCOMPARE( countByArea( outputLayer( byName ) ), expectedCounts );
+
+  summary.insert( u"SUMMARIES"_s, QJsonArray { u"count"_s, u"sum"_s } );
+  const QgsAiToolResult byNames = run( u"native:joinbylocationsummary"_s, summary );
+  QVERIFY2( byNames.success, qPrintable( byNames.errorMessage ) );
+  QVERIFY( outputLayer( byNames ) );
+  QVERIFY( outputLayer( byNames )->fields().lookupField( u"v_sum"_s ) >= 0 );
+  QCOMPARE( countByArea( outputLayer( byNames ) ), expectedCounts );
+
+  // a single-choice option by name: a flat end cap adds nothing beyond the line ends
+  const QgsAiToolResult flat = run( u"native:buffer"_s, { { u"INPUT"_s, lines->id() }, { u"DISTANCE"_s, 10 }, { u"END_CAP_STYLE"_s, u"flat"_s }, { u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s } } );
+  QVERIFY2( flat.success, qPrintable( flat.errorMessage ) );
+  QVERIFY( outputLayer( flat ) );
+  QgsFeature flatBuffer;
+  QVERIFY( outputLayer( flat )->getFeatures().nextFeature( flatBuffer ) );
+  QGSCOMPARENEAR( flatBuffer.geometry().area(), 2000.0, 0.01 );
+
+  // an option name that contains a comma stays one option
+  const QgsAiToolResult snap
+    = run( u"native:snapgeometries"_s, { { u"INPUT"_s, lines->id() }, { u"REFERENCE_LAYER"_s, lines->id() }, { u"TOLERANCE"_s, 1 }, { u"BEHAVIOR"_s, u"Prefer closest point, insert extra vertices where required"_s }, { u"OUTPUT"_s, u"TEMPORARY_OUTPUT"_s } } );
+  QVERIFY2( snap.success, qPrintable( snap.errorMessage ) );
+
+  // an option that does not exist: the error lists the valid ones, so the next call can be right
+  summary.insert( u"SUMMARIES"_s, u"average"_s );
+  const QgsAiToolResult unknown = run( u"native:joinbylocationsummary"_s, summary );
+  QVERIFY( !unknown.success );
+  QVERIFY2( unknown.errorMessage.contains( u"SUMMARIES"_s ), qPrintable( unknown.errorMessage ) );
+  QVERIFY2( unknown.errorMessage.contains( u"0 = count"_s ) && unknown.errorMessage.contains( u"mean"_s ), qPrintable( unknown.errorMessage ) );
 }
 
 void TestQgsAiToolRegistry::processingToolReportsMissingAlgorithm()
