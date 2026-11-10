@@ -890,7 +890,8 @@ QString QgsAiDatabaseSqlTool::description() const
     return QStringLiteral(
       "Runs a single read-only PostgreSQL/PostGIS statement (SELECT, WITH…SELECT, EXPLAIN, SHOW) on a saved QGIS connection "
       "and returns paginated rows in the tool result. Rejects INSERT/UPDATE/DELETE/DDL, SELECT INTO, FOR UPDATE, and multiple statements. "
-      "Prefer this over run_processing_algorithm(native:postgisexecutesql). Geometry is omitted unless include_geometry is true."
+      "Prefer this over run_processing_algorithm(native:postgisexecutesql). Geometry is omitted unless include_geometry is true. "
+      "It never adds layers: to load a SELECT as a project layer, use execute_sql with load_as_layer."
     );
   }
   return QStringLiteral(
@@ -939,6 +940,13 @@ QgsAiToolResult QgsAiDatabaseSqlTool::execute( const QJsonObject &args )
     return QgsAiToolResult::error( classification.error );
   if ( mReadOnly && classification.kind != QgsAiSqlStatementKind::ReadOnly )
     return QgsAiToolResult::error( u"query_sql only allows a single SELECT / WITH…SELECT / EXPLAIN / SHOW statement. Use execute_sql for writes."_s );
+  // Silently ignoring the request would return a truncated preview that reads as a loaded layer.
+  if ( mReadOnly && args.value( u"load_as_layer"_s ).toBool( false ) )
+    return QgsAiToolResult::error(
+      u"query_sql only returns rows and never adds layers, so load_as_layer is not available here. "
+      "To add the result to the map, call execute_sql with the same SELECT and load_as_layer=true: "
+      "it asks for approval and is not offered in Ask mode, and the SELECT still runs read-only."_s
+    );
 
   const bool loadAsLayer = !mReadOnly && args.value( u"load_as_layer"_s ).toBool( false );
   if ( loadAsLayer && classification.kind != QgsAiSqlStatementKind::ReadOnly )
