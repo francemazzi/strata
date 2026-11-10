@@ -637,9 +637,46 @@ namespace
     return map;
   }
 
-  // Single-select enums store their default as a one-element list. parameterAsInt
-  // cannot read that list (it falls back to 0), so unwrap it before validation.
-  QVariantMap normalizeSingleEnumParameters( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters )
+  // One enum option as QGIS stores it: the index, or the option text for static-string enums.
+  // Models often pass the option name ("count", "Flat") instead of its index; names match in any
+  // letter case. Anything unknown is returned unchanged, for validation to report; recognized says
+  // whether the item was read as an option.
+  QVariant enumOptionValue( const QgsProcessingParameterEnum *definition, const QVariant &item, bool *recognized = nullptr )
+  {
+    if ( recognized )
+      *recognized = true;
+    const QStringList options = definition->options();
+    const bool isText = item.userType() == QMetaType::Type::QString;
+    const QString text = item.toString().trimmed();
+    bool isIndex = false;
+    const int index = text.toInt( &isIndex );
+    if ( definition->usesStaticStrings() )
+    {
+      if ( !isText && isIndex && index >= 0 && index < options.size() )
+        return options.at( index );
+    }
+    else if ( isIndex )
+    {
+      return index;
+    }
+    if ( isText )
+    {
+      for ( int i = 0; i < options.size(); ++i )
+      {
+        if ( options.at( i ).compare( text, Qt::CaseInsensitive ) == 0 )
+          return definition->usesStaticStrings() ? QVariant( options.at( i ) ) : QVariant( i );
+      }
+    }
+    if ( recognized )
+      *recognized = false;
+    return item;
+  }
+
+  // Enum parameters as models send them become what QGIS validates. Single-select enums store their
+  // default as a one-element list, which parameterAsInt cannot read (it falls back to 0), so it is
+  // unwrapped. Option names become indexes. A multiple-choice string is split on commas only when it
+  // is not itself an option name: some names contain commas.
+  QVariantMap normalizeEnumParameters( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters )
   {
     QVariantMap normalized = parameters;
     if ( !algorithm )
@@ -649,24 +686,65 @@ namespace
     for ( const QgsProcessingParameterDefinition *definition : definitions )
     {
       const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition );
-      if ( !enumDefinition || enumDefinition->allowMultiple() )
+      if ( !enumDefinition || !normalized.contains( enumDefinition->name() ) )
         continue;
 
       const QVariant value = normalized.value( enumDefinition->name() );
-      if ( value.userType() != QMetaType::Type::QVariantList )
+      QVariantList items;
+      if ( value.userType() == QMetaType::Type::QVariantList || value.userType() == QMetaType::Type::QStringList )
+      {
+        items = value.toList();
+      }
+      else if ( value.userType() == QMetaType::Type::QString )
+      {
+        bool recognized = false;
+        const QVariant whole = enumOptionValue( enumDefinition, value, &recognized );
+        if ( recognized || !enumDefinition->allowMultiple() || !value.toString().contains( u',' ) )
+        {
+          normalized.insert( enumDefinition->name(), whole );
+          continue;
+        }
+        const QStringList parts = value.toString().split( u',' );
+        for ( const QString &part : parts )
+          items << part;
+      }
+      else
+      {
         continue;
+      }
 
-      const QVariantList values = value.toList();
-      if ( values.size() != 1 )
+      if ( !enumDefinition->allowMultiple() )
+      {
+        // several values for a single choice stay a list, for validation to reject
+        if ( items.size() == 1 )
+          normalized.insert( enumDefinition->name(), enumOptionValue( enumDefinition, items.constFirst() ) );
         continue;
-
-      bool ok = false;
-      const int index = values.constFirst().toInt( &ok );
-      if ( !ok )
-        continue;
-      normalized.insert( enumDefinition->name(), index );
+      }
+      QVariantList resolved;
+      for ( const QVariant &item : std::as_const( items ) )
+        resolved << enumOptionValue( enumDefinition, item );
+      normalized.insert( enumDefinition->name(), resolved );
     }
     return normalized;
+  }
+
+  // For each enum parameter whose value QGIS rejects, the options it accepts: QGIS only says
+  // "Incorrect parameter value", which leaves the model guessing.
+  QString enumOptionHints( const QgsProcessingAlgorithm *algorithm, const QVariantMap &parameters, QgsProcessingContext &context )
+  {
+    QStringList hints;
+    const QgsProcessingParameterDefinitions definitions = algorithm->parameterDefinitions();
+    for ( const QgsProcessingParameterDefinition *definition : definitions )
+    {
+      const QgsProcessingParameterEnum *enumDefinition = dynamic_cast<const QgsProcessingParameterEnum *>( definition );
+      if ( !enumDefinition || !parameters.contains( enumDefinition->name() ) || enumDefinition->checkValueIsAcceptable( parameters.value( enumDefinition->name() ), &context ) )
+        continue;
+      QStringList options;
+      for ( int i = 0; i < enumDefinition->options().size(); ++i )
+        options << ( enumDefinition->usesStaticStrings() ? enumDefinition->options().at( i ) : u"%1 = %2"_s.arg( QString::number( i ), enumDefinition->options().at( i ) ) );
+      hints << u"%1 takes %2: %3."_s.arg( enumDefinition->name(), enumDefinition->allowMultiple() ? u"a list of option indexes or names"_s : u"one option index or name"_s, options.join( "; "_L1 ) );
+    }
+    return hints.join( u' ' );
   }
 
   // A feature source given as {"source", "selected_only", "filter", "feature_limit"} becomes the
@@ -2234,7 +2312,7 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
   if ( project )
     context->setProject( project );
 
-  QVariantMap parameters = normalizeSingleEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
+  QVariantMap parameters = normalizeEnumParameters( algorithm, jsonObjectToVariantMap( args.value( u"parameters"_s ).toObject() ) );
   QString sourceError;
   if ( !resolveFeatureSourceDefinitions( algorithm, parameters, *context, sourceError ) )
     return QgsAiToolResult::error( sourceError );
@@ -2246,7 +2324,11 @@ QgsAiToolResult QgsAiRunProcessingAlgorithmTool::execute( const QJsonObject &arg
 
   QString checkMessage;
   if ( !algorithm->checkParameterValues( parameters, *context, &checkMessage ) )
-    return QgsAiToolResult::error( checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage );
+  {
+    const QString hints = enumOptionHints( algorithm, parameters, *context );
+    const QString message = checkMessage.isEmpty() ? u"Processing parameter validation failed."_s : checkMessage;
+    return QgsAiToolResult::error( hints.isEmpty() ? message : message + u' ' + hints );
+  }
 
   if ( !QgsApplication::taskManager() )
     return QgsAiToolResult::error( u"Processing task manager is not available."_s );
