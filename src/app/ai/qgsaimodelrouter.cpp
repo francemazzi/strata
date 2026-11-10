@@ -2007,6 +2007,18 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   if ( !context.reply )
     return false;
 
+  if ( isLocalProvider( context.provider ) )
+  {
+    // QgsNetworkAccessManager aborts any reply that receives nothing for its
+    // global network timeout (60 s by default). Loading a large local model
+    // into memory sends nothing for longer than that, so the idle limit of a
+    // local request follows the provider timeout instead. The timer is the
+    // reply child created by QgsNetworkAccessManager::createRequest(); its
+    // progress connections keep restarting it with the interval set here.
+    if ( QTimer *idleTimer = context.reply->findChild<QTimer *>( u"timeoutTimer"_s ) )
+      idleTimer->start( configuredTimeoutSeconds * 1000 );
+  }
+
   context.reply->setProperty( "aiRequestId", context.requestId );
   connect( context.reply, &QNetworkReply::readyRead, this, &QgsAiModelRouter::onReplyReadyRead );
   connect( context.reply, &QNetworkReply::finished, this, &QgsAiModelRouter::onReplyFinished );

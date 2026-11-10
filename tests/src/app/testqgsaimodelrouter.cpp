@@ -19,6 +19,7 @@
 #include "qgsapplication.h"
 #include "qgsauthmanager.h"
 #include "qgsmessagelog.h"
+#include "qgsnetworkaccessmanager.h"
 #include "qgssettings.h"
 #include "qgstest.h"
 
@@ -331,6 +332,7 @@ class TestQgsAiModelRouter : public QObject
     void ollamaStoppedServerGivesActionableError();
     void ollamaMissingModelIsExplained();
     void ollamaHistoryBudgetFitsTheContextWindow();
+    void ollamaSlowModelLoadOutlastsTheNetworkTimeout();
     void ollamaLiveToolRoundTrip();
     void openRouterStreamToolCallDeltasAccumulateByIndex();
     void openRouterStreamFinishReasonErrorFails();
@@ -2888,6 +2890,39 @@ void TestQgsAiModelRouter::ollamaHistoryBudgetFitsTheContextWindow()
   QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 ), 32768 );
   QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 4096 );
   QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 ), 1024 );
+}
+
+void TestQgsAiModelRouter::ollamaSlowModelLoadOutlastsTheNetworkTimeout()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const int savedNetworkTimeout = QgsNetworkAccessManager::timeout();
+  const auto cleanup = qScopeGuard( [savedNetworkTimeout]() {
+    removeOllamaTestSettings();
+    QgsNetworkAccessManager::setTimeout( savedNetworkTimeout );
+  } );
+
+  // QGIS aborts a reply that receives nothing for its network timeout. A large
+  // local model being loaded into memory stays silent longer than that.
+  QgsNetworkAccessManager::setTimeout( 1000 );
+
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse slowLoad = QgsAiTestLoopbackServer::ndjsonResponse( {
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"Ready\"},\"done\":false}\n" ),
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n" ),
+  } );
+  slowLoad.responseDelayMs = 2500;
+  server.responses << slowLoad;
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( args.at( 3 ).toString(), u"Ready"_s );
 }
 
 void TestQgsAiModelRouter::ollamaLiveToolRoundTrip()
