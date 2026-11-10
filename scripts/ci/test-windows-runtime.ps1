@@ -20,6 +20,7 @@ try {
   $code = @'
 import ctypes, os, tempfile
 from qgis.core import QgsApplication, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsCoordinateReferenceSystem
+from qgis.core import QgsCoordinateTransform, QgsDatumTransform, QgsFeature, QgsGeometry, QgsPointXY
 from qgis.analysis import QgsNativeAlgorithms
 from osgeo import gdal
 import processing
@@ -39,6 +40,28 @@ with tempfile.TemporaryDirectory() as tmp:
         crs = QgsCoordinateReferenceSystem.fromEpsgId(epsg)
         assert crs.isValid() and crs.authid() == f'EPSG:{epsg}' and crs.toWkt(), epsg
     assert vector.crs().isValid() and vector.crs().authid() == 'EPSG:4326'
+    # Known points from PROJ's cs2cs, as in verify_crs_runtime.py: a transform PROJ
+    # cannot build leaves the point where it was while both CRSs still look valid.
+    # EPSG:3003 allows PROJ's ballpark offset, about 78 m from Monte Mario to WGS 84 (4).
+    for source, target, point, expected, tolerance in (
+        ('EPSG:4326', 'EPSG:32632', (10.78, 45.05), (640169.1529, 4990045.9721), 0.01),
+        ('EPSG:32632', 'EPSG:4326', (640169.1529, 4990045.9721), (10.78, 45.05), 1e-7),
+        ('EPSG:4326', 'EPSG:3003', (11.8768, 45.4064), (1725136.5327, 5032218.5950), 150.0),
+    ):
+        transform = QgsCoordinateTransform(QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target), QgsProject.instance())
+        assert transform.isValid(), (source, target)
+        moved = transform.transform(QgsPointXY(*point))
+        assert abs(moved.x() - expected[0]) <= tolerance and abs(moved.y() - expected[1]) <= tolerance, (source, target, moved.x(), moved.y())
+    # Datum operations are named from proj.db: without it only an unknown ballpark is listed.
+    operations = [o.name for o in QgsDatumTransform.operations(QgsCoordinateReferenceSystem('EPSG:4326'), QgsCoordinateReferenceSystem('EPSG:3003'))]
+    assert any('Monte Mario to WGS 84' in name for name in operations), operations
+    points = QgsVectorLayer('Point?crs=EPSG:4326', 'reprojection', 'memory')
+    point = QgsFeature()
+    point.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(10.63, 45.38)))
+    assert points.dataProvider().addFeature(point)
+    reprojected = processing.run('native:reprojectlayer', {'INPUT': points, 'TARGET_CRS': 'EPSG:32632', 'OUTPUT': 'memory:'})['OUTPUT']
+    moved = next(reprojected.getFeatures()).geometry().asPoint()
+    assert reprojected.crs().authid() == 'EPSG:32632' and abs(moved.x() - 627616.7159) <= 0.01 and abs(moved.y() - 5026457.2466) <= 0.01, (moved.x(), moved.y())
     output = processing.run('native:buffer', {'INPUT': vector, 'DISTANCE': 1, 'SEGMENTS': 5,
         'END_CAP_STYLE': 0, 'JOIN_STYLE': 0, 'MITER_LIMIT': 2, 'DISSOLVE': False, 'OUTPUT': 'memory:'})
     assert output['OUTPUT'].isValid()
@@ -56,7 +79,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert project.read(os.path.join(tmp, 'smoke.qgz'))
     assert project.mapLayersByName('custom')[0].crs() == custom
     project.clear()
-    del project, vector, raster, output
+    del project, vector, raster, output, points, reprojected
 opencl = ctypes.WinDLL(os.path.join(os.environ['QGIS_PREFIX_PATH'], 'bin', 'OpenCL.dll'))
 count = ctypes.c_uint()
 status = opencl.clGetPlatformIDs(0, None, ctypes.byref(count))
