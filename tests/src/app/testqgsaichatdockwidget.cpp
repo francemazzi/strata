@@ -588,6 +588,17 @@ void TestQgsAiChatDockWidget::localServerModelsAreOfferedOnlyWhileItRuns()
     hasSection = hasSection || ( action->isSeparator() && action->text() == "Ollama (local)"_L1 );
   QVERIFY( hasSection );
 
+  // In the settings no model is picked on the user's behalf, but the empty
+  // box says that models are there to choose from.
+  {
+    QgsAiSettingsDialog settingsDialog( nullptr, &router, nullptr );
+    QComboBox *ollamaModel = settingsDialog.findChild<QComboBox *>( u"aiOllamaModelComboBox"_s );
+    QVERIFY( ollamaModel );
+    QCOMPARE( ollamaModel->count(), 2 );
+    QCOMPARE( ollamaModel->currentIndex(), -1 );
+    QCOMPARE( ollamaModel->placeholderText(), u"Choose a model (2 available)"_s );
+  }
+
   // Picking one makes Ollama the active provider with that model.
   for ( QAction *action : pill->menu()->actions() )
   {

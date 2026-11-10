@@ -1031,6 +1031,9 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
     if ( !selected.isEmpty() && mOllamaModel->findData( selected ) < 0 )
       mOllamaModel->addItem( tr( "%1 (not available)" ).arg( selected ), selected );
     mOllamaModel->setCurrentIndex( mOllamaModel->findData( selected ) );
+    // No model is picked on the user's behalf (the list is alphabetical, so the
+    // first entry is arbitrary): an empty box says why it is empty instead.
+    mOllamaModel->setPlaceholderText( models.isEmpty() ? tr( "No models available" ) : tr( "Choose a model (%n available)", nullptr, static_cast<int>( models.size() ) ) );
   };
   connect( ollamaCatalog, &QgsAiLocalServerCatalog::changed, this, updateOllama );
   connect( ollamaRefreshButton, &QPushButton::clicked, this, [this, ollamaCatalog]() {
