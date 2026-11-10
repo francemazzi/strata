@@ -35,6 +35,7 @@
 #include "qgsaichatpromptedit.h"
 #include "qgsaicodexoauthclient.h"
 #include "qgsaigissuggestionengine.h"
+#include "qgsailocalservercatalog.h"
 #include "qgsaimodelrouter.h"
 #include "qgsaiopenroutermodelcatalog.h"
 #include "qgsaiplanclient.h"
@@ -1117,6 +1118,26 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   {
     connect( mModelRouter, &QgsAiModelRouter::requestFinished, this, [this]() { rebuildModelMenu(); } );
     QgsAiSecretStore::loadSecretsAsync( this, [this]() { rebuildModelMenu(); } );
+    // Local servers come and go while Strata runs: list their models whenever
+    // a probe finds a change, and probe once now so a running server shows up.
+    connect( mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama ), &QgsAiLocalServerCatalog::changed, this, [this]() {
+      // Replacing the menu while it is open would close it under the cursor:
+      // rebuild once the user is done with it.
+      QMenu *openMenu = mModelPill ? mModelPill->menu() : nullptr;
+      if ( openMenu && openMenu->isVisible() )
+      {
+        connect( openMenu, &QMenu::aboutToHide, this, [this]() { QTimer::singleShot( 0, this, &QgsAiChatDockWidget::rebuildModelMenu ); }, Qt::SingleShotConnection );
+        return;
+      }
+      rebuildModelMenu();
+    } );
+    // Starting Ollama means leaving Strata for a moment: coming back is when its
+    // models should appear, without waiting for the picker to be opened twice.
+    connect( qApp, &QGuiApplication::applicationStateChanged, this, [this]( Qt::ApplicationState state ) {
+      if ( state == Qt::ApplicationActive )
+        mModelRouter->refreshLocalServers();
+    } );
+    mModelRouter->refreshLocalServers();
   }
   connect( mPlanClient, &QgsAiPlanClient::modelsReady, this, [this]( const QList<QgsAiPlanClient::ModelInfo> &, bool ) { rebuildModelMenu(); } );
   connect( mPlanClient, &QgsAiPlanClient::agentPolicyReady, this, [this]( const QgsAiManagedAgentPolicy &policy, bool ) {
@@ -1375,6 +1396,12 @@ void QgsAiChatDockWidget::rebuildModelMenu()
   }
 
   QMenu *menu = new QMenu( mModelPill );
+  // Opening the picker re-checks the local servers, so one started or stopped
+  // since the last probe is noticed.
+  connect( menu, &QMenu::aboutToShow, this, [this]() {
+    if ( mModelRouter )
+      mModelRouter->refreshLocalServers();
+  } );
 
   // BYO providers stay selectable alongside the managed Strata catalog until paid
   // plans are live in production; revisit a Strata-only picker after launch.
@@ -1407,6 +1434,12 @@ void QgsAiChatDockWidget::rebuildModelMenu()
         }
         models.append( entry );
       }
+    }
+    if ( mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Ollama ) )
+    {
+      const QList<QgsAiLocalServerCatalog::ModelInfo> localModels = mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama )->models();
+      for ( const QgsAiLocalServerCatalog::ModelInfo &model : localModels )
+        models.append( ModelEntry { model.id, model.id, QgsAiModelRouter::Provider::Ollama, model.displayLabel() } );
     }
     if ( mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan ) )
     {
@@ -1488,6 +1521,9 @@ void QgsAiChatDockWidget::rebuildModelMenu()
           break;
         case QgsAiModelRouter::Provider::Plan:
           header = tr( "Strata" );
+          break;
+        case QgsAiModelRouter::Provider::Ollama:
+          header = tr( "Ollama (local)" );
           break;
       }
       menu->addSection( header );
@@ -4274,6 +4310,7 @@ void QgsAiChatDockWidget::maybeShowWelcomeBanner()
     || mModelRouter->hasClaudeCodeLogin()
     || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::Claude )
     || mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Plan )
+    || mModelRouter->providerSettings( QgsAiModelRouter::Provider::Ollama ).enabled
   )
   {
     settings.setValue( u"strata/welcome_seen"_s, true );

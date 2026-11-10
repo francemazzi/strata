@@ -8,6 +8,7 @@
 #define QGSAITESTLOOPBACKSERVER_H
 
 #include <algorithm>
+#include <functional>
 
 #include <QByteArray>
 #include <QList>
@@ -25,6 +26,10 @@
  * SSE script whose chunks are written sequentially, optionally delayed, before
  * the connection is closed. Received request bodies are recorded so tests can
  * assert on the exact payload that was sent.
+ *
+ * A server that is hit by several endpoints in an order the test does not
+ * control can set \a requestHandler to answer by request line and body
+ * instead of by arrival order.
  */
 class QgsAiTestLoopbackServer : public QTcpServer // clazy:exclude=missing-qobject-macro
 {
@@ -58,7 +63,19 @@ class QgsAiTestLoopbackServer : public QTcpServer // clazy:exclude=missing-qobje
       return response;
     }
 
+    //! Streams \a lines as newline-delimited JSON (the Ollama native stream format).
+    static ScriptedResponse ndjsonResponse( const QList<QByteArray> &lines, int interChunkDelayMs = 0 )
+    {
+      ScriptedResponse response;
+      response.headers.append( { QByteArrayLiteral( "Content-Type" ), QByteArrayLiteral( "application/x-ndjson" ) } );
+      response.sseChunks = lines;
+      response.interChunkDelayMs = interChunkDelayMs;
+      return response;
+    }
+
     QList<ScriptedResponse> responses;
+    //! When set and returning true, its response is used instead of the \a responses queue.
+    std::function<bool( const QByteArray &rawRequest, const QByteArray &body, ScriptedResponse &response )> requestHandler;
     int requestCount = 0;
     QList<QByteArray> requestBodies;
     QList<QByteArray> rawRequests; //!< Full request including headers, for asserting on sent headers
@@ -109,6 +126,13 @@ class QgsAiTestLoopbackServer : public QTcpServer // clazy:exclude=missing-qobje
       ++requestCount;
       requestBodies.append( bodySoFar.left( contentLength ) );
       rawRequests.append( buffered );
+
+      ScriptedResponse handled;
+      if ( requestHandler && requestHandler( buffered, requestBodies.last(), handled ) )
+      {
+        writeResponse( socket, handled );
+        return;
+      }
 
       const int responseIndex = std::min( requestCount - 1, static_cast<int>( responses.size() ) - 1 );
       const ScriptedResponse response = responseIndex >= 0 ? responses.at( responseIndex ) : ScriptedResponse();

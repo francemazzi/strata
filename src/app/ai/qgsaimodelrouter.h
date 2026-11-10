@@ -29,6 +29,7 @@
 #include <QQueue>
 #include <QUrl>
 
+class QgsAiLocalServerCatalog;
 class QgsAiToolRegistry;
 class QgsAiClaudeCodeRuntime;
 class QNetworkRequest;
@@ -45,7 +46,8 @@ class APP_EXPORT QgsAiModelRouter : public QObject
       Codex,
       Claude,
       OpenRouter,
-      Plan
+      Plan,
+      Ollama //!< Local Ollama server; appended so persisted integer values stay stable
     };
     Q_ENUM( Provider )
 
@@ -53,7 +55,8 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     {
       ApiKey,
       OAuth,
-      ClaudeCode
+      ClaudeCode,
+      None //!< Local servers: no credential is sent
     };
     Q_ENUM( CredentialMode )
 
@@ -125,6 +128,35 @@ class APP_EXPORT QgsAiModelRouter : public QObject
      * so only configured providers' models are offered.
      */
     bool isProviderAvailable( Provider provider ) const;
+
+    //! Returns true for providers served by an inference server on the user's machine.
+    static bool isLocalProvider( Provider provider ) { return provider == Provider::Ollama; }
+
+    /**
+     * Catalog that detects the local server behind \a provider and lists its
+     * models. Returns nullptr for cloud providers.
+     */
+    QgsAiLocalServerCatalog *localServerCatalog( Provider provider ) const;
+
+    /**
+     * Probes every local server. Never called implicitly: the UI triggers it at
+     * startup, when the model menu opens and from the settings page.
+     */
+    void refreshLocalServers( bool force = false );
+
+    /**
+     * Context window, in tokens, requested from the local server for the
+     * selected model: the configured \c numCtx capped to the model's native
+     * window. Returns 0 for cloud providers.
+     */
+    int localContextTokens( Provider provider ) const;
+
+    /**
+     * Token budget left for the chat history once the system prompt, the
+     * advertised tool schemas and a reply reserve are subtracted from a local
+     * model's context window. Returns \a defaultBudget for cloud providers.
+     */
+    int historyTokenBudget( Provider provider, int defaultBudget, int systemPromptChars ) const;
 
     /**
      * The provider the user explicitly selected as active. Persisted across
@@ -231,6 +263,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
       OpenAiResponses,       //!< OpenAI Responses API (`input` items, `response.*` SSE events)
       OpenAiChatCompletions, //!< OpenAI Chat Completions API (`messages`, `choices[].delta` SSE chunks)
       AnthropicMessages,     //!< Anthropic Messages API
+      OllamaChat,            //!< Ollama native `/api/chat` (NDJSON stream, tool arguments as objects)
       PlainMessages          //!< Simple `{role, content}` messages (Plan backend)
     };
 
@@ -290,6 +323,10 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QJsonArray buildAnthropicUserContent( const QgsAiChatMessage &message ) const;
     void appendOpenAiInputItems( Provider provider, const QgsAiChatMessage &message, QJsonArray &input ) const;
     void appendOpenAiChatMessages( const QgsAiChatMessage &message, QJsonArray &messages, QJsonArray &pendingImageMessages ) const;
+    QJsonArray buildOllamaMessages( const QList<QgsAiChatMessage> &messages, bool attachImages ) const;
+    QJsonArray advertisedToolSchemas( ApiWireFormat wireFormat ) const;
+    void absorbOllamaChunk( const QJsonObject &object, RequestContext &context ) const;
+    QUrl requestUrl( Provider provider ) const;
     ApiWireFormat wireFormatForProvider( Provider provider ) const;
     void finalizePendingToolCallArguments( RequestContext &context ) const;
 
@@ -323,6 +360,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QMap<QString, RequestContext> mRequests;
     ExternalToolExecutor mExternalToolExecutor;
     QgsAiToolRegistry *mToolRegistry = nullptr;
+    QgsAiLocalServerCatalog *mOllamaCatalog = nullptr;
     bool mToolUseEnabled = false;
     bool mAllowedToolsFilterEnabled = false;
     QStringList mAllowedTools;

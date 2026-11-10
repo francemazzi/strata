@@ -20,6 +20,7 @@
 #include "qgsaiclaudemigration.h"
 #include "qgsaiclaudecoderuntime.h"
 #include "qgsaicodexoauthclient.h"
+#include "qgsailocalservercatalog.h"
 #include "qgsaisecretstore.h"
 #include "qgsaitoolregistry.h"
 #include "qgsaivisualcontextutils.h"
@@ -34,6 +35,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QFile>
+#include <QHash>
 #include <QImageReader>
 #include <QImageWriter>
 #include <QJsonArray>
@@ -74,6 +76,18 @@ namespace
   // App attribution headers recommended by OpenRouter.
   constexpr const char *OPENROUTER_REFERER = "https://github.com/francemazzi/strata";
   constexpr const char *OPENROUTER_APP_TITLE = "Strata";
+
+  // Local servers. The context window is always requested explicitly: Ollama's
+  // own default depends on the available VRAM and can be as small as 4k tokens,
+  // which silently truncates the system prompt and the tool schemas.
+  constexpr int OLLAMA_DEFAULT_NUM_CTX = 32768;
+  constexpr int OLLAMA_MIN_NUM_CTX = 2048;
+  // Tokens kept free for the model's reply when sizing the chat history.
+  constexpr int LOCAL_REPLY_RESERVE_TOKENS = 4096;
+  constexpr int LOCAL_MIN_HISTORY_TOKENS = 1024;
+  // Loading a large model and generating on local hardware is far slower than a
+  // cloud API: the cloud transfer timeout would abort legitimate turns.
+  constexpr int LOCAL_DEFAULT_TIMEOUT_SECONDS = 600;
 
   QString extractTextRecursive( const QJsonValue &value )
   {
@@ -324,8 +338,16 @@ QgsAiModelRouter::QgsAiModelRouter( QObject *parent )
   plan.model = u"managed-plan"_s;
   mProviderSettings.insert( Provider::Plan, plan );
 
+  // The Ollama endpoint is the server base URL; the chat path is appended on dispatch.
+  ProviderSettings ollama;
+  ollama.endpoint = QgsAiLocalServerCatalog::defaultOllamaBaseUrl();
+  ollama.credentialMode = CredentialMode::None;
+  mProviderSettings.insert( Provider::Ollama, ollama );
+  mOllamaCatalog = new QgsAiLocalServerCatalog( this );
+
   QgsAiClaudeMigration::run();
   loadPersistedProviderSettings();
+  mOllamaCatalog->setBaseUrl( mProviderSettings.value( Provider::Ollama ).endpoint );
   QgsAiSecretStore::migrateLegacySecrets();
 }
 
@@ -353,9 +375,84 @@ void QgsAiModelRouter::setProviderSettings( Provider provider, const ProviderSet
   normalizedSettings.model = normalizedModelForProvider( provider, normalizedSettings.model );
   if ( provider == Provider::Codex )
     normalizedSettings.credentialMode = CredentialMode::OAuth;
+  if ( isLocalProvider( provider ) )
+  {
+    normalizedSettings.credentialMode = CredentialMode::None;
+    normalizedSettings.endpoint = QgsAiLocalServerCatalog::normalizedBaseUrl( normalizedSettings.endpoint, 11434 );
+    if ( normalizedSettings.endpoint.isEmpty() )
+      normalizedSettings.endpoint = QgsAiLocalServerCatalog::defaultOllamaBaseUrl();
+  }
   mVerifiedProviders.remove( provider );
   mProviderSettings.insert( provider, normalizedSettings );
   persistProviderSettings( provider, normalizedSettings );
+  if ( QgsAiLocalServerCatalog *catalog = localServerCatalog( provider ) )
+    catalog->setBaseUrl( normalizedSettings.endpoint );
+}
+
+QgsAiLocalServerCatalog *QgsAiModelRouter::localServerCatalog( Provider provider ) const
+{
+  return provider == Provider::Ollama ? mOllamaCatalog : nullptr;
+}
+
+void QgsAiModelRouter::refreshLocalServers( bool force )
+{
+  // Automatic probes would make test runs depend on whatever server happens to
+  // be running on the machine. Explicit (forced) probes always go through.
+  if ( !force && qEnvironmentVariable( "QGIS_CONTINUOUS_INTEGRATION_RUN" ) == "true"_L1 )
+    return;
+  mOllamaCatalog->refresh( force );
+}
+
+int QgsAiModelRouter::localContextTokens( Provider provider ) const
+{
+  const QgsAiLocalServerCatalog *catalog = localServerCatalog( provider );
+  if ( !catalog )
+    return 0;
+
+  const int configured = QgsSettings().value( providerSettingPrefix( provider ) + u"/numCtx"_s, OLLAMA_DEFAULT_NUM_CTX ).toInt();
+  int tokens = std::max( OLLAMA_MIN_NUM_CTX, configured );
+  // Asking for more than the model was trained on only wastes memory.
+  const int nativeContext = catalog->model( mProviderSettings.value( provider ).model ).contextLength;
+  if ( nativeContext > 0 )
+    tokens = std::min( tokens, nativeContext );
+  return tokens;
+}
+
+int QgsAiModelRouter::historyTokenBudget( Provider provider, int defaultBudget, int systemPromptChars ) const
+{
+  const int contextTokens = localContextTokens( provider );
+  if ( contextTokens <= 0 )
+    return defaultBudget;
+
+  // Same 4-characters-per-token estimate the history trimming uses.
+  const QJsonArray toolSchemas = advertisedToolSchemas( wireFormatForProvider( provider ) );
+  const int toolTokens = toolSchemas.isEmpty() ? 0 : static_cast<int>( QJsonDocument( toolSchemas ).toJson( QJsonDocument::Compact ).size() / 4 );
+  const int available = contextTokens - LOCAL_REPLY_RESERVE_TOKENS - systemPromptChars / 4 - toolTokens;
+  return std::clamp( available, LOCAL_MIN_HISTORY_TOKENS, defaultBudget );
+}
+
+QJsonArray QgsAiModelRouter::advertisedToolSchemas( ApiWireFormat wireFormat ) const
+{
+  if ( !mToolUseEnabled || !mToolRegistry || mToolRegistry->count() == 0 )
+    return QJsonArray();
+
+  QgsAiToolRegistry::WireFormat registryFormat = QgsAiToolRegistry::WireFormat::OpenAiChatCompletions;
+  if ( wireFormat == ApiWireFormat::OpenAiResponses )
+    registryFormat = QgsAiToolRegistry::WireFormat::OpenAiResponses;
+  else if ( wireFormat == ApiWireFormat::AnthropicMessages )
+    registryFormat = QgsAiToolRegistry::WireFormat::AnthropicTools;
+
+  if ( !mAllowedToolsFilterEnabled )
+    return mToolRegistry->schemasJsonForFormat( registryFormat );
+  return mAllowedTools.isEmpty() ? QJsonArray() : mToolRegistry->schemasJsonForFormat( registryFormat, mAllowedTools );
+}
+
+QUrl QgsAiModelRouter::requestUrl( Provider provider ) const
+{
+  const QString endpoint = mProviderSettings.value( provider ).endpoint.trimmed();
+  if ( provider == Provider::Ollama )
+    return QUrl( endpoint + u"/api/chat"_s );
+  return QUrl( endpoint );
 }
 
 QString QgsAiModelRouter::generateRequestId()
@@ -394,6 +491,8 @@ QString QgsAiModelRouter::providerDisplayName( Provider provider ) const
       return u"OpenRouter"_s;
     case Provider::Plan:
       return u"Plan Account"_s;
+    case Provider::Ollama:
+      return u"Ollama"_s;
   }
   return u"Unknown"_s;
 }
@@ -721,6 +820,64 @@ void QgsAiModelRouter::appendOpenAiChatMessages( const QgsAiChatMessage &message
   messages.push_back( item );
 }
 
+QJsonArray QgsAiModelRouter::buildOllamaMessages( const QList<QgsAiChatMessage> &messages, bool attachImages ) const
+{
+  QJsonArray result;
+  // Tool results are matched to their call by function name, not by id.
+  QHash<QString, QString> toolNameByCallId;
+
+  for ( const QgsAiChatMessage &message : messages )
+  {
+    QJsonObject item;
+    item.insert( u"role"_s, roleForProvider( Provider::Ollama, message.role ) );
+    item.insert( u"content"_s, message.content );
+
+    if ( message.role == QgsAiChatRole::Tool )
+    {
+      QString toolName = message.metadata.value( u"tool_name"_s ).toString();
+      if ( toolName.isEmpty() )
+        toolName = toolNameByCallId.value( message.metadata.value( u"tool_call_id"_s ).toString() );
+      if ( !toolName.isEmpty() )
+        item.insert( u"tool_name"_s, toolName );
+    }
+    else if ( message.role == QgsAiChatRole::Assistant )
+    {
+      const QVariantList toolCalls = message.metadata.value( u"tool_calls"_s ).toList();
+      QJsonArray callsArray;
+      for ( const QVariant &call : toolCalls )
+      {
+        const QVariantMap callMap = call.toMap();
+        const QString name = callMap.value( u"name"_s ).toString();
+        toolNameByCallId.insert( callMap.value( u"id"_s ).toString(), name );
+
+        QJsonObject function;
+        function.insert( u"name"_s, name );
+        // The native API takes the arguments as a JSON object, not a string.
+        function.insert( u"arguments"_s, QJsonObject::fromVariantMap( callMap.value( u"args"_s ).toMap() ) );
+        QJsonObject callObj;
+        callObj.insert( u"function"_s, function );
+        callsArray.push_back( callObj );
+      }
+      if ( !callsArray.isEmpty() )
+        item.insert( u"tool_calls"_s, callsArray );
+    }
+
+    if ( attachImages )
+    {
+      // Images ride on the message that produced them as raw base64 strings.
+      const QList<VisualContextImagePayload> images = readVisualContextImages( message );
+      QJsonArray encoded;
+      for ( const VisualContextImagePayload &image : images )
+        encoded.push_back( image.base64Data );
+      if ( !encoded.isEmpty() )
+        item.insert( u"images"_s, encoded );
+    }
+
+    result.push_back( item );
+  }
+  return result;
+}
+
 QgsAiModelRouter::ApiWireFormat QgsAiModelRouter::wireFormatForProvider( Provider provider ) const
 {
   switch ( provider )
@@ -739,6 +896,8 @@ QgsAiModelRouter::ApiWireFormat QgsAiModelRouter::wireFormatForProvider( Provide
     }
     case Provider::Plan:
       return ApiWireFormat::AnthropicMessages;
+    case Provider::Ollama:
+      return ApiWireFormat::OllamaChat;
   }
   return ApiWireFormat::PlainMessages;
 }
@@ -820,6 +979,27 @@ QByteArray QgsAiModelRouter::buildRequestPayload( Provider provider, const QList
         payload.insert( u"models"_s, fallbackModels );
       }
     }
+  }
+  else if ( wireFormat == ApiWireFormat::OllamaChat )
+  {
+    const QgsAiLocalServerCatalog *catalog = localServerCatalog( provider );
+    // Images sent to a model without vision support make Ollama reject the request.
+    const bool attachImages = catalog && catalog->model( model ).supportsVision;
+    payload.insert( u"messages"_s, buildOllamaMessages( messages, attachImages ) );
+
+    // No tool_choice: the native API has no such field and always lets the model decide.
+    const QJsonArray toolSchemas = advertisedToolSchemas( wireFormat );
+    if ( !toolSchemas.isEmpty() )
+      payload.insert( u"tools"_s, toolSchemas );
+
+    QJsonObject options;
+    options.insert( u"num_ctx"_s, localContextTokens( provider ) );
+    payload.insert( u"options"_s, options );
+
+    // Optional: by default the server's own OLLAMA_KEEP_ALIVE applies.
+    const QString keepAlive = QgsSettings().value( providerSettingPrefix( provider ) + u"/keepAlive"_s ).toString().trimmed();
+    if ( !keepAlive.isEmpty() )
+      payload.insert( u"keep_alive"_s, keepAlive );
   }
   else if ( wireFormat == ApiWireFormat::OpenAiResponses )
   {
@@ -994,6 +1174,7 @@ QString QgsAiModelRouter::authHeaderName( Provider provider ) const
     case Provider::OpenAi:
     case Provider::OpenRouter:
     case Provider::Plan:
+    case Provider::Ollama:
       return u"Authorization"_s;
   }
   return u"Authorization"_s;
@@ -1020,6 +1201,8 @@ QString QgsAiModelRouter::authConfigSettingKey( Provider provider ) const
       return u"ai/provider/openrouter/authcfg"_s;
     case Provider::Plan:
       return u"ai/provider/plan/token"_s;
+    case Provider::Ollama:
+      return u"ai/provider/ollama/authcfg"_s;
   }
   return QString();
 }
@@ -1038,6 +1221,8 @@ QString QgsAiModelRouter::providerSettingPrefix( Provider provider ) const
       return u"ai/provider/openrouter"_s;
     case Provider::Plan:
       return u"ai/provider/plan"_s;
+    case Provider::Ollama:
+      return u"ai/provider/ollama"_s;
   }
   return u"ai/provider/unknown"_s;
 }
@@ -1098,6 +1283,7 @@ QString QgsAiModelRouter::storedApiKey( Provider provider ) const
       break;
     case Provider::Codex:
     case Provider::Plan:
+    case Provider::Ollama:
       return QString();
   }
 
@@ -1106,7 +1292,7 @@ QString QgsAiModelRouter::storedApiKey( Provider provider ) const
 
 bool QgsAiModelRouter::hasStoredApiKey( Provider provider ) const
 {
-  if ( provider == Provider::Plan || provider == Provider::Codex )
+  if ( provider == Provider::Plan || provider == Provider::Codex || isLocalProvider( provider ) )
     return false;
 
   return QgsAiSecretStore::hasSecret( apiKeySettingKey( provider ) );
@@ -1137,6 +1323,21 @@ bool QgsAiModelRouter::requiresProviderSelection() const
 
 QString QgsAiModelRouter::credentialStatus( Provider provider ) const
 {
+  if ( const QgsAiLocalServerCatalog *catalog = localServerCatalog( provider ) )
+  {
+    switch ( catalog->state() )
+    {
+      case QgsAiLocalServerCatalog::ServerState::Unknown:
+        return tr( "Not checked yet" );
+      case QgsAiLocalServerCatalog::ServerState::NotRunning:
+        return tr( "Not running" );
+      case QgsAiLocalServerCatalog::ServerState::Running:
+        break;
+    }
+    if ( catalog->models().isEmpty() )
+      return catalog->installedModelCount() == 0 ? tr( "Running, no models installed" ) : tr( "Running, no installed model supports tools" );
+    return catalog->version().isEmpty() ? tr( "Running" ) : tr( "Running (version %1)" ).arg( catalog->version() );
+  }
   if ( provider == Provider::Claude && providerSettings( provider ).credentialMode == CredentialMode::ClaudeCode )
     return mVerifiedProviders.contains( provider ) ? tr( "Connection verified" ) : hasClaudeCodeLogin() ? tr( "Configured" ) : tr( "Reconnect Claude" );
   const QString key = provider == Provider::Plan ? planSessionTokenSettingKey() : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey() : apiKeySettingKey( provider );
@@ -1156,6 +1357,10 @@ QString QgsAiModelRouter::credentialStatus( Provider provider ) const
 
 bool QgsAiModelRouter::hasConfiguredCredential( Provider provider ) const
 {
+  // Local servers take no credential.
+  if ( isLocalProvider( provider ) )
+    return true;
+
   if ( provider == Provider::Codex )
     return QgsAiCodexOAuthClient::hasRefreshToken();
 
@@ -1186,7 +1391,7 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
 {
   QgsSettings settings;
 
-  const QList<Provider> providers = { Provider::OpenAi, Provider::Codex, Provider::Claude, Provider::OpenRouter, Provider::Plan };
+  const QList<Provider> providers = { Provider::OpenAi, Provider::Codex, Provider::Claude, Provider::OpenRouter, Provider::Plan, Provider::Ollama };
   for ( Provider provider : providers )
   {
     ProviderSettings providerSettings = mProviderSettings.value( provider );
@@ -1213,6 +1418,8 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
       providerSettings.model = settings.value( u"ai/provider/claude/code/model"_s, u"sonnet"_s ).toString();
     if ( provider == Provider::Codex )
       providerSettings.credentialMode = CredentialMode::OAuth;
+    if ( isLocalProvider( provider ) )
+      providerSettings.credentialMode = CredentialMode::None;
     if ( provider == Provider::OpenRouter )
     {
       providerSettings.autoRouting = settings.value( autoRoutingSettingKey( provider ), providerSettings.autoRouting ).toBool();
@@ -1262,6 +1469,12 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
       providerSettings.authConfigId.clear();
       providerSettings.enabled = settings.value( enabledSettingKey( provider ), !storedApiKey( provider ).isEmpty() ).toBool();
     }
+    else if ( isLocalProvider( provider ) )
+    {
+      // Enabled once the user picks one of the server's models.
+      providerSettings.authConfigId.clear();
+      providerSettings.enabled = settings.value( enabledSettingKey( provider ), false ).toBool();
+    }
     else
     {
       providerSettings.authConfigId.clear();
@@ -1297,6 +1510,7 @@ void QgsAiModelRouter::persistProviderSettings( Provider provider, const Provide
     credentialModeSettingKey( provider ),
     settings.credentialMode == CredentialMode::ClaudeCode ? u"claudeCode"_s
     : settings.credentialMode == CredentialMode::OAuth    ? u"oauth"_s
+    : settings.credentialMode == CredentialMode::None     ? u"none"_s
                                                           : u"apiKey"_s
   );
   if ( provider == Provider::Claude )
@@ -1321,6 +1535,9 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
   context.maxRetries = std::clamp( appSettings.value( u"ai/network/maxRetries"_s, 2 ).toInt(), 0, 5 );
   if ( provider == Provider::Plan )
     context.maxRetries = std::clamp( appSettings.value( u"ai/network/maxRetries"_s, 3 ).toInt(), 0, 3 );
+  // A local turn can take minutes: repeat it at most once.
+  if ( isLocalProvider( provider ) )
+    context.maxRetries = std::min( context.maxRetries, 1 );
   mRequests.insert( context.requestId, context );
 
   const QString requestId = context.requestId;
@@ -1409,6 +1626,12 @@ bool QgsAiModelRouter::storeApiKey( Provider provider, const QString &apiKey, QS
       *errorMessage = u"Use Codex login for Codex authentication."_s;
     return false;
   }
+  if ( isLocalProvider( provider ) )
+  {
+    if ( errorMessage )
+      *errorMessage = u"%1 is a local server and takes no API key."_s.arg( providerDisplayName( provider ) );
+    return false;
+  }
 
   if ( apiKey.trimmed().isEmpty() )
   {
@@ -1457,6 +1680,12 @@ bool QgsAiModelRouter::setCredentialMode( Provider provider, CredentialMode mode
   {
     if ( errorMessage )
       *errorMessage = u"Codex only supports OAuth login."_s;
+    return false;
+  }
+  if ( isLocalProvider( provider ) != ( mode == CredentialMode::None ) )
+  {
+    if ( errorMessage )
+      *errorMessage = u"Only local servers run without a credential."_s;
     return false;
   }
 
@@ -1558,6 +1787,10 @@ QString QgsAiModelRouter::planPromptCacheSessionId() const
 
 bool QgsAiModelRouter::applyAuthentication( Provider provider, QNetworkRequest &request, QString *errorMessage ) const
 {
+  // Local servers take no credential, so the keychain is never consulted.
+  if ( isLocalProvider( provider ) )
+    return true;
+
   const QString credentialKey = provider == Provider::Plan    ? planSessionTokenSettingKey()
                                 : provider == Provider::Codex ? QgsAiCodexOAuthClient::refreshTokenSettingKey()
                                                               : apiKeySettingKey( provider );
@@ -1687,11 +1920,22 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
     return false;
   }
 
-  QNetworkRequest request( QUrl( settings.endpoint ) );
+  if ( isLocalProvider( context.provider ) && settings.model.trimmed().isEmpty() )
+  {
+    context.preDispatchError = tr( "Choose one of the models installed on %1 before sending a message." ).arg( providerDisplayName( context.provider ) );
+    return false;
+  }
+
+  QNetworkRequest request( requestUrl( context.provider ) );
   request.setHeader( QNetworkRequest::ContentTypeHeader, u"application/json"_s );
   QgsSettings appSettings;
-  const int configuredTimeoutSeconds = std::max( 10, appSettings.value( u"ai/network/timeoutSeconds"_s, 120 ).toInt() );
+  int configuredTimeoutSeconds = std::max( 10, appSettings.value( u"ai/network/timeoutSeconds"_s, 120 ).toInt() );
+  if ( isLocalProvider( context.provider ) )
+    configuredTimeoutSeconds = std::max( configuredTimeoutSeconds, appSettings.value( providerSettingPrefix( context.provider ) + u"/timeoutSeconds"_s, LOCAL_DEFAULT_TIMEOUT_SECONDS ).toInt() );
   request.setTransferTimeout( configuredTimeoutSeconds * 1000 );
+
+  if ( context.provider == Provider::Ollama && context.stream )
+    request.setRawHeader( "Accept", "application/x-ndjson" );
 
   if ( context.provider == Provider::Claude )
   {
@@ -1762,6 +2006,18 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
     context.preDispatchError = u"Unable to start network request for %1."_s.arg( providerDisplayName( context.provider ) );
   if ( !context.reply )
     return false;
+
+  if ( isLocalProvider( context.provider ) )
+  {
+    // QgsNetworkAccessManager aborts any reply that receives nothing for its
+    // global network timeout (60 s by default). Loading a large local model
+    // into memory sends nothing for longer than that, so the idle limit of a
+    // local request follows the provider timeout instead. The timer is the
+    // reply child created by QgsNetworkAccessManager::createRequest(); its
+    // progress connections keep restarting it with the interval set here.
+    if ( QTimer *idleTimer = context.reply->findChild<QTimer *>( u"timeoutTimer"_s ) )
+      idleTimer->start( configuredTimeoutSeconds * 1000 );
+  }
 
   context.reply->setProperty( "aiRequestId", context.requestId );
   connect( context.reply, &QNetworkReply::readyRead, this, &QgsAiModelRouter::onReplyReadyRead );
@@ -1895,6 +2151,10 @@ QString QgsAiModelRouter::extractTextFromResponse( Provider provider, const QJso
       return text;
   }
 
+  // Ollama: text lives at message.content; message.thinking is never chat text.
+  if ( wireFormatForProvider( provider ) == ApiWireFormat::OllamaChat )
+    return object.value( u"message"_s ).toObject().value( u"content"_s ).toString();
+
   // Chat Completions: text lives at choices[0].message.content. Return without
   // the recursive fallback, which would leak tool_calls JSON into chat text.
   if ( wireFormatForProvider( provider ) == ApiWireFormat::OpenAiChatCompletions )
@@ -1922,6 +2182,10 @@ QString QgsAiModelRouter::extractTextFromStreamEvent( Provider provider, const Q
     }
     return QString();
   }
+
+  // Ollama streams one JSON object per line with the next piece of message.content.
+  if ( wireFormatForProvider( provider ) == ApiWireFormat::OllamaChat )
+    return object.value( u"message"_s ).toObject().value( u"content"_s ).toString();
 
   // Chat Completions streaming: text deltas come as choices[0].delta.content.
   // Must return before the recursive fallback below, which would otherwise leak
@@ -1989,6 +2253,13 @@ void QgsAiModelRouter::extractToolCallsFromResponse( Provider provider, const QJ
   }
 
   const ApiWireFormat wireFormat = wireFormatForProvider( provider );
+
+  if ( wireFormat == ApiWireFormat::OllamaChat )
+  {
+    // A non-streamed reply is a single chunk with done=true.
+    absorbOllamaChunk( object, context );
+    return;
+  }
 
   if ( wireFormat == ApiWireFormat::OpenAiChatCompletions )
   {
@@ -2117,6 +2388,12 @@ void QgsAiModelRouter::absorbStreamEvent( Provider provider, const QJsonObject &
 
   const ApiWireFormat wireFormat = wireFormatForProvider( provider );
 
+  if ( wireFormat == ApiWireFormat::OllamaChat )
+  {
+    absorbOllamaChunk( object, context );
+    return;
+  }
+
   if ( wireFormat == ApiWireFormat::OpenAiChatCompletions )
   {
     // Usage and the routed model ride on top-level fields; the final usage chunk
@@ -2243,6 +2520,73 @@ void QgsAiModelRouter::absorbStreamEvent( Provider provider, const QJsonObject &
   }
 }
 
+void QgsAiModelRouter::absorbOllamaChunk( const QJsonObject &object, RequestContext &context ) const
+{
+  // Tool calls arrive whole, with the arguments already parsed, and without an
+  // id: synthesize one that stays unique across the turns of a conversation.
+  const QJsonArray toolCalls = object.value( u"message"_s ).toObject().value( u"tool_calls"_s ).toArray();
+  for ( const QJsonValue &value : toolCalls )
+  {
+    const QJsonObject callObject = value.toObject();
+    const QJsonObject function = callObject.value( u"function"_s ).toObject();
+
+    PendingToolCall call;
+    call.name = function.value( u"name"_s ).toString();
+    if ( call.name.isEmpty() )
+      continue;
+    call.id = callObject.value( u"id"_s ).toString();
+    if ( call.id.isEmpty() )
+      call.id = u"call_%1_%2"_s.arg( context.requestId.left( 8 ) ).arg( context.toolCalls.size() );
+
+    const QJsonValue arguments = function.value( u"arguments"_s );
+    if ( arguments.isObject() )
+    {
+      call.argumentsObject = arguments.toObject();
+      call.argumentsArePreParsed = true;
+    }
+    else
+    {
+      // Tolerate a server that serializes the arguments as a JSON string.
+      call.argumentsRaw = arguments.toString();
+      call.argumentsArePreParsed = call.argumentsRaw.trimmed().isEmpty();
+    }
+    context.toolCalls.append( call );
+  }
+
+  if ( !object.value( u"done"_s ).toBool() )
+    return;
+
+  finalizePendingToolCallArguments( context );
+  QgsAiUsage usage;
+  usage.promptTokens = object.value( u"prompt_eval_count"_s ).toVariant().toLongLong();
+  usage.completionTokens = object.value( u"eval_count"_s ).toVariant().toLongLong();
+  usage.totalTokens = usage.promptTokens + usage.completionTokens;
+  mergeUsage( context.usage, usage );
+  if ( !object.value( u"model"_s ).toString().isEmpty() )
+    context.responseModel = object.value( u"model"_s ).toString();
+
+  const QString doneReason = object.value( u"done_reason"_s ).toString();
+  if ( !context.toolCalls.isEmpty() )
+  {
+    context.stopReason = u"tool_use"_s;
+  }
+  else if ( doneReason == "length"_L1 )
+  {
+    // The context window or the output limit was hit. With visible text the
+    // partial answer is still delivered; with none, the turn produced nothing
+    // usable and the user has to know why.
+    context.stopReason = u"length"_s;
+    // A non-streamed reply carries its whole text in this same chunk.
+    const bool hasText = !context.aggregatedText.trimmed().isEmpty() || !object.value( u"message"_s ).toObject().value( u"content"_s ).toString().trimmed().isEmpty();
+    if ( !hasText && context.midStreamError.isEmpty() )
+      context.midStreamError = tr( "The model ran out of context before answering. Raise the context window (num_ctx) in Provider Settings, start a new chat, or pick a model with a larger context." );
+  }
+  else
+  {
+    context.stopReason = u"stop"_s;
+  }
+}
+
 void QgsAiModelRouter::onReplyReadyRead()
 {
   QNetworkReply *reply = qobject_cast<QNetworkReply *>( sender() );
@@ -2251,7 +2595,9 @@ void QgsAiModelRouter::onReplyReadyRead()
     return;
 
   context->streamingBuffer += QString::fromUtf8( reply->readAll() );
-  if ( !reply->header( QNetworkRequest::ContentTypeHeader ).toString().contains( "text/event-stream"_L1 ) )
+  // Line-oriented streams only: SSE, or Ollama's NDJSON (one JSON object per line).
+  const QString contentType = reply->header( QNetworkRequest::ContentTypeHeader ).toString();
+  if ( !contentType.contains( "text/event-stream"_L1 ) && !contentType.contains( "application/x-ndjson"_L1 ) )
     return;
   while ( true )
   {
@@ -2432,6 +2778,10 @@ QString QgsAiModelRouter::composeHttpErrorMessage( Provider provider, int httpSt
       }
       break;
     }
+    case 404:
+      if ( provider == Provider::Ollama )
+        prefix = tr( "The selected model is not installed on the Ollama server. Pull it with `ollama pull`, or pick another model." );
+      break;
     case 408:
       prefix = tr( "The provider timed out before completing the response." );
       break;
@@ -2672,6 +3022,10 @@ void QgsAiModelRouter::onReplyFinished()
   }
 
   QString errorMessage = context->midStreamError;
+  const Provider failedProvider = context->provider;
+  const bool localServerDown = isLocalProvider( failedProvider ) && httpStatus == 0 && ( networkError == QNetworkReply::ConnectionRefusedError || networkError == QNetworkReply::HostNotFoundError );
+  if ( errorMessage.isEmpty() && localServerDown )
+    errorMessage = tr( "%1 is not running at %2. Start it, then send the message again." ).arg( providerName, providerSettings( failedProvider ).endpoint );
   if ( errorMessage.isEmpty() )
     errorMessage = composeHttpErrorMessage( context->provider, httpStatus, responseBody );
   if ( errorMessage.isEmpty() )
@@ -2685,6 +3039,10 @@ void QgsAiModelRouter::onReplyFinished()
     errorMessage += u" · retry_after=%1"_s.arg( context->retryAfterSeconds );
 
   finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );
+  // The request context is gone: only now let the catalog tell the UI the
+  // server went away, so its models leave the picker.
+  if ( localServerDown )
+    localServerCatalog( failedProvider )->markUnreachable();
 }
 
 QString QgsAiModelRouter::emptyCompletionErrorMessage()
@@ -2742,6 +3100,11 @@ bool QgsAiModelRouter::isProviderUsable( Provider provider ) const
 
 bool QgsAiModelRouter::isProviderAvailable( Provider provider ) const
 {
+  // A local provider is offered only while its server answers and serves at
+  // least one model the agent loop can drive.
+  if ( const QgsAiLocalServerCatalog *catalog = localServerCatalog( provider ) )
+    return catalog->state() == QgsAiLocalServerCatalog::ServerState::Running && !catalog->models().isEmpty();
+
   if ( !hasConfiguredCredential( provider ) )
     return false;
   // The Plan backend additionally needs a real endpoint (the default is a placeholder).

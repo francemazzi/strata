@@ -13,6 +13,7 @@
 #include "ai/qgsaichathistorystore.h"
 #include "ai/qgsaichatpromptedit.h"
 #include "ai/qgsaifilecontextprovider.h"
+#include "ai/qgsailocalservercatalog.h"
 #include "ai/qgsaimodelrouter.h"
 #include "ai/qgsaiplanclient.h"
 #include "ai/qgsaireviewpatchengine.h"
@@ -248,6 +249,7 @@ class TestQgsAiChatDockWidget : public QObject
     void planLoginModelPickerListsManagedAndByoModels();
     void emptyModelMenuOffersCloudSignIn();
     void unavailableSelectedProviderIsNotReplacedInModelPill();
+    void localServerModelsAreOfferedOnlyWhileItRuns();
     void gisCardShowsSuggestionAndSendsReview();
     void gisMentionAttachesHealthBlock();
     void usesPaletteBasedCursorStyling();
@@ -515,6 +517,105 @@ void TestQgsAiChatDockWidget::unavailableSelectedProviderIsNotReplacedInModelPil
   QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::OpenRouter );
   QVERIFY( !router.requiresProviderSelection() );
   QVERIFY( pill->text().startsWith( "OpenRouter"_L1 ) );
+}
+
+void TestQgsAiChatDockWidget::localServerModelsAreOfferedOnlyWhileItRuns()
+{
+  const auto guard = isolatePlanModelPickerState();
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  // Keep the dock's own start-up probe out of the way: the test decides when
+  // the server is first seen.
+  const QByteArray savedCiFlag = qgetenv( "QGIS_CONTINUOUS_INTEGRATION_RUN" );
+  qputenv( "QGIS_CONTINUOUS_INTEGRATION_RUN", "true" );
+  const auto cleanup = qScopeGuard( [savedCiFlag]() {
+    QgsSettings().remove( u"ai/provider/ollama"_s );
+    QgsSettings().remove( u"ai/activeProvider"_s );
+    if ( savedCiFlag.isEmpty() )
+      qunsetenv( "QGIS_CONTINUOUS_INTEGRATION_RUN" );
+    else
+      qputenv( "QGIS_CONTINUOUS_INTEGRATION_RUN", savedCiFlag );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  server.requestHandler = []( const QByteArray &rawRequest, const QByteArray &body, QgsAiTestLoopbackServer::ScriptedResponse &response ) {
+    if ( rawRequest.startsWith( "GET /api/version" ) )
+      response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"version\":\"0.40.14\"}" ) );
+    else if ( rawRequest.startsWith( "GET /api/tags" ) )
+      response = QgsAiTestLoopbackServer::
+        jsonResponse( 200, "OK", QByteArrayLiteral( "{\"models\":[{\"name\":\"qwen3:14b\",\"digest\":\"a\"},{\"name\":\"nomic-embed-text:latest\",\"digest\":\"b\"},{\"name\":\"gpt-oss:20b\",\"digest\":\"c\"}]}" ) );
+    else if ( rawRequest.startsWith( "POST /api/show" ) )
+      response = QgsAiTestLoopbackServer::
+        jsonResponse( 200, "OK", body.contains( "nomic" ) ? QByteArrayLiteral( "{\"capabilities\":[\"embedding\"]}" ) : QByteArrayLiteral( "{\"capabilities\":[\"completion\",\"tools\"],\"model_info\":{\"x.context_length\":40960}}" ) );
+    else
+      return false;
+    return true;
+  };
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings ollama = router.providerSettings( QgsAiModelRouter::Provider::Ollama );
+  ollama.endpoint = u"http://127.0.0.1:%1"_s.arg( server.serverPort() );
+  router.setProviderSettings( QgsAiModelRouter::Provider::Ollama, ollama );
+
+  QTemporaryDir tempDir;
+  QVERIFY( tempDir.isValid() );
+  QgsAiFileContextProvider contextProvider( tempDir.path() );
+  QgsAiReviewPatchEngine reviewEngine;
+  QgsAiAgentSessionManager manager( nullptr, &contextProvider, &reviewEngine );
+  QgsAiChatDockWidget dock( &manager, &router, &reviewEngine );
+  QApplication::processEvents();
+
+  QToolButton *pill = dock.findChild<QToolButton *>( u"aiModelPill"_s );
+  QVERIFY( pill );
+  const auto localModels = [pill]() {
+    QStringList names;
+    for ( QAction *action : pill->menu()->actions() )
+    {
+      if ( action->isCheckable() )
+        names << action->text();
+    }
+    return names;
+  };
+
+  // Server not seen yet: nothing local is offered.
+  QVERIFY( localModels().isEmpty() );
+
+  // Once a probe finds it, its tool-capable models appear without reopening anything.
+  router.refreshLocalServers( true );
+  QTRY_COMPARE_WITH_TIMEOUT( localModels(), QStringList( { u"gpt-oss:20b"_s, u"qwen3:14b"_s } ), 10000 );
+  bool hasSection = false;
+  for ( QAction *action : pill->menu()->actions() )
+    hasSection = hasSection || ( action->isSeparator() && action->text() == "Ollama (local)"_L1 );
+  QVERIFY( hasSection );
+
+  // In the settings no model is picked on the user's behalf, but the empty
+  // box says that models are there to choose from.
+  {
+    QgsAiSettingsDialog settingsDialog( nullptr, &router, nullptr );
+    QComboBox *ollamaModel = settingsDialog.findChild<QComboBox *>( u"aiOllamaModelComboBox"_s );
+    QVERIFY( ollamaModel );
+    QCOMPARE( ollamaModel->count(), 2 );
+    QCOMPARE( ollamaModel->currentIndex(), -1 );
+    QCOMPARE( ollamaModel->placeholderText(), u"Choose a model (2 available)"_s );
+  }
+
+  // Picking one makes Ollama the active provider with that model.
+  for ( QAction *action : pill->menu()->actions() )
+  {
+    if ( action->text() == "qwen3:14b"_L1 )
+      action->trigger();
+  }
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Ollama );
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Ollama ).model, u"qwen3:14b"_s );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Ollama ) );
+  QVERIFY( pill->text().contains( u"qwen3:14b"_s ) );
+
+  // When the server goes away its models leave the picker, but the user's
+  // choice of provider is not silently replaced by another one.
+  router.localServerCatalog( QgsAiModelRouter::Provider::Ollama )->markUnreachable();
+  QVERIFY( localModels().isEmpty() );
+  QCOMPARE( router.activeProvider(), QgsAiModelRouter::Provider::Ollama );
+  QCOMPARE( pill->toolTip(), u"Not running"_s );
 }
 
 void TestQgsAiChatDockWidget::gisCardShowsSuggestionAndSendsReview()

@@ -9,6 +9,7 @@
 #include "ai/qgsaiagentsessionmanager.h"
 #include "ai/qgsaiclaudecodeauth.h"
 #include "ai/qgsaicodexoauthclient.h"
+#include "ai/qgsailocalservercatalog.h"
 #include "ai/qgsaimodelrouter.h"
 #include "ai/qgsaisecretstore.h"
 #include "ai/tools/qgsaiechotool.h"
@@ -18,6 +19,7 @@
 #include "qgsapplication.h"
 #include "qgsauthmanager.h"
 #include "qgsmessagelog.h"
+#include "qgsnetworkaccessmanager.h"
 #include "qgssettings.h"
 #include "qgstest.h"
 
@@ -40,6 +42,7 @@
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QString>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QUrlQuery>
@@ -182,6 +185,45 @@ namespace
     return message;
   }
 
+  /**
+   * Points the Ollama provider at \a port with a selected model. Restore with
+   * removeOllamaTestSettings().
+   */
+  void configureOllamaForLoopback( QgsAiModelRouter &router, quint16 port, const QString &model = u"qwen3:14b"_s )
+  {
+    QgsSettings settings;
+    settings.setValue( u"ai/network/maxRetries"_s, 0 );
+
+    QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::Ollama );
+    providerSettings.endpoint = u"http://127.0.0.1:%1"_s.arg( port );
+    providerSettings.model = model;
+    providerSettings.enabled = true;
+    router.setProviderSettings( QgsAiModelRouter::Provider::Ollama, providerSettings );
+  }
+
+  void removeOllamaTestSettings()
+  {
+    QgsSettings settings;
+    settings.remove( u"ai/provider/ollama"_s );
+    settings.remove( u"ai/network/maxRetries"_s );
+  }
+
+  // Minimal Ollama: one tool-capable model with a 40960-token window.
+  void serveOllamaCatalog( QgsAiTestLoopbackServer &server )
+  {
+    server.requestHandler = []( const QByteArray &rawRequest, const QByteArray &, QgsAiTestLoopbackServer::ScriptedResponse &response ) {
+      if ( rawRequest.startsWith( "GET /api/version" ) )
+        response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"version\":\"0.40.14\"}" ) );
+      else if ( rawRequest.startsWith( "GET /api/tags" ) )
+        response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"models\":[{\"name\":\"qwen3:14b\",\"digest\":\"sha-qwen\"}]}" ) );
+      else if ( rawRequest.startsWith( "POST /api/show" ) )
+        response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", QByteArrayLiteral( "{\"capabilities\":[\"completion\",\"tools\"],\"model_info\":{\"qwen3.context_length\":40960}}" ) );
+      else
+        return false;
+      return true;
+    };
+  }
+
   bool liveAiSmokeTestsEnabled()
   {
     return qEnvironmentVariable( "STRATA_RUN_LIVE_AI_TESTS" ).trimmed() == "1"_L1;
@@ -281,6 +323,17 @@ class TestQgsAiModelRouter : public QObject
 
     // SSE transport & error hardening (loopback server)
     void openRouterStreamTextDeltas();
+    void buildPayloadForOllamaUsesNativeChatFormat();
+    void ollamaContextWindowIsCappedToTheModel();
+    void ollamaAvailabilityFollowsTheServer();
+    void ollamaStreamDeliversTextWithoutCredentials();
+    void ollamaStreamToolCallsCarryObjectArguments();
+    void ollamaOutOfContextWithoutTextFails();
+    void ollamaStoppedServerGivesActionableError();
+    void ollamaMissingModelIsExplained();
+    void ollamaHistoryBudgetFitsTheContextWindow();
+    void ollamaSlowModelLoadOutlastsTheNetworkTimeout();
+    void ollamaLiveToolRoundTrip();
     void openRouterStreamToolCallDeltasAccumulateByIndex();
     void openRouterStreamFinishReasonErrorFails();
     void openRouterStreamFinishReasonLengthWithToolCallFails();
@@ -2485,6 +2538,458 @@ void TestQgsAiModelRouter::liveOpenRouterRequest()
   QVERIFY( doc.object().contains( u"choices"_s ) );
   // Usage accounting is always included by OpenRouter.
   QVERIFY( doc.object().contains( u"usage"_s ) );
+}
+
+void TestQgsAiModelRouter::buildPayloadForOllamaUsesNativeChatFormat()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, 11434 );
+  router.setToolRegistry( &registry );
+  router.setToolUseEnabled( true );
+
+  QgsAiChatMessage system;
+  system.role = QgsAiChatRole::System;
+  system.content = u"You are Strata."_s;
+
+  QgsAiChatMessage assistant;
+  assistant.role = QgsAiChatRole::Assistant;
+  QVariantMap call;
+  call.insert( u"id"_s, u"call_1"_s );
+  call.insert( u"name"_s, u"echo"_s );
+  call.insert( u"args"_s, QVariantMap { { u"text"_s, u"hi"_s } } );
+  assistant.metadata.insert( u"tool_calls"_s, QVariantList { call } );
+
+  // Older history entries carry only the call id: the name is recovered from the call.
+  QgsAiChatMessage toolResult;
+  toolResult.role = QgsAiChatRole::Tool;
+  toolResult.content = u"{\"text\":\"hi\"}"_s;
+  toolResult.metadata.insert( u"tool_call_id"_s, u"call_1"_s );
+
+  const QJsonObject payload = QJsonDocument::fromJson( router.buildRequestPayload( QgsAiModelRouter::Provider::Ollama, { system, userMessage( u"say hi"_s ), assistant, toolResult }, true ) ).object();
+
+  QCOMPARE( payload.value( u"model"_s ).toString(), u"qwen3:14b"_s );
+  QCOMPARE( payload.value( u"stream"_s ).toBool(), true );
+  // The window is always requested explicitly: the server default can be 4k tokens.
+  QCOMPARE( payload.value( u"options"_s ).toObject().value( u"num_ctx"_s ).toInt(), 32768 );
+  // The native API has no tool_choice, max_tokens or keep-alive unless configured.
+  QVERIFY( !payload.contains( u"tool_choice"_s ) );
+  QVERIFY( !payload.contains( u"max_tokens"_s ) );
+  QVERIFY( !payload.contains( u"keep_alive"_s ) );
+
+  const QJsonArray tools = payload.value( u"tools"_s ).toArray();
+  QCOMPARE( tools.size(), 1 );
+  QCOMPARE( tools.first().toObject().value( u"function"_s ).toObject().value( u"name"_s ).toString(), u"echo"_s );
+
+  const QJsonArray messages = payload.value( u"messages"_s ).toArray();
+  QCOMPARE( messages.size(), 4 );
+  QCOMPARE( messages.at( 0 ).toObject().value( u"role"_s ).toString(), u"system"_s );
+  QCOMPARE( messages.at( 1 ).toObject().value( u"role"_s ).toString(), u"user"_s );
+
+  const QJsonObject sentCall = messages.at( 2 ).toObject().value( u"tool_calls"_s ).toArray().first().toObject().value( u"function"_s ).toObject();
+  QCOMPARE( sentCall.value( u"name"_s ).toString(), u"echo"_s );
+  // Arguments travel as a JSON object, not as a serialized string.
+  QVERIFY( sentCall.value( u"arguments"_s ).isObject() );
+  QCOMPARE( sentCall.value( u"arguments"_s ).toObject().value( u"text"_s ).toString(), u"hi"_s );
+
+  const QJsonObject sentResult = messages.at( 3 ).toObject();
+  QCOMPARE( sentResult.value( u"role"_s ).toString(), u"tool"_s );
+  QCOMPARE( sentResult.value( u"tool_name"_s ).toString(), u"echo"_s );
+
+  QgsSettings().setValue( u"ai/provider/ollama/keepAlive"_s, u"30m"_s );
+  const QJsonObject withKeepAlive = QJsonDocument::fromJson( router.buildRequestPayload( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hi"_s ) }, true ) ).object();
+  QCOMPARE( withKeepAlive.value( u"keep_alive"_s ).toString(), u"30m"_s );
+}
+
+void TestQgsAiModelRouter::ollamaContextWindowIsCappedToTheModel()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  serveOllamaCatalog( server );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+  QCOMPARE( router.localContextTokens( QgsAiModelRouter::Provider::OpenRouter ), 0 );
+
+  // Unknown model: the configured window is used as is.
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 65536 );
+  QCOMPARE( router.localContextTokens( QgsAiModelRouter::Provider::Ollama ), 65536 );
+
+  // Once the server reports a 40960-token model, asking for more is pointless.
+  router.refreshLocalServers( true );
+  QgsAiLocalServerCatalog *catalog = router.localServerCatalog( QgsAiModelRouter::Provider::Ollama );
+  QTRY_COMPARE_WITH_TIMEOUT( catalog->models().size(), 1, 10000 );
+  QCOMPARE( router.localContextTokens( QgsAiModelRouter::Provider::Ollama ), 40960 );
+
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 8192 );
+  QCOMPARE( router.localContextTokens( QgsAiModelRouter::Provider::Ollama ), 8192 );
+  const QJsonObject payload = QJsonDocument::fromJson( router.buildRequestPayload( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hi"_s ) }, true ) ).object();
+  QCOMPARE( payload.value( u"options"_s ).toObject().value( u"num_ctx"_s ).toInt(), 8192 );
+}
+
+void TestQgsAiModelRouter::ollamaAvailabilityFollowsTheServer()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  serveOllamaCatalog( server );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  QVERIFY( QgsAiModelRouter::isLocalProvider( QgsAiModelRouter::Provider::Ollama ) );
+  QVERIFY( !QgsAiModelRouter::isLocalProvider( QgsAiModelRouter::Provider::OpenRouter ) );
+  QVERIFY( !router.localServerCatalog( QgsAiModelRouter::Provider::Claude ) );
+
+  // Not offered before the server has been seen, and no key can be stored for it.
+  configureOllamaForLoopback( router, server.serverPort() );
+  QVERIFY( !router.isProviderAvailable( QgsAiModelRouter::Provider::Ollama ) );
+  QCOMPARE( router.credentialStatus( QgsAiModelRouter::Provider::Ollama ), u"Not checked yet"_s );
+  QString error;
+  QVERIFY( !router.storeApiKey( QgsAiModelRouter::Provider::Ollama, u"sk-whatever"_s, &error ) );
+  QVERIFY( !router.hasStoredApiKey( QgsAiModelRouter::Provider::Ollama ) );
+  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Ollama ).credentialMode, QgsAiModelRouter::CredentialMode::None );
+
+  router.refreshLocalServers( true );
+  QTRY_VERIFY_WITH_TIMEOUT( router.isProviderAvailable( QgsAiModelRouter::Provider::Ollama ), 10000 );
+  QCOMPARE( router.credentialStatus( QgsAiModelRouter::Provider::Ollama ), u"Running (version 0.40.14)"_s );
+  QVERIFY( router.isProviderUsable( QgsAiModelRouter::Provider::Ollama ) );
+
+  // The selection survives a restart, including the provider itself.
+  router.setActiveProvider( QgsAiModelRouter::Provider::Ollama );
+  QgsAiModelRouter reloaded;
+  QCOMPARE( reloaded.activeProvider(), QgsAiModelRouter::Provider::Ollama );
+  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Ollama ).model, u"qwen3:14b"_s );
+  QCOMPARE( reloaded.providerSettings( QgsAiModelRouter::Provider::Ollama ).endpoint, u"http://127.0.0.1:%1"_s.arg( server.serverPort() ) );
+  QgsSettings().remove( u"ai/activeProvider"_s );
+}
+
+void TestQgsAiModelRouter::ollamaStreamDeliversTextWithoutCredentials()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::ndjsonResponse( {
+    // Reasoning is streamed apart from the answer and must stay out of the chat text.
+    QByteArrayLiteral( "{\"model\":\"qwen3:14b\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"The user greets me.\"},\"done\":false}\n" ),
+    QByteArrayLiteral( "{\"model\":\"qwen3:14b\",\"message\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"done\":false}\n" ),
+    QByteArrayLiteral( "{\"model\":\"qwen3:14b\",\"message\":{\"role\":\"assistant\",\"content\":\"lo\"},\"done\":false}\n" ),
+    QByteArrayLiteral( "{\"model\":\"qwen3:14b\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":120,\"eval_count\":7}\n" ),
+  } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+
+  QSignalSpy progressSpy( &router, &QgsAiModelRouter::requestProgress );
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  QSignalSpy usageSpy( &router, &QgsAiModelRouter::usageReported );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( args.at( 2 ).toString(), u"Ollama"_s );
+  QCOMPARE( args.at( 3 ).toString(), u"Hello"_s );
+  QCOMPARE( progressSpy.count(), 2 );
+
+  // The chat path is appended to the server address, and nothing identifies the user.
+  const QByteArray raw = server.lastRawRequest();
+  QVERIFY( raw.startsWith( "POST /api/chat " ) );
+  QVERIFY( !raw.toLower().contains( "authorization:" ) );
+  QVERIFY( !raw.toLower().contains( "x-api-key:" ) );
+
+  QCOMPARE( usageSpy.count(), 1 );
+  const QgsAiUsage usage = usageSpy.first().at( 3 ).value<QgsAiUsage>();
+  QCOMPARE( usage.promptTokens, 120LL );
+  QCOMPARE( usage.completionTokens, 7LL );
+}
+
+void TestQgsAiModelRouter::ollamaStreamToolCallsCarryObjectArguments()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::ndjsonResponse( {
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"Checking.\"},\"done\":false}\n" ),
+    QByteArrayLiteral(
+      "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":["
+      "{\"function\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}},"
+      "{\"function\":{\"name\":\"list_files\",\"arguments\":{\"glob\":\"*.txt\"}}}"
+      "]},\"done\":false}\n"
+    ),
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n" ),
+  } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+
+  QSignalSpy toolCallsSpy( &router, &QgsAiModelRouter::toolCallsRequested );
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"run the tools"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( toolCallsSpy.count(), 1, 10000 );
+  const QList<QVariant> args = toolCallsSpy.takeFirst();
+  QCOMPARE( args.at( 2 ).toString(), u"Checking."_s );
+  const QList<QgsAiToolCall> calls = args.at( 3 ).value<QList<QgsAiToolCall>>();
+  QCOMPARE( calls.size(), 2 );
+  QCOMPARE( calls.at( 0 ).name, u"echo"_s );
+  QCOMPARE( calls.at( 0 ).args.value( u"text"_s ).toString(), u"hi"_s );
+  QCOMPARE( calls.at( 1 ).name, u"list_files"_s );
+  QCOMPARE( calls.at( 1 ).args.value( u"glob"_s ).toString(), u"*.txt"_s );
+  // Ollama sends no call ids: each call still needs its own to pair with a result.
+  QVERIFY( !calls.at( 0 ).id.isEmpty() );
+  QVERIFY( calls.at( 0 ).id != calls.at( 1 ).id );
+  // A tool turn is not a finished reply.
+  QCOMPARE( finishedSpy.count(), 0 );
+}
+
+void TestQgsAiModelRouter::ollamaOutOfContextWithoutTextFails()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses
+    << QgsAiTestLoopbackServer::ndjsonResponse( {
+         QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"Let me think\"},\"done\":false}\n" ),
+         QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\"}\n" ),
+       } )
+    // A reply cut short after visible text is still delivered.
+    << QgsAiTestLoopbackServer::ndjsonResponse( {
+         QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"Partial answer\"},\"done\":false}\n" ),
+         QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\"}\n" ),
+       } );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY( !args.at( 1 ).toBool() );
+  QVERIFY2( args.at( 4 ).toString().contains( u"num_ctx"_s ), qPrintable( args.at( 4 ).toString() ) );
+  // Repeating the same over-long prompt cannot help.
+  QCOMPARE( server.requestCount, 1 );
+
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( args.at( 3 ).toString(), u"Partial answer"_s );
+}
+
+void TestQgsAiModelRouter::ollamaStoppedServerGivesActionableError()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  // First a running server, so the provider is on offer...
+  auto server = std::make_unique<QgsAiTestLoopbackServer>();
+  serveOllamaCatalog( *server );
+  QVERIFY( server->listen( QHostAddress::LocalHost, 0 ) );
+  const quint16 port = server->serverPort();
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, port );
+  router.refreshLocalServers( true );
+  QTRY_VERIFY_WITH_TIMEOUT( router.isProviderAvailable( QgsAiModelRouter::Provider::Ollama ), 10000 );
+
+  // ...then it is quit while Strata keeps running.
+  server.reset();
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  QSignalSpy changedSpy( router.localServerCatalog( QgsAiModelRouter::Provider::Ollama ), &QgsAiLocalServerCatalog::changed );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY( !args.at( 1 ).toBool() );
+  const QString error = args.at( 4 ).toString();
+  QVERIFY2( error.contains( u"Ollama is not running at http://127.0.0.1:%1"_s.arg( port ) ), qPrintable( error ) );
+  // Not retriable: asking again changes nothing until the user starts the server.
+  QVERIFY( !args.at( 7 ).toBool() );
+
+  // The failed request is enough for the model picker to drop the server's models.
+  QCOMPARE( changedSpy.count(), 1 );
+  QVERIFY( !router.isProviderAvailable( QgsAiModelRouter::Provider::Ollama ) );
+  QCOMPARE( router.credentialStatus( QgsAiModelRouter::Provider::Ollama ), u"Not running"_s );
+}
+
+void TestQgsAiModelRouter::ollamaMissingModelIsExplained()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiTestLoopbackServer server;
+  server.responses << QgsAiTestLoopbackServer::jsonResponse( 404, "Not Found", QByteArrayLiteral( "{\"error\":\"model 'gone:latest' not found\"}" ) );
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort(), u"gone:latest"_s );
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY( !args.at( 1 ).toBool() );
+  QCOMPARE( args.at( 5 ).toInt(), 404 );
+  QVERIFY2( args.at( 4 ).toString().contains( u"ollama pull"_s ), qPrintable( args.at( 4 ).toString() ) );
+  QVERIFY( args.at( 4 ).toString().contains( u"gone:latest"_s ) );
+
+  // Without a selected model nothing is sent at all.
+  configureOllamaForLoopback( router, server.serverPort(), QString() );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  args = finishedSpy.takeFirst();
+  QVERIFY( !args.at( 1 ).toBool() );
+  QVERIFY2( args.at( 4 ).toString().contains( u"Choose one of the models"_s ), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( server.requestCount, 1 );
+}
+
+void TestQgsAiModelRouter::ollamaHistoryBudgetFitsTheContextWindow()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, 11434 );
+
+  // Cloud providers keep the caller's budget untouched.
+  QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::OpenRouter, 32768, 400000 ), 32768 );
+
+  // 16384 window - 4096 reply reserve - 8000/4 system prompt = 10288.
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 16384 );
+  QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 ), 10288 );
+
+  // Advertised tool schemas take their share of the window too.
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+  router.setToolRegistry( &registry );
+  router.setToolUseEnabled( true );
+  const int withTools = router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 );
+  QVERIFY( withTools < 10288 );
+  QVERIFY( withTools > 9000 );
+
+  // A huge window never raises the budget above the cloud one, and a prompt
+  // that fills a small window still leaves room for the latest exchange.
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 262144 );
+  QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 ), 32768 );
+  QgsSettings().setValue( u"ai/provider/ollama/numCtx"_s, 4096 );
+  QCOMPARE( router.historyTokenBudget( QgsAiModelRouter::Provider::Ollama, 32768, 8000 ), 1024 );
+}
+
+void TestQgsAiModelRouter::ollamaSlowModelLoadOutlastsTheNetworkTimeout()
+{
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const int savedNetworkTimeout = QgsNetworkAccessManager::timeout();
+  const auto cleanup = qScopeGuard( [savedNetworkTimeout]() {
+    removeOllamaTestSettings();
+    QgsNetworkAccessManager::setTimeout( savedNetworkTimeout );
+  } );
+
+  // QGIS aborts a reply that receives nothing for its network timeout. A large
+  // local model being loaded into memory stays silent longer than that.
+  QgsNetworkAccessManager::setTimeout( 1000 );
+
+  QgsAiTestLoopbackServer server;
+  QgsAiTestLoopbackServer::ScriptedResponse slowLoad = QgsAiTestLoopbackServer::ndjsonResponse( {
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"Ready\"},\"done\":false}\n" ),
+    QByteArrayLiteral( "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n" ),
+  } );
+  slowLoad.responseDelayMs = 2500;
+  server.responses << slowLoad;
+  QVERIFY( server.listen( QHostAddress::LocalHost, 0 ) );
+
+  QgsAiModelRouter router;
+  configureOllamaForLoopback( router, server.serverPort() );
+
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, { userMessage( u"hello"_s ) }, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 10000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QCOMPARE( args.at( 3 ).toString(), u"Ready"_s );
+}
+
+void TestQgsAiModelRouter::ollamaLiveToolRoundTrip()
+{
+  // Runs against a real Ollama server:
+  //   STRATA_RUN_LIVE_AI_TESTS=1 STRATA_LIVE_OLLAMA_MODEL=qwen3:8b <test binary> ollamaLiveToolRoundTrip
+  const QString model = qEnvironmentVariable( "STRATA_LIVE_OLLAMA_MODEL" ).trimmed();
+  if ( !liveAiSmokeTestsEnabled() || model.isEmpty() )
+    QSKIP( "Set STRATA_RUN_LIVE_AI_TESTS=1 and STRATA_LIVE_OLLAMA_MODEL to run against a local Ollama server." );
+
+  QgsSettings().remove( u"ai/provider/ollama"_s );
+  const auto cleanup = qScopeGuard( []() { removeOllamaTestSettings(); } );
+
+  QgsAiToolRegistry registry;
+  registry.registerTool( std::make_unique<QgsAiEchoTool>() );
+
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings providerSettings = router.providerSettings( QgsAiModelRouter::Provider::Ollama );
+  providerSettings.model = model;
+  providerSettings.enabled = true;
+  router.setProviderSettings( QgsAiModelRouter::Provider::Ollama, providerSettings );
+  router.setToolRegistry( &registry );
+  router.setToolUseEnabled( true );
+
+  // The installed model must be detected as tool-capable.
+  router.refreshLocalServers( true );
+  QgsAiLocalServerCatalog *catalog = router.localServerCatalog( QgsAiModelRouter::Provider::Ollama );
+  QTRY_VERIFY_WITH_TIMEOUT( catalog->state() != QgsAiLocalServerCatalog::ServerState::Unknown, 15000 );
+  QVERIFY2( router.isProviderAvailable( QgsAiModelRouter::Provider::Ollama ), qPrintable( router.credentialStatus( QgsAiModelRouter::Provider::Ollama ) ) );
+  QVERIFY2( !catalog->model( model ).id.isEmpty(), "The model is not installed or does not support tools." );
+
+  QgsAiChatMessage system;
+  system.role = QgsAiChatRole::System;
+  system.content = u"You are a test assistant. Use the available tools when asked."_s;
+  QList<QgsAiChatMessage> history = { system, userMessage( u"Call the echo tool once, then tell me exactly what it returned."_s ) };
+
+  // Turn 1: the model asks for the tool.
+  QSignalSpy toolCallsSpy( &router, &QgsAiModelRouter::toolCallsRequested );
+  QSignalSpy finishedSpy( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, history, true );
+  QTRY_VERIFY_WITH_TIMEOUT( toolCallsSpy.count() + finishedSpy.count() == 1, 300000 );
+  QVERIFY2( toolCallsSpy.count() == 1, finishedSpy.isEmpty() ? "no tool call" : qPrintable( finishedSpy.first().at( 3 ).toString() + finishedSpy.first().at( 4 ).toString() ) );
+  const QList<QgsAiToolCall> calls = toolCallsSpy.takeFirst().at( 3 ).value<QList<QgsAiToolCall>>();
+  QVERIFY( !calls.isEmpty() );
+  QCOMPARE( calls.first().name, u"echo"_s );
+
+  // Turn 2: the tool result goes back and the model answers from it.
+  QgsAiChatMessage assistant;
+  assistant.role = QgsAiChatRole::Assistant;
+  QVariantMap call;
+  call.insert( u"id"_s, calls.first().id );
+  call.insert( u"name"_s, calls.first().name );
+  call.insert( u"args"_s, calls.first().args.toVariantMap() );
+  assistant.metadata.insert( u"tool_calls"_s, QVariantList { call } );
+  QgsAiChatMessage toolResult;
+  toolResult.role = QgsAiChatRole::Tool;
+  toolResult.content = u"{\"echo\":\"strata-marker-7391\"}"_s;
+  toolResult.metadata.insert( u"tool_call_id"_s, calls.first().id );
+  toolResult.metadata.insert( u"tool_name"_s, calls.first().name );
+  history << assistant << toolResult;
+
+  router.setToolUseEnabled( false );
+  router.startChatRequest( QgsAiModelRouter::Provider::Ollama, history, true );
+  QTRY_COMPARE_WITH_TIMEOUT( finishedSpy.count(), 1, 300000 );
+  const QList<QVariant> args = finishedSpy.takeFirst();
+  QVERIFY2( args.at( 1 ).toBool(), qPrintable( args.at( 4 ).toString() ) );
+  QVERIFY2( args.at( 3 ).toString().contains( u"strata-marker-7391"_s ), qPrintable( args.at( 3 ).toString() ) );
 }
 
 QGSTEST_MAIN( TestQgsAiModelRouter )
