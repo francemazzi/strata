@@ -53,6 +53,7 @@ if (WITH_QGIS_PROCESS)
   add_subdirectory(process)
 endif()
 
-if (HAVE_WEBENGINE)
+# STRATA-PATCH: qgis_html_to_pdf uses Qt WebEngine APIs from Qt 6.8 (QWebEnginePermission); the Linux AppImage builds against Ubuntu's Qt 6.4.
+if (HAVE_WEBENGINE AND Qt6Core_VERSION VERSION_GREATER_EQUAL 6.8)
   add_subdirectory(html_to_pdf)
 endif()

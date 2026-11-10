@@ -132,6 +132,7 @@ scripts/pre_commit/spell_check/spelling.dat
 scripts/sipify.py
 scripts/ts2appinfo.py.in
 src/3d/chunks/qgschunkloader.h
+src/CMakeLists.txt
 src/app/3d/qgs3dicongenerator.cpp
 src/app/CMakeLists.txt
 src/app/layers/qgsapplayerhandling.cpp
