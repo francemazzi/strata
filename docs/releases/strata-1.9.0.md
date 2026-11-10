@@ -25,6 +25,7 @@ Strata now includes QGIS master as of 10 November 2026, except its four most rec
 ## Build
 
 - The Linux AppImage is built without native Wayland support. The QGIS code of 9 November enables it by default and needs Qt WaylandClient, which the Ubuntu 24.04 build does not install. The AppImage runs through X11 or XWayland, also in Wayland sessions, as before; the only native Wayland code is pointer locking for 3D navigation, which the AppImage could not use.
+- The new QGIS command-line tool `qgis_html_to_pdf` is built only with Qt 6.8 or newer, because it uses Qt WebEngine APIs that Qt 6.4 does not have. The macOS and Windows packages include it; the Linux AppImage, built against the Qt 6.4 of Ubuntu 24.04, does not. Strata does not use the tool.
 - Release checks now transform coordinates inside the packaged app on macOS, Linux and Windows. They reproject known points between WGS 84 and UTM 32N, run the Processing reprojection, and require the PROJ database, checked through the "Monte Mario to WGS 84" operations. Before, they only checked that coordinate reference systems were valid. On 5 November a reprojection kept longitude and latitude values in a UTM layer while both systems looked valid.
 
 ## Updating
@@ -37,7 +38,7 @@ From 1.7.1 or newer, install 1.9.0 over the existing installation. From 1.6.8 or
   - the Ollama provider and the assistant tool fixes each built on macOS (arm64 and x86_64, with the DMG) and Windows;
   - the QGIS synchronization of 10 November built on macOS (arm64 and x86_64, with the DMG) and Windows. It contains the synchronization of 9 November, which had built on Windows;
   - the AppImage change built the 9 November QGIS code on Ubuntu 24.04.
-- Master with all the changes above (`aa325ee629a`) built on macOS (arm64 and x86_64) and Windows. The DMG job was cancelled because no runner was available.
+- Master with all the changes above (`aa325ee629a`) built on macOS (arm64 and x86_64) and Windows. The DMG job was cancelled because no runner was available. The AppImage build of the same commit stopped on `qgis_html_to_pdf` (Qt WebEngine 6.8 APIs on Qt 6.4), which led to the build change above.
 - The new coordinate checks ran against the published 1.8.2 AppImage with the `strata-candidate-postgis.yml` workflow and passed:
   - WGS 84 to UTM 32N and back, and the Processing reprojection, within 0.03 mm of the values from PROJ's `cs2cs`;
   - WGS 84 to Monte Mario Italy zone 1 (EPSG:3003) within 75 m. Without a datum transformation chosen in the project, PROJ uses its approximate operation, so the check allows 150 m;
