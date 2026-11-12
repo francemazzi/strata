@@ -335,6 +335,7 @@ class TestQgsAiIncidentRecovery : public QObject
     {
       // dispatchRequest clamps the transfer timeout to at least 10 seconds.
       QgsSettings().setValue( u"ai/network/timeoutSeconds"_s, 10 );
+      QgsSettings().setValue( u"ai/network/maxRetries"_s, 0 );
       QgsAiTestLoopbackServer server;
       QVERIFY( server.listen( QHostAddress::LocalHost ) );
       auto delayed = QgsAiTestLoopbackServer::sseResponse( { "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n" } );
@@ -348,10 +349,11 @@ class TestQgsAiIncidentRecovery : public QObject
       QgsAiReviewPatchEngine review;
       QgsAiAgentSessionManager manager( &router, &files, &review );
       manager.sendUserMessage( u"Synthetic timeout request"_s );
-      QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest() && !manager.history().isEmpty(), 45000 );
-      const QString text = manager.history().last().content;
-      QVERIFY2( text.contains( u"did not respond in time"_s ), qPrintable( text ) );
-      QVERIFY2( text.contains( u"aborted due to timeout"_s ), qPrintable( text ) );
+      QTRY_VERIFY_WITH_TIMEOUT( !manager.hasActiveRequest() && !manager.history().isEmpty(), 15000 );
+      const QgsAiChatMessage failure = manager.history().last();
+      QCOMPARE( failure.metadata.value( u"error_code"_s ).toString(), u"upstream_timeout"_s );
+      QVERIFY2( failure.content.contains( u"did not respond in time"_s ), qPrintable( failure.content ) );
+      QCOMPARE( server.requestCount, 1 );
     }
     void verifiesOpaqueIdentityAndRevocation()
     {

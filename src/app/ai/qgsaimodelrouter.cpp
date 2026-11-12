@@ -3103,6 +3103,9 @@ void QgsAiModelRouter::onReplyFinished()
     errorMessage = reply->errorString();
   if ( errorMessage.isEmpty() )
     errorMessage = responseText;
+  // Qt's wording varies across versions; use its typed error for recovery.
+  if ( context->applicationErrorCode.isEmpty() && httpStatus == 0 && networkError == QNetworkReply::TimeoutError )
+    context->applicationErrorCode = u"upstream_timeout"_s;
   if ( !context->applicationErrorCode.isEmpty() && !errorMessage.contains( context->applicationErrorCode ) )
     errorMessage += u" code=%1"_s.arg( context->applicationErrorCode );
   const bool codexModelUnavailable = failedProvider == Provider::Codex && errorMessage.contains( "code=model_not_found"_L1 );
