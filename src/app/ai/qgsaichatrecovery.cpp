@@ -78,10 +78,13 @@ bool QgsAiAgentSessionManager::resumeLastInterruptedTurn( QString *error )
     return fail( tr( "Sign in or configure the selected provider before resuming." ) );
   if ( !checkpoint.isEmpty() )
   {
+    // A rejected Codex model cannot be used to resume. Let the user choose a
+    // different model on the same provider; all resource and tool checks still apply.
+    const bool rejectedCodexModel = provider == QgsAiModelRouter::Provider::Codex && failure.metadata.value( u"error_code"_s ).toString() == "model_not_found"_L1;
     if (
       ( checkpoint.value( u"version"_s ).toInt() != 1 && checkpoint.value( u"version"_s ).toInt() != 2 )
       || checkpoint.value( u"provider"_s ).toInt() != static_cast<int>( provider )
-      || checkpoint.value( u"model"_s ).toString() != mRouter->providerSettings( provider ).model
+      || ( !rejectedCodexModel && checkpoint.value( u"model"_s ).toString() != mRouter->providerSettings( provider ).model )
       || checkpoint.value( u"mode"_s ).toString() != mActiveAgent
       || checkpoint.value( u"scope"_s ).toString() != chatHistoryScopeKey()
       || checkpoint.value( u"workspace"_s ).toString() != workspaceRoot()

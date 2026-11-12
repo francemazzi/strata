@@ -168,14 +168,14 @@ class APP_EXPORT QgsAiSettingsDialog : public QDialog
     QgsAiAccountWidget *mAccountWidget = nullptr;
 
     QLineEdit *mOpenAiEndpoint = nullptr;
-    QLineEdit *mOpenAiModel = nullptr;
+    QComboBox *mOpenAiModel = nullptr;
     QLineEdit *mOpenAiKey = nullptr;
     QLineEdit *mOpenRouterEndpoint = nullptr;
     QComboBox *mOpenRouterModel = nullptr;
     QLineEdit *mOpenRouterKey = nullptr;
     QCheckBox *mOpenRouterAutoRouting = nullptr;
     QLineEdit *mCodexEndpoint = nullptr;
-    QLineEdit *mCodexModel = nullptr;
+    QComboBox *mCodexModel = nullptr;
     QLineEdit *mOllamaEndpoint = nullptr;
     QComboBox *mOllamaModel = nullptr;
     QSpinBox *mOllamaNumCtx = nullptr;

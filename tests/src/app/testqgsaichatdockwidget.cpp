@@ -473,7 +473,7 @@ void TestQgsAiChatDockWidget::planLoginModelPickerListsManagedAndByoModels()
   QVERIFY( !selectableTexts.contains( u"Embedding only"_s ) );
   // BYO entries stay selectable while signed in.
   QVERIFY( selectableTexts.contains( u"Claude Sonnet 4.6"_s ) );
-  QVERIFY( selectableTexts.contains( u"Claude Sonnet 5"_s ) );
+  QVERIFY( selectableTexts.contains( u"claude-sonnet-5"_s ) );
   // Disabled managed preference filters the Plan copy; the BYO OpenRouter row remains.
   QCOMPARE( selectableTexts.count( u"DeepSeek V4 Flash"_s ), 1 );
   // Rebuilding the menu must never hijack the user's explicit provider choice.

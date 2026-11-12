@@ -20,6 +20,8 @@
 
 #include <QString>
 
+class QNetworkRequest;
+
 class APP_EXPORT QgsAiCodexOAuthClient
 {
   public:
@@ -42,6 +44,10 @@ class APP_EXPORT QgsAiCodexOAuthClient
     static bool requestDeviceCode( DeviceCode &deviceCode, QString *errorMessage = nullptr );
     static bool completeDeviceCodeLogin( const DeviceCode &deviceCode, QString *errorMessage = nullptr, QString *refreshTokenForStorage = nullptr );
     static bool refreshAccessToken( TokenSet &tokens, QString *errorMessage = nullptr );
+    static QString protocolVersion();
+    static void applySessionHeaders( QNetworkRequest &request, const TokenSet &tokens );
+    static quint64 sessionRevision();
+    static void invalidateSession();
     //! A rotated credential awaiting an explicit storage decision; never logged or dispatched.
     static QString credentialAwaitingProtection();
     static bool hasRefreshToken();

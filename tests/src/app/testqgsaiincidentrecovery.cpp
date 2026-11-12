@@ -15,6 +15,9 @@
 #include "ai/tools/qgsailayertools.h"
 #include "ai/tools/qgsaitoolregistry.h"
 #include "ai/qgsaimodelrouter.h"
+#include "ai/qgsaicodexoauthclient.h"
+#include "qgsnetworkaccessmanager.h"
+#include <QScopeGuard>
 #include "ai/tools/qgsaiarcgissnapshot.h"
 #include "ai/tools/qgsaigeographicverification.h"
 #include "qgsaisecretstoretestutils.h"
@@ -140,6 +143,59 @@ class TestQgsAiIncidentRecovery : public QObject
       QCOMPARE( server.requestCount, 1 );
       QVERIFY( !finished.first()[1].toBool() );
     }
+    void resumesCodexTurnWithReplacementModel()
+    {
+      QgsAiTestLoopbackServer server;
+      QVERIFY( server.listen( QHostAddress::LocalHost ) );
+      server.requestHandler = []( const QByteArray &request, const QByteArray &body, QgsAiTestLoopbackServer::ScriptedResponse &response ) {
+        if ( request.startsWith( "POST /oauth/token " ) )
+          response = QgsAiTestLoopbackServer::
+            jsonResponse( 200, "OK", R"({"access_token":"synthetic-access","id_token":"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiZml4dHVyZS1hY2NvdW50In19.sig"})" );
+        else if ( request.startsWith( "GET /backend-api/codex/models?" ) )
+          response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"models":[{"slug":"replacement","visibility":"list"}]})" );
+        else if ( body.contains( "\"model\":\"replacement\"" ) )
+          response = QgsAiTestLoopbackServer::sseResponse( { "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Resumed with replacement\"}\n\n" } );
+        else
+          response = QgsAiTestLoopbackServer::jsonResponse( 400, "Bad Request", R"({"error":{"message":"Model unavailable","code":"model_not_found"}})" );
+        return true;
+      };
+      const QString processor = QgsNetworkAccessManager::setRequestPreprocessor( [&server]( QNetworkRequest *request ) {
+        QUrl url = request->url();
+        if ( url.host() != "auth.openai.com"_L1 && url.host() != "chatgpt.com"_L1 )
+          return;
+        url.setScheme( u"http"_s );
+        url.setHost( u"127.0.0.1"_s );
+        url.setPort( server.serverPort() );
+        request->setUrl( url );
+      } );
+      const auto removeProcessor = qScopeGuard( [processor]() { QgsNetworkAccessManager::removeRequestPreprocessor( processor ); } );
+      QgsAiSecretStore::useForSession( QgsAiCodexOAuthClient::refreshTokenSettingKey(), u"synthetic-codex-recovery"_s );
+      const auto clear = qScopeGuard( []() { QgsAiCodexOAuthClient::clearRefreshToken(); } );
+
+      QgsAiModelRouter router;
+      using Provider = QgsAiModelRouter::Provider;
+      auto settings = router.providerSettings( Provider::Codex );
+      settings.model = u"unavailable"_s;
+      settings.enabled = true;
+      router.setProviderSettings( Provider::Codex, settings );
+      router.setActiveProvider( Provider::Codex );
+
+      QTemporaryDir root;
+      QgsAiFileContextProvider files( root.path() );
+      QgsAiReviewPatchEngine review;
+      QgsAiAgentSessionManager manager( &router, &files, &review );
+      manager.sendUserMessage( u"Synthetic Codex question"_s );
+      QTRY_COMPARE( manager.history().last().metadata.value( u"error_code"_s ).toString(), u"model_not_found"_s );
+      QCOMPARE( manager.history().last().metadata.value( u"error_kind"_s ).toString(), u"model"_s );
+
+      settings.model = u"replacement"_s;
+      router.setProviderSettings( Provider::Codex, settings );
+      QString error;
+      QVERIFY2( manager.resumeLastInterruptedTurn( &error ), qPrintable( error ) );
+      QTRY_COMPARE( manager.history().last().content, u"Resumed with replacement"_s );
+      QCOMPARE( manager.history().first().content, u"Synthetic Codex question"_s );
+    }
+
     void rejectsWaitBeyondTenMinutes()
     {
       QgsAiTestLoopbackServer server;

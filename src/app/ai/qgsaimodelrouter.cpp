@@ -316,7 +316,6 @@ QgsAiModelRouter::QgsAiModelRouter( QObject *parent )
 
   ProviderSettings codex;
   codex.endpoint = u"https://chatgpt.com/backend-api/codex/responses"_s;
-  codex.model = u"gpt-5.4"_s;
   codex.credentialMode = CredentialMode::OAuth;
   mProviderSettings.insert( Provider::Codex, codex );
 
@@ -344,6 +343,10 @@ QgsAiModelRouter::QgsAiModelRouter( QObject *parent )
   ollama.credentialMode = CredentialMode::None;
   mProviderSettings.insert( Provider::Ollama, ollama );
   mOllamaCatalog = new QgsAiLocalServerCatalog( this );
+
+  using Source = QgsAiProviderModelCatalog::Source;
+  for ( Source source : { Source::Codex, Source::ClaudeCode, Source::Anthropic, Source::OpenAi } )
+    mProviderCatalogs.insert( source, new QgsAiProviderModelCatalog( source, this ) );
 
   QgsAiClaudeMigration::run();
   loadPersistedProviderSettings();
@@ -387,6 +390,36 @@ void QgsAiModelRouter::setProviderSettings( Provider provider, const ProviderSet
   persistProviderSettings( provider, normalizedSettings );
   if ( QgsAiLocalServerCatalog *catalog = localServerCatalog( provider ) )
     catalog->setBaseUrl( normalizedSettings.endpoint );
+}
+
+QgsAiProviderModelCatalog *QgsAiModelRouter::providerCatalog( QgsAiProviderModelCatalog::Source source ) const
+{
+  return mProviderCatalogs.value( source );
+}
+
+void QgsAiModelRouter::refreshProviderCatalog( QgsAiProviderModelCatalog::Source source, bool force )
+{
+  using Source = QgsAiProviderModelCatalog::Source;
+  if ( source == Source::Anthropic || source == Source::OpenAi )
+  {
+    const Provider provider = source == Source::Anthropic ? Provider::Claude : Provider::OpenAi;
+    const QString expectedEndpoint = source == Source::Anthropic ? u"https://api.anthropic.com/v1/messages"_s : u"https://api.openai.com/v1/responses"_s;
+    // A credential for a custom gateway must stay with that gateway.
+    providerCatalog( source )->refresh( providerSettings( provider ).endpoint == expectedEndpoint ? storedApiKey( provider ) : QString(), force );
+  }
+  else
+    providerCatalog( source )->refresh( {}, force );
+}
+
+void QgsAiModelRouter::refreshProviderCatalogs()
+{
+  using Source = QgsAiProviderModelCatalog::Source;
+  if ( isProviderAvailable( Provider::Codex ) )
+    refreshProviderCatalog( Source::Codex );
+  if ( isProviderAvailable( Provider::OpenAi ) )
+    refreshProviderCatalog( Source::OpenAi );
+  if ( isProviderAvailable( Provider::Claude ) )
+    refreshProviderCatalog( providerSettings( Provider::Claude ).credentialMode == CredentialMode::ClaudeCode ? Source::ClaudeCode : Source::Anthropic );
 }
 
 QgsAiLocalServerCatalog *QgsAiModelRouter::localServerCatalog( Provider provider ) const
@@ -511,16 +544,7 @@ QString QgsAiModelRouter::normalizedModelForProvider( Provider provider, const Q
     return trimmed;
   }
 
-  if ( provider != Provider::Codex )
-    return trimmed;
-
-  // Slugs the chatgpt.com Codex backend currently accepts for ChatGPT-auth users.
-  // The backend rejects unknown slugs (e.g. gpt-5.5) with HTTP 400.
-  const QStringList allowedCodexModels = { u"gpt-5.4"_s, u"gpt-5.4-mini"_s, u"gpt-5.3-codex"_s, u"gpt-5.2"_s, u"gpt-5-codex"_s };
-  if ( allowedCodexModels.contains( trimmed ) )
-    return trimmed;
-
-  return u"gpt-5.4"_s;
+  return trimmed;
 }
 
 QJsonArray QgsAiModelRouter::buildAnthropicAssistantContent( const QgsAiChatMessage &message ) const
@@ -912,11 +936,23 @@ void QgsAiModelRouter::appendManagedToolContext( QJsonObject &body ) const
     body.insert( u"agentClientSessionId"_s, mPlanClientSessionId );
 }
 
+QString QgsAiModelRouter::resolvedRequestModel( Provider provider ) const
+{
+  QString model = normalizedModelForProvider( provider, providerSettings( provider ).model );
+  if ( provider == Provider::Codex && model.isEmpty() )
+  {
+    const auto models = providerCatalog( QgsAiProviderModelCatalog::Source::Codex )->models();
+    if ( !models.isEmpty() )
+      model = models.first().id;
+  }
+  return model;
+}
+
 QByteArray QgsAiModelRouter::buildRequestPayload( Provider provider, const QList<QgsAiChatMessage> &messages, bool stream ) const
 {
   QJsonObject payload;
   const ProviderSettings settings = providerSettings( provider );
-  const QString model = normalizedModelForProvider( provider, settings.model );
+  const QString model = resolvedRequestModel( provider );
   payload.insert( u"model"_s, model );
   payload.insert( u"stream"_s, stream );
   if ( provider == Provider::Plan )
@@ -1400,8 +1436,18 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
     if ( !endpoint.isEmpty() )
       providerSettings.endpoint = endpoint;
 
-    const QString model = settings.value( modelSettingKey( provider ), providerSettings.model ).toString().trimmed();
-    if ( !model.isEmpty() )
+    QString model = settings.value( modelSettingKey( provider ), providerSettings.model ).toString().trimmed();
+    if ( provider == Provider::Codex && !settings.value( u"ai/provider/codex/liveCatalogMigration"_s, false ).toBool() )
+    {
+      // Both IDs were shipped as picker choices and the first was also the forced fallback.
+      if ( model == "gpt-5.4"_L1 || model == "gpt-5.3-codex"_L1 )
+      {
+        model.clear();
+        settings.setValue( modelSettingKey( provider ), model );
+      }
+      settings.setValue( u"ai/provider/codex/liveCatalogMigration"_s, true );
+    }
+    if ( !model.isEmpty() || provider == Provider::Codex )
       providerSettings.model = normalizedModelForProvider( provider, model );
 
     const QString credentialMode = settings
@@ -1415,7 +1461,7 @@ void QgsAiModelRouter::loadPersistedProviderSettings()
                                      .trimmed();
     providerSettings.credentialMode = credentialMode == "claudeCode"_L1 ? CredentialMode::ClaudeCode : credentialMode == "oauth"_L1 ? CredentialMode::OAuth : CredentialMode::ApiKey;
     if ( provider == Provider::Claude && providerSettings.credentialMode == CredentialMode::ClaudeCode )
-      providerSettings.model = settings.value( u"ai/provider/claude/code/model"_s, u"sonnet"_s ).toString();
+      providerSettings.model = settings.value( u"ai/provider/claude/code/model"_s, u"default"_s ).toString();
     if ( provider == Provider::Codex )
       providerSettings.credentialMode = CredentialMode::OAuth;
     if ( isLocalProvider( provider ) )
@@ -1577,12 +1623,29 @@ QString QgsAiModelRouter::startChatRequest( Provider provider, const QList<QgsAi
     [this, requestId]() {
       if ( !mRequests.contains( requestId ) )
         return;
-      RequestContext &storedContext = mRequests[requestId];
-      if ( !dispatchRequest( storedContext ) )
+      const auto dispatch = [this, requestId]() {
+        if ( !mRequests.contains( requestId ) )
+          return;
+        RequestContext &storedContext = mRequests[requestId];
+        if ( !dispatchRequest( storedContext ) )
+        {
+          const QString error = storedContext.preDispatchError.isEmpty() ? tr( "Unable to start network request." ) : storedContext.preDispatchError;
+          queueFailedRequestFinish( requestId, error );
+        }
+      };
+      if ( mRequests[requestId].provider == Provider::Codex )
       {
-        const QString error = storedContext.preDispatchError.isEmpty() ? tr( "Unable to start network request." ) : storedContext.preDispatchError;
-        queueFailedRequestFinish( requestId, error );
+        using Source = QgsAiProviderModelCatalog::Source;
+        auto *catalog = providerCatalog( Source::Codex );
+        if ( providerSettings( Provider::Codex ).model.isEmpty() )
+          refreshProviderCatalog( Source::Codex );
+        if ( catalog->loading() )
+        {
+          connect( catalog, &QgsAiProviderModelCatalog::changed, this, dispatch, static_cast<Qt::ConnectionType>( Qt::QueuedConnection | Qt::SingleShotConnection ) );
+          return;
+        }
       }
+      dispatch();
     },
     QgsAiSecretStore::unavailableCredentials()
   );
@@ -1693,7 +1756,7 @@ bool QgsAiModelRouter::setCredentialMode( Provider provider, CredentialMode mode
   if ( provider == Provider::Claude && settings.credentialMode != mode )
     settings.model
       = QgsSettings()
-          .value( mode == CredentialMode::ClaudeCode ? u"ai/provider/claude/code/model"_s : u"ai/provider/claude/apiModel"_s, mode == CredentialMode::ClaudeCode ? u"sonnet"_s : defaultClaudeModel() )
+          .value( mode == CredentialMode::ClaudeCode ? u"ai/provider/claude/code/model"_s : u"ai/provider/claude/apiModel"_s, mode == CredentialMode::ClaudeCode ? u"default"_s : defaultClaudeModel() )
           .toString();
   settings.credentialMode = mode;
   const bool hasCredential = mode == CredentialMode::ClaudeCode ? hasClaudeCodeLogin() : mode == CredentialMode::OAuth ? hasStoredOAuthRefreshToken( provider ) : !storedApiKey( provider ).isEmpty();
@@ -1843,11 +1906,8 @@ bool QgsAiModelRouter::applyAuthentication( Provider provider, QNetworkRequest &
     if ( !QgsAiCodexOAuthClient::refreshAccessToken( tokens, errorMessage ) )
       return false;
 
-    request.setRawHeader( "Authorization", authHeaderValue( Provider::Codex, tokens.accessToken ).toUtf8() );
-    request.setRawHeader( "ChatGPT-Account-ID", tokens.chatGptAccountId.toUtf8() );
+    QgsAiCodexOAuthClient::applySessionHeaders( request, tokens );
     request.setRawHeader( "Accept", "text/event-stream" );
-    request.setRawHeader( "originator", "codex_cli_rs" );
-    request.setRawHeader( "version", "0.128.0" );
     return true;
   }
 
@@ -1891,12 +1951,14 @@ QgsAiModelRouter::RequestContext *QgsAiModelRouter::contextFromReply( QNetworkRe
 QString QgsAiModelRouter::requestScope( Provider provider ) const
 {
   const auto settings = providerSettings( provider );
-  return settings.endpoint + '\n' + settings.model + '\n' + planCredentialScope() + '\n' + mAgentMode + '\n' + mPlanConversationId + '\n' + QgsProject::instance()->fileName();
+  const QString credentialScope = provider == Provider::Codex ? QString::number( QgsAiCodexOAuthClient::sessionRevision() ) : planCredentialScope();
+  return settings.endpoint + '\n' + settings.model + '\n' + credentialScope + '\n' + mAgentMode + '\n' + mPlanConversationId + '\n' + QgsProject::instance()->fileName();
 }
 
 bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
 {
-  if ( context.attempt > 0 && context.retryScope != requestScope( context.provider ) )
+  const bool codex = context.provider == Provider::Codex;
+  if ( ( ( codex || context.attempt > 0 ) && context.retryScope != requestScope( context.provider ) ) || ( codex && context.attempt > 0 && context.requestedModel != resolvedRequestModel( context.provider ) ) )
   {
     context.preDispatchError = tr( "Recovery canceled because the account, project, chat, mode or model changed." );
     return false;
@@ -1917,6 +1979,14 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   {
     QgsMessageLog::logMessage( u"Plan provider endpoint is a placeholder (%1); refusing to dispatch."_s.arg( settings.endpoint ), u"AI"_s, Qgis::MessageLevel::Warning, false );
     context.preDispatchError = u"Plan Account endpoint is not configured. Configure a usable endpoint and session token in Provider Settings."_s;
+    return false;
+  }
+
+  if ( context.provider == Provider::Codex && settings.model.isEmpty() && providerCatalog( QgsAiProviderModelCatalog::Source::Codex )->models().isEmpty() )
+  {
+    context.preDispatchError = QgsAiCodexOAuthClient::hasRefreshToken()
+                                 ? tr( "No Codex model could be selected. In Models & Providers, refresh the ChatGPT list or enter a model ID available to your account." )
+                                 : tr( "Missing Codex refresh token. Please sign in with Codex first." );
     return false;
   }
 
@@ -1990,10 +2060,11 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   context.retryAfterSeconds = -1;
   context.usage = QgsAiUsage();
   context.responseModel.clear();
+  context.requestedModel = resolvedRequestModel( context.provider );
   const QByteArray payload = buildRequestPayload( context.provider, context.messages, context.stream );
   QgsMessageLog::logMessage(
     u"Dispatching request id=%1 provider=%2 endpointHost=%3 model=%4 attempt=%5 payloadBytes=%6 stream=%7"_s
-      .arg( context.requestId, providerDisplayName( context.provider ), endpointForLog( settings.endpoint ), settings.model )
+      .arg( context.requestId, providerDisplayName( context.provider ), endpointForLog( settings.endpoint ), sanitizeErrorText( context.requestedModel ) )
       .arg( context.attempt )
       .arg( payload.size() )
       .arg( context.stream ),
@@ -2906,7 +2977,7 @@ void QgsAiModelRouter::onReplyFinished()
   // otherwise double-count tokens in the per-session accumulation.
   if ( context->usage.isValid() && !retriable )
   {
-    const QString servedModel = !context->responseModel.isEmpty() ? context->responseModel : providerSettings( context->provider ).model;
+    const QString servedModel = !context->responseModel.isEmpty() ? context->responseModel : context->requestedModel;
     QgsMessageLog::logMessage(
       u"Usage id=%1 provider=%2 model=%3 promptTokens=%4 completionTokens=%5 cachedTokens=%6 reasoningTokens=%7 costUsd=%8"_s.arg( requestId, providerName, servedModel )
         .arg( context->usage.promptTokens )
@@ -3034,6 +3105,9 @@ void QgsAiModelRouter::onReplyFinished()
     errorMessage = responseText;
   if ( !context->applicationErrorCode.isEmpty() && !errorMessage.contains( context->applicationErrorCode ) )
     errorMessage += u" code=%1"_s.arg( context->applicationErrorCode );
+  const bool codexModelUnavailable = failedProvider == Provider::Codex && errorMessage.contains( "code=model_not_found"_L1 );
+  if ( codexModelUnavailable )
+    errorMessage += u"\n"_s + tr( "Choose an available model or Automatic from the Codex list, then resume the chat." );
   errorMessage = sanitizeErrorText( errorMessage );
   if ( context->applicationErrorCode == u"managed_provider_busy"_s && context->retryAfterSeconds >= 0 && !errorMessage.contains( u"retry_after="_s ) )
     errorMessage += u" · retry_after=%1"_s.arg( context->retryAfterSeconds );
@@ -3041,6 +3115,8 @@ void QgsAiModelRouter::onReplyFinished()
   finishRequest( requestId, false, QString(), errorMessage, httpStatus, context->attempt - 1, false, latencyMs );
   // The request context is gone: only now let the catalog tell the UI the
   // server went away, so its models leave the picker.
+  if ( codexModelUnavailable )
+    refreshProviderCatalog( QgsAiProviderModelCatalog::Source::Codex, true );
   if ( localServerDown )
     localServerCatalog( failedProvider )->markUnreachable();
 }

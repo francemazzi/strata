@@ -186,23 +186,15 @@ namespace
       QString tooltip = QString();
   };
 
-  QVector<ModelEntry> predefinedModels()
+  QVector<ModelEntry> openRouterModelEntries()
   {
     return {
-      { u"GPT-4o"_s, u"gpt-4o"_s, QgsAiModelRouter::Provider::OpenAi },
-      { u"GPT-4.1 mini"_s, u"gpt-4.1-mini"_s, QgsAiModelRouter::Provider::OpenAi },
       { u"Claude Sonnet 4.6"_s, u"anthropic/claude-sonnet-4.6"_s, QgsAiModelRouter::Provider::OpenRouter },
       { u"Qwen3 235B"_s, u"qwen/qwen3-235b-a22b"_s, QgsAiModelRouter::Provider::OpenRouter },
       { u"DeepSeek V4 Flash"_s, u"deepseek/deepseek-v4-flash"_s, QgsAiModelRouter::Provider::OpenRouter },
       { u"DeepSeek R1"_s, u"deepseek/deepseek-r1"_s, QgsAiModelRouter::Provider::OpenRouter },
       { u"Kimi K2"_s, u"moonshotai/kimi-k2"_s, QgsAiModelRouter::Provider::OpenRouter },
       { u"OpenRouter Auto"_s, u"openrouter/auto"_s, QgsAiModelRouter::Provider::OpenRouter },
-      { u"Codex GPT-5.4"_s, u"gpt-5.4"_s, QgsAiModelRouter::Provider::Codex },
-      { u"Codex GPT-5.3 (codex)"_s, u"gpt-5.3-codex"_s, QgsAiModelRouter::Provider::Codex },
-      { u"Claude Opus 4.8"_s, u"claude-opus-4-8"_s, QgsAiModelRouter::Provider::Claude },
-      { u"Claude Sonnet 5"_s, u"claude-sonnet-5"_s, QgsAiModelRouter::Provider::Claude },
-      { u"Claude Haiku 4.5"_s, u"claude-haiku-4-5"_s, QgsAiModelRouter::Provider::Claude },
-      { u"Strata Managed"_s, u"managed-plan"_s, QgsAiModelRouter::Provider::Plan },
     };
   }
 
@@ -909,6 +901,11 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   connect( mErrorActionButton, &QPushButton::clicked, this, [this]() {
     const QString provider = mErrorActionButton->property( "error_provider" ).toString();
     const QString kind = mErrorActionButton->property( "error_kind" ).toString();
+    if ( kind == "model"_L1 && mModelPill )
+    {
+      mModelPill->showMenu();
+      return;
+    }
     if ( kind == "authentication"_L1 )
     {
       QString error;
@@ -933,6 +930,8 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
           QMessageBox::warning( this, tr( "Codex logout failed" ), error );
           return;
         }
+        if ( mModelRouter )
+          mModelRouter->providerCatalog( QgsAiProviderModelCatalog::Source::Codex )->reset();
         rebuildModelMenu();
         hideRequestError();
         openProviderSettingsSection( u"providers"_s );
@@ -1117,10 +1116,14 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
   if ( mModelRouter )
   {
     connect( mModelRouter, &QgsAiModelRouter::requestFinished, this, [this]() { rebuildModelMenu(); } );
-    QgsAiSecretStore::loadSecretsAsync( this, [this]() { rebuildModelMenu(); } );
+    QgsAiSecretStore::loadSecretsAsync( this, [this]() {
+      rebuildModelMenu();
+      if ( mModelRouter )
+        mModelRouter->refreshProviderCatalogs();
+    } );
     // Local servers come and go while Strata runs: list their models whenever
     // a probe finds a change, and probe once now so a running server shows up.
-    connect( mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama ), &QgsAiLocalServerCatalog::changed, this, [this]() {
+    const auto modelCatalogChanged = [this]() {
       // Replacing the menu while it is open would close it under the cursor:
       // rebuild once the user is done with it.
       QMenu *openMenu = mModelPill ? mModelPill->menu() : nullptr;
@@ -1130,12 +1133,19 @@ QgsAiChatDockWidget::QgsAiChatDockWidget( QgsAiAgentSessionManager *sessionManag
         return;
       }
       rebuildModelMenu();
-    } );
+    };
+    connect( mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama ), &QgsAiLocalServerCatalog::changed, this, modelCatalogChanged );
+    using Source = QgsAiProviderModelCatalog::Source;
+    for ( Source source : { Source::Codex, Source::ClaudeCode, Source::Anthropic, Source::OpenAi } )
+      connect( mModelRouter->providerCatalog( source ), &QgsAiProviderModelCatalog::changed, this, modelCatalogChanged, Qt::QueuedConnection );
     // Starting Ollama means leaving Strata for a moment: coming back is when its
     // models should appear, without waiting for the picker to be opened twice.
     connect( qApp, &QGuiApplication::applicationStateChanged, this, [this]( Qt::ApplicationState state ) {
       if ( state == Qt::ApplicationActive )
+      {
         mModelRouter->refreshLocalServers();
+        mModelRouter->refreshProviderCatalogs();
+      }
     } );
     mModelRouter->refreshLocalServers();
   }
@@ -1400,7 +1410,10 @@ void QgsAiChatDockWidget::rebuildModelMenu()
   // since the last probe is noticed.
   connect( menu, &QMenu::aboutToShow, this, [this]() {
     if ( mModelRouter )
+    {
       mModelRouter->refreshLocalServers();
+      mModelRouter->refreshProviderCatalogs();
+    }
   } );
 
   // BYO providers stay selectable alongside the managed Strata catalog until paid
@@ -1410,31 +1423,31 @@ void QgsAiChatDockWidget::rebuildModelMenu()
   QVector<ModelEntry> models;
   if ( mModelRouter )
   {
-    for ( ModelEntry entry : predefinedModels() )
-    {
-      if ( entry.provider != QgsAiModelRouter::Provider::Plan && mModelRouter->isProviderAvailable( entry.provider ) )
+    using Provider = QgsAiModelRouter::Provider;
+    using Source = QgsAiProviderModelCatalog::Source;
+    const auto appendCatalog = [this, &models]( Provider provider, Source source ) {
+      if ( !mModelRouter->isProviderAvailable( provider ) )
+        return;
+      const QString configured = mModelRouter->providerSettings( provider ).model;
+      const auto choices = mModelRouter->providerCatalog( source )->models();
+      if ( source == Source::Codex )
+        models.append(
+          ModelEntry { choices.isEmpty() ? tr( "Automatic" ) : tr( "Automatic · %1" ).arg( choices.first().label ), QString(), provider, tr( "Uses the first model available to your ChatGPT account" ) }
+        );
+      bool hasConfigured = false;
+      for ( const auto &choice : choices )
       {
-        if ( entry.provider == QgsAiModelRouter::Provider::Claude && mModelRouter->providerSettings( entry.provider ).credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode )
-        {
-          if ( entry.model.startsWith( "claude-sonnet-"_L1 ) )
-          {
-            entry.model = u"sonnet"_s;
-            entry.displayName = tr( "Claude Sonnet · subscription" );
-          }
-          else if ( entry.model.startsWith( "claude-opus-"_L1 ) )
-          {
-            entry.model = u"opus"_s;
-            entry.displayName = tr( "Claude Opus · subscription" );
-          }
-          else if ( entry.model.startsWith( "claude-haiku-"_L1 ) )
-          {
-            entry.model = u"haiku"_s;
-            entry.displayName = tr( "Claude Haiku · subscription" );
-          }
-        }
-        models.append( entry );
+        models.append( ModelEntry { choice.label, choice.id, provider, choice.id } );
+        hasConfigured |= choice.id == configured;
       }
-    }
+      if ( !hasConfigured && !configured.isEmpty() )
+        models.append( ModelEntry { configured, configured, provider, tr( "Model ID saved in provider settings" ) } );
+    };
+    appendCatalog( Provider::OpenAi, Source::OpenAi );
+    appendCatalog( Provider::Codex, Source::Codex );
+    appendCatalog( Provider::Claude, mModelRouter->providerSettings( Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode ? Source::ClaudeCode : Source::Anthropic );
+    if ( mModelRouter->isProviderAvailable( Provider::OpenRouter ) )
+      models += openRouterModelEntries();
     if ( mModelRouter->isProviderAvailable( QgsAiModelRouter::Provider::Ollama ) )
     {
       const QList<QgsAiLocalServerCatalog::ModelInfo> localModels = mModelRouter->localServerCatalog( QgsAiModelRouter::Provider::Ollama )->models();
@@ -1542,6 +1555,10 @@ void QgsAiChatDockWidget::rebuildModelMenu()
       pillEntry = &entry;
     }
   }
+
+  menu->addSeparator();
+  QAction *providerSettings = menu->addAction( tr( "Manage models…" ) );
+  connect( providerSettings, &QAction::triggered, this, [this]() { openProviderSettingsSection( u"providers"_s ); } );
 
   mModelPill->setMenu( menu );
   mModelPill->setText( modelPillLabel( currentProvider, pillEntry ? pillEntry->displayName : tr( "Choose a provider" ) ) );
@@ -3285,9 +3302,11 @@ void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
     return;
 
   const QString provider = message.metadata.value( u"error_provider"_s ).toString();
-  const QString kind = message.metadata.value( u"error_kind"_s ).toString();
+  const QString kind = provider == "Codex"_L1 && message.metadata.value( u"error_code"_s ).toString() == "model_not_found"_L1 ? u"model"_s : message.metadata.value( u"error_kind"_s ).toString();
   if ( kind == "authentication"_L1 )
     mErrorTitleLabel->setText( tr( "Sign-in required — %1" ).arg( provider ) );
+  else if ( kind == "model"_L1 )
+    mErrorTitleLabel->setText( tr( "Model unavailable — %1" ).arg( provider ) );
   else if ( kind == "policy"_L1 )
     mErrorTitleLabel->setText( tr( "Request blocked by policy" ) );
   else
@@ -3300,11 +3319,13 @@ void QgsAiChatDockWidget::showRequestError( const QgsAiChatMessage &message )
     mErrorActionButton->setText( tr( "Log out and sign in again" ) );
   else if ( kind == "authentication"_L1 && provider == "Claude"_L1 )
     mErrorActionButton->setText( tr( "Configure a provider" ) );
+  else if ( kind == "model"_L1 )
+    mErrorActionButton->setText( tr( "Choose model…" ) );
   else if ( provider == "Plan Account"_L1 )
     mErrorActionButton->setText( tr( "Open Plan Account" ) );
   else
     mErrorActionButton->setText( tr( "Open Provider Settings" ) );
-  mErrorActionButton->setVisible( kind == "authentication"_L1 || kind == "policy"_L1 );
+  mErrorActionButton->setVisible( kind == "authentication"_L1 || kind == "policy"_L1 || kind == "model"_L1 );
   mErrorBanner->show();
 }
 
@@ -3445,15 +3466,6 @@ void QgsAiChatDockWidget::onModelSelected( QAction *action )
   // disabling the others — every synced provider stays synced so switching back
   // and forth (e.g. Codex <-> OpenRouter) is instant and reversible.
   QgsAiModelRouter::ProviderSettings settings = mModelRouter->providerSettings( entry.provider );
-  if ( entry.provider == QgsAiModelRouter::Provider::Claude && settings.credentialMode == QgsAiModelRouter::CredentialMode::ClaudeCode )
-  {
-    if ( entry.model.startsWith( "claude-sonnet-"_L1 ) )
-      entry.model = u"sonnet"_s;
-    else if ( entry.model.startsWith( "claude-opus-"_L1 ) )
-      entry.model = u"opus"_s;
-    else if ( entry.model.startsWith( "claude-haiku-"_L1 ) )
-      entry.model = u"haiku"_s;
-  }
   settings.model = entry.model;
   settings.enabled = true;
   mModelRouter->setProviderSettings( entry.provider, settings );
@@ -4281,6 +4293,8 @@ void QgsAiChatDockWidget::openProviderSettingsSection( const QString &section )
   // login/logout); refresh the picker so it lists exactly the synced providers.
   refreshPlanModels();
   refreshPlanAgentPolicy();
+  if ( mModelRouter )
+    mModelRouter->refreshProviderCatalogs();
   rebuildModelMenu();
 }
 

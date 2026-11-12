@@ -17,6 +17,7 @@
 #define QGSAIMODELROUTER_H
 
 #include "qgis_app.h"
+#include "qgsaiprovidermodelcatalog.h"
 #include "qgsaimodels.h"
 
 #include <functional>
@@ -143,6 +144,9 @@ class APP_EXPORT QgsAiModelRouter : public QObject
      * startup, when the model menu opens and from the settings page.
      */
     void refreshLocalServers( bool force = false );
+    QgsAiProviderModelCatalog *providerCatalog( QgsAiProviderModelCatalog::Source source ) const;
+    void refreshProviderCatalog( QgsAiProviderModelCatalog::Source source, bool force = false );
+    void refreshProviderCatalogs();
 
     /**
      * Context window, in tokens, requested from the local server for the
@@ -302,7 +306,8 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         QString midStreamError; // error delivered inside the SSE stream over HTTP 200
         int retryAfterSeconds = -1;               // from Retry-After header or SSE error.retry_after
         QgsAiUsage usage;       // token/cost accounting harvested from the response
-        QString responseModel;  // model that actually served the response (may differ from the requested one under routing)
+        QString responseModel;
+        QString requestedModel; // model that actually served the response (may differ from the requested one under routing)
     };
 
     QString requestScope( Provider provider ) const;
@@ -345,6 +350,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     QString planSessionTokenSettingKey() const;
     QString planPromptCacheSessionId() const;
     QString storedApiKey( Provider provider ) const;
+    QString resolvedRequestModel( Provider provider ) const;
     bool hasConfiguredCredential( Provider provider ) const;
     QString normalizedModelForProvider( Provider provider, const QString &model ) const;
     void loadPersistedProviderSettings();
@@ -361,6 +367,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
     ExternalToolExecutor mExternalToolExecutor;
     QgsAiToolRegistry *mToolRegistry = nullptr;
     QgsAiLocalServerCatalog *mOllamaCatalog = nullptr;
+    QMap<QgsAiProviderModelCatalog::Source, QgsAiProviderModelCatalog *> mProviderCatalogs;
     bool mToolUseEnabled = false;
     bool mAllowedToolsFilterEnabled = false;
     QStringList mAllowedTools;

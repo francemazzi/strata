@@ -355,6 +355,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaimodels.cpp
     ai/qgsaioauthcallbackpage.cpp
     ai/qgsaiopenroutermodelcatalog.cpp
+    ai/qgsaiprovidermodelcatalog.cpp
     ai/qgsaiplanclient.cpp
     ai/qgsaigallerycloudclient.cpp
     ai/qgsaipipinstallapprovaldialog.cpp

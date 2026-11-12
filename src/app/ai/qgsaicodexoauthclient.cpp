@@ -28,6 +28,7 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QScopedValueRollback>
 #include <QString>
 #include <QTimer>
 #include <QUrl>
@@ -39,6 +40,11 @@ using namespace Qt::StringLiterals;
 namespace
 {
   QString pendingCodexCredential;
+  QString cachedCredential;
+  QgsAiCodexOAuthClient::TokenSet cachedTokens;
+  QElapsedTimer cachedTokenAge;
+  bool refreshingToken = false;
+  quint64 loginRevision = 0;
 
   constexpr const char *CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
   constexpr const char *CODEX_AUTH_ISSUER = "https://auth.openai.com";
@@ -292,7 +298,10 @@ bool QgsAiCodexOAuthClient::completeDeviceCodeLogin( const DeviceCode &deviceCod
     *refreshTokenForStorage = refreshToken;
     return true;
   }
-  return storeCodexRefreshToken( refreshToken, errorMessage );
+  if ( !storeCodexRefreshToken( refreshToken, errorMessage ) )
+    return false;
+  invalidateSession();
+  return true;
 }
 
 bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *errorMessage )
@@ -317,6 +326,19 @@ bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *error
     return false;
   }
 
+  if ( refreshToken == cachedCredential && cachedTokenAge.isValid() && cachedTokenAge.elapsed() < 2 * 60 * 1000 )
+  {
+    tokens = cachedTokens;
+    return true;
+  }
+  if ( refreshingToken )
+  {
+    if ( errorMessage )
+      *errorMessage = QObject::tr( "Codex is connecting. Try again in a moment." );
+    return false;
+  }
+  const QScopedValueRollback<bool> refreshing( refreshingToken, true );
+  const quint64 revision = loginRevision;
   QJsonObject payload;
   payload.insert( u"client_id"_s, QString::fromUtf8( CODEX_CLIENT_ID ) );
   payload.insert( u"grant_type"_s, u"refresh_token"_s );
@@ -324,7 +346,7 @@ bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *error
 
   int httpStatus = 0;
   const QJsonObject object = postJsonBlocking( QUrl( QString::fromUtf8( CODEX_AUTH_ISSUER ) + u"/oauth/token"_s ), payload, 30000, httpStatus, errorMessage );
-  if ( object.isEmpty() )
+  if ( object.isEmpty() || revision != loginRevision || storedCodexRefreshToken() != refreshToken )
     return false;
 
   tokens.accessToken = object.value( u"access_token"_s ).toString();
@@ -350,7 +372,28 @@ bool QgsAiCodexOAuthClient::refreshAccessToken( TokenSet &tokens, QString *error
     }
   }
 
+  cachedCredential = tokens.refreshToken.isEmpty() ? refreshToken : tokens.refreshToken;
+  cachedTokens = tokens;
+  cachedTokenAge.start();
   return true;
+}
+
+QString QgsAiCodexOAuthClient::protocolVersion()
+{
+  return u"0.167.0"_s;
+}
+
+void QgsAiCodexOAuthClient::applySessionHeaders( QNetworkRequest &request, const TokenSet &tokens )
+{
+  request.setRawHeader( "Authorization", "Bearer " + tokens.accessToken.toUtf8() );
+  request.setRawHeader( "ChatGPT-Account-ID", tokens.chatGptAccountId.toUtf8() );
+  request.setRawHeader( "originator", "codex_cli_rs" );
+  request.setRawHeader( "version", protocolVersion().toUtf8() );
+}
+
+quint64 QgsAiCodexOAuthClient::sessionRevision()
+{
+  return loginRevision;
 }
 
 bool QgsAiCodexOAuthClient::hasRefreshToken()
@@ -358,9 +401,18 @@ bool QgsAiCodexOAuthClient::hasRefreshToken()
   return QgsAiSecretStore::hasSecret( refreshTokenSettingKey() );
 }
 
+void QgsAiCodexOAuthClient::invalidateSession()
+{
+  ++loginRevision;
+  pendingCodexCredential.clear();
+  cachedCredential.clear();
+  cachedTokens = {};
+  cachedTokenAge.invalidate();
+}
+
 bool QgsAiCodexOAuthClient::clearRefreshToken( QString * )
 {
-  pendingCodexCredential.clear();
+  invalidateSession();
   QgsAiSecretStore::removeSecret( refreshTokenSettingKey() );
   return true;
 }

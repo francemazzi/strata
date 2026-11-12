@@ -82,7 +82,15 @@ class TestQgsAiClaudeConnectWidget : public QObject
       QTRY_VERIFY( QgsAiClaudeCodeAuth::isConfigured() );
       QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode, QgsAiModelRouter::CredentialMode::ApiKey );
       QCOMPARE( router.activeProvider(), active );
-      QCOMPARE( widget.modelText(), u"sonnet"_s );
+      QCOMPARE( widget.modelText(), u"default"_s );
+      auto *models = widget.findChild<QComboBox *>( u"aiClaudeSubscriptionModel"_s );
+      QVERIFY( models );
+      QTRY_COMPARE( models->count(), 1 );
+      models->setCurrentIndex( 0 );
+      QCOMPARE( models->currentText(), u"Discovered Claude"_s );
+      QCOMPARE( widget.modelText(), u"claude-from-cli"_s );
+      models->setEditText( u"claude-custom-id"_s );
+      QCOMPARE( widget.modelText(), u"claude-custom-id"_s );
       QSignalSpy use( &widget, &QgsAiClaudeConnectWidget::useRequested );
       widget.findChild<QPushButton *>( u"aiClaudeUseButton"_s )->click();
       QCOMPARE( use.count(), 1 );

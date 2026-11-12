@@ -714,9 +714,10 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
         return;
       }
 
-      // Authentication and policy errors require user action. Falling back
-      // would hide the real failure behind a second provider's error.
-      const bool requiresUserAction = httpStatus == 401 || httpStatus == 403;
+      // A refused model, authentication or policy error needs the user's choice.
+      const QString errorCode = errorCodeFromText( errorMessage );
+      const bool modelUnavailable = mActiveProvider == QgsAiModelRouter::Provider::Codex && errorCode == "model_not_found"_L1;
+      const bool requiresUserAction = httpStatus == 401 || httpStatus == 403 || modelUnavailable;
       if ( mActiveProvider != QgsAiModelRouter::Provider::Plan && !requiresUserAction && !mPendingProviders.isEmpty() )
       {
         if ( mActiveProvider == QgsAiModelRouter::Provider::Plan )
@@ -731,14 +732,16 @@ QgsAiAgentSessionManager::QgsAiAgentSessionManager( QgsAiModelRouter *router, Qg
       QgsAiChatMessage assistant = buildAssistantMessage( finalError );
       assistant.metadata.insert( u"ui_kind"_s, u"request_error"_s );
       assistant.metadata.insert( u"error_provider"_s, providerName );
-      assistant.metadata.insert( u"error_code"_s, errorCodeFromText( errorMessage ) );
+      assistant.metadata.insert( u"error_code"_s, errorCode );
       assistant.metadata.insert( u"http_status"_s, httpStatus );
       assistant.metadata.insert( u"recovery"_s, recoveryCheckpoint() );
       if ( mRecoveryWaitRequestId == requestId )
         for ( const auto &message : std::as_const( mHistory ) )
           if ( message.id == mRecoveryWaitMessageId )
             assistant.metadata.insert( u"retry_at_ms"_s, message.metadata.value( u"retry_at_ms"_s ) );
-      if ( isAuthenticationError( providerName, errorMessage, httpStatus ) )
+      if ( modelUnavailable )
+        assistant.metadata.insert( u"error_kind"_s, u"model"_s );
+      else if ( isAuthenticationError( providerName, errorMessage, httpStatus ) )
         assistant.metadata.insert( u"error_kind"_s, u"authentication"_s );
       else if ( isPolicyError( errorMessage, httpStatus ) )
         assistant.metadata.insert( u"error_kind"_s, u"policy"_s );
@@ -1977,6 +1980,8 @@ QString QgsAiAgentSessionManager::actionableError( const QString &providerName, 
   const QString lower = sanitized.toLower();
   const QString code = errorCodeFromText( sanitized );
 
+  if ( providerName == "Codex"_L1 && code == "model_not_found"_L1 )
+    return sanitized;
   if ( code == "managed_provider_funding_required"_L1 || code == "upstream_timeout"_L1 || ( httpStatus == 0 && lower.contains( "aborted due to timeout"_L1 ) ) )
   {
     if ( code == "managed_provider_funding_required"_L1 )

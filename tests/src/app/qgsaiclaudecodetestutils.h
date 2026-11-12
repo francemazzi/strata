@@ -69,6 +69,23 @@ inline int fakeClaudeMain( int argc, char **argv )
   QFile input;
   if ( !input.open( stdin, QIODevice::ReadOnly ) )
     return 18;
+  if ( !args.contains( u"--mcp-config"_s ) )
+  {
+    // Only the initialization frame is allowed; the catalog closes without a prompt.
+    const QJsonObject request = QJsonDocument::fromJson( input.readLine() ).object();
+    if ( request.value( u"type"_s ) != "control_request"_L1 || request.value( u"request"_s ).toObject().value( u"subtype"_s ) != "initialize"_L1 )
+      return 18;
+    fakeClaudeWrite(
+      { { u"type"_s, u"control_response"_s },
+        { u"response"_s,
+          QJsonObject {
+            { u"subtype"_s, u"success"_s },
+            { u"request_id"_s, request.value( u"request_id"_s ) },
+            { u"response"_s, QJsonObject { { u"models"_s, QJsonArray { QJsonObject { { u"value"_s, u"claude-from-cli"_s }, { u"displayName"_s, u"Discovered Claude"_s } } } } } }
+          } } }
+    );
+    return 0;
+  }
   if ( !QJsonDocument::fromJson( input.readAll().trimmed() ).isObject() )
     return 18;
   if ( scenario == "rate_limit" )

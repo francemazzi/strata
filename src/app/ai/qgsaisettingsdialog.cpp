@@ -787,7 +787,16 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   // ---- OpenAI ----
   contentLayout->addWidget( sectionHeader( tr( "OpenAI" ), page ) );
   mOpenAiEndpoint = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi ).endpoint, page );
-  mOpenAiModel = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi ).model, page );
+  using CatalogSource = QgsAiProviderModelCatalog::Source;
+  QWidget *openAiPicker = mModelRouter->providerCatalog( CatalogSource::OpenAi )
+                            ->createPicker(
+                              mOpenAiModel,
+                              mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi ).model,
+                              u"https://developers.openai.com/api/docs/models/all"_s,
+                              [this]() { mModelRouter->refreshProviderCatalog( CatalogSource::OpenAi, true ); },
+                              page
+                            );
+  mOpenAiModel->setObjectName( u"aiOpenAiModelComboBox"_s );
   const auto addUseButton = [this, page, contentLayout]( QgsAiModelRouter::Provider provider, const QString &name ) {
     auto *use = new QPushButton( tr( "Use in this chat" ), page );
     use->setObjectName( name );
@@ -801,7 +810,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   mOpenAiKey->setObjectName( u"aiOpenAiKeyLineEdit"_s );
   mOpenAiKey->setEchoMode( QLineEdit::Password );
   mOpenAiKey->setPlaceholderText( mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi ) ? tr( "Saved locally — enter a new key only to replace it" ) : tr( "sk-..." ) );
-  contentLayout->addWidget( settingRow( tr( "Model" ), QString(), mOpenAiModel, page ) );
+  contentLayout->addWidget( settingRow( tr( "Model" ), tr( "Save your API key to load models available to it." ), openAiPicker, page ) );
   contentLayout->addWidget( settingRow( tr( "API key" ), tr( "Stored locally. Leave empty to keep the saved key." ), mOpenAiKey, page ) );
 
   addUseButton( QgsAiModelRouter::Provider::OpenAi, u"aiOpenAiUseButton"_s );
@@ -911,8 +920,20 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   // ---- Codex ----
   contentLayout->addWidget( sectionHeader( tr( "Codex" ), page ) );
   mCodexEndpoint = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::Codex ).endpoint, page );
-  mCodexModel = new QLineEdit( mModelRouter->providerSettings( QgsAiModelRouter::Provider::Codex ).model, page );
-  mCodexModel->setPlaceholderText( u"gpt-5.4"_s );
+  QWidget *codexPicker = mModelRouter->providerCatalog( CatalogSource::Codex )
+                           ->createPicker(
+                             mCodexModel,
+                             mModelRouter->providerSettings( QgsAiModelRouter::Provider::Codex ).model,
+                             u"https://developers.openai.com/codex/models"_s,
+                             [this]() { mModelRouter->refreshProviderCatalog( CatalogSource::Codex, true ); },
+                             page,
+                             tr( "Automatic" )
+                           );
+  mCodexModel->setObjectName( u"aiCodexModelComboBox"_s );
+  QgsAiSecretStore::loadSecretsAsync( this, [this]() {
+    if ( mModelRouter )
+      mModelRouter->refreshProviderCatalogs();
+  } );
   mCodexStatus = new QLabel( mModelRouter->hasStoredOAuthRefreshToken( QgsAiModelRouter::Provider::Codex ) ? tr( "Signed in" ) : tr( "Not signed in" ), page );
   QPushButton *codexRequestCodeButton = new QPushButton( tr( "Get device code" ), page );
   QPushButton *codexCompleteLoginButton = new QPushButton( tr( "Complete login" ), page );
@@ -924,7 +945,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
   codexButtonsLayout->addWidget( codexCompleteLoginButton );
   codexButtonsLayout->addWidget( codexLogoutButton );
 
-  contentLayout->addWidget( settingRow( tr( "Model" ), QString(), mCodexModel, page ) );
+  contentLayout->addWidget( settingRow( tr( "Model" ), tr( "Automatic uses the first model available to your ChatGPT account." ), codexPicker, page ) );
   contentLayout->addWidget( settingRow( tr( "Status" ), tr( "Codex uses a device-code OAuth login." ), mCodexStatus, page ) );
   contentLayout->addWidget( settingRow( tr( "Account" ), QString(), codexButtons, page ) );
 
@@ -960,7 +981,11 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
     QgsAiCredentialDialog::save( this, { { QgsAiCodexOAuthClient::refreshTokenSettingKey(), refreshToken } }, [this]( bool saved ) {
       mSavingSecrets = false;
       if ( saved )
+      {
         mCodexStatus->setText( tr( "Configured" ) );
+        QgsAiCodexOAuthClient::invalidateSession();
+        mModelRouter->refreshProviderCatalog( CatalogSource::Codex, true );
+      }
     } );
   } );
 
@@ -972,6 +997,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
       return;
     }
     mCodexStatus->setText( tr( "Not signed in" ) );
+    mModelRouter->providerCatalog( CatalogSource::Codex )->reset();
   } );
 
   auto *protectCodex = new QPushButton( tr( "Complete credential protection" ), page );
@@ -987,6 +1013,7 @@ QWidget *QgsAiSettingsDialog::buildProvidersPage()
       {
         protectCodex->hide();
         mCodexStatus->setText( mModelRouter->credentialStatus( QgsAiModelRouter::Provider::Codex ) );
+        mModelRouter->refreshProviderCatalog( CatalogSource::Codex, true );
       }
     } );
   } );
@@ -3254,7 +3281,7 @@ bool QgsAiSettingsDialog::applySettings()
 
   QgsAiModelRouter::ProviderSettings openAiSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::OpenAi );
   openAiSettings.endpoint = mOpenAiEndpoint->text().trimmed();
-  openAiSettings.model = mOpenAiModel->text().trimmed();
+  openAiSettings.model = QgsAiProviderModelCatalog::pickerValue( mOpenAiModel );
   openAiSettings.enabled = !pendingOpenAiKey.isEmpty() || mModelRouter->hasStoredApiKey( QgsAiModelRouter::Provider::OpenAi ) || !qEnvironmentVariable( "OPENAI_API_KEY" ).trimmed().isEmpty();
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::OpenAi, openAiSettings );
 
@@ -3269,7 +3296,7 @@ bool QgsAiSettingsDialog::applySettings()
 
   QgsAiModelRouter::ProviderSettings codexSettings = mModelRouter->providerSettings( QgsAiModelRouter::Provider::Codex );
   codexSettings.endpoint = mCodexEndpoint->text().trimmed();
-  codexSettings.model = mCodexModel->text().trimmed();
+  codexSettings.model = QgsAiProviderModelCatalog::pickerValue( mCodexModel );
   codexSettings.credentialMode = QgsAiModelRouter::CredentialMode::OAuth;
   codexSettings.enabled = QgsAiCodexOAuthClient::hasRefreshToken();
   mModelRouter->setProviderSettings( QgsAiModelRouter::Provider::Codex, codexSettings );

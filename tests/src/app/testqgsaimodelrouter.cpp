@@ -271,8 +271,9 @@ class TestQgsAiModelRouter : public QObject
     void buildPayloadForOpenAi();
     void buildPayloadForOpenRouterCostOptimized();
     void buildPayloadForOpenRouterToolUseOptimized();
-    void buildPayloadForCodexUsesGpt54();
-    void codexModelFallback();
+    void codexAutomaticUsesAccountCatalog();
+    void codexKeepsPastedId();
+    void apiCatalogsUseProviderCredentials();
     void extractChatGptAccountIdFromIdToken();
     void sanitizeSecrets();
     void storeApiKeyPersistsInSettings();
@@ -483,44 +484,122 @@ void TestQgsAiModelRouter::buildPayloadForOpenRouterToolUseOptimized()
   QVERIFY( !provider.contains( u"sort"_s ) );
 }
 
-void TestQgsAiModelRouter::buildPayloadForCodexUsesGpt54()
+void TestQgsAiModelRouter::codexAutomaticUsesAccountCatalog()
 {
-  QgsSettings settings;
-  settings.remove( u"ai/provider/codex"_s );
+  const auto guard = isolateProviderState();
+  QgsSettings().setValue( u"ai/provider/codex/model"_s, u"gpt-5.4"_s );
+  QgsAiSecretStore::useForSession( QgsAiCodexOAuthClient::refreshTokenSettingKey(), u"synthetic-refresh"_s );
+  const auto clear = qScopeGuard( []() { QgsAiCodexOAuthClient::clearRefreshToken(); } );
+
+  QgsAiTestLoopbackServer server;
+  QVERIFY( server.listen( QHostAddress::LocalHost ) );
+  server.responses = {
+    QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"access_token":"synthetic-access","id_token":"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiZml4dHVyZS1hY2NvdW50In19.sig"})" ),
+    QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"models":[{"slug":"hidden","visibility":"hide"},{"slug":"account-model","display_name":"Account model","visibility":"list","supported_in_api":false}]})" ),
+    QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]})" ),
+    QgsAiTestLoopbackServer::jsonResponse( 400, "Bad Request", R"({"error":{"message":"Model is not available","code":"model_not_found"}})" ),
+    QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"models":[{"slug":"new-account-model","visibility":"list"}]})" )
+  };
+  const QString processor = QgsNetworkAccessManager::setRequestPreprocessor( [&server]( QNetworkRequest *request ) {
+    QUrl url = request->url();
+    if ( url.host() != "auth.openai.com"_L1 && url.host() != "chatgpt.com"_L1 )
+      return;
+    url.setScheme( u"http"_s );
+    url.setHost( u"127.0.0.1"_s );
+    url.setPort( server.serverPort() );
+    request->setUrl( url );
+  } );
+  const auto removeProcessor = qScopeGuard( [processor]() { QgsNetworkAccessManager::removeRequestPreprocessor( processor ); } );
 
   QgsAiModelRouter router;
+  using Provider = QgsAiModelRouter::Provider;
+  router.setActiveProvider( Provider::Codex );
+  QVERIFY( router.providerSettings( Provider::Codex ).model.isEmpty() );
   QgsAiChatMessage message;
   message.role = QgsAiChatRole::User;
   message.content = u"hello"_s;
+  QSignalSpy finished( &router, &QgsAiModelRouter::requestFinished );
+  router.startChatRequest( Provider::Codex, { message }, false );
+  QTRY_COMPARE( finished.count(), 1 );
+  QVERIFY( finished.at( 0 ).at( 1 ).toBool() );
+  QCOMPARE( server.requestCount, 3 );
+  QVERIFY( server.rawRequests.at( 1 ).startsWith( "GET /backend-api/codex/models?client_version=" ) );
+  QVERIFY( server.rawRequests.at( 1 ).toLower().contains( "chatgpt-account-id: fixture-account" ) );
+  QVERIFY( server.rawRequests.at( 2 ).startsWith( "POST /backend-api/codex/responses " ) );
+  QCOMPARE( QJsonDocument::fromJson( server.lastRequestBody() ).object().value( u"model"_s ).toString(), u"account-model"_s );
+  QVERIFY( router.providerSettings( Provider::Codex ).model.isEmpty() );
 
-  const QByteArray payload = router.buildRequestPayload( QgsAiModelRouter::Provider::Codex, { message }, true );
-  const QJsonDocument doc = QJsonDocument::fromJson( payload );
-  QVERIFY( doc.isObject() );
-  const QJsonObject object = doc.object();
-  QCOMPARE( object.value( u"stream"_s ).toBool(), true );
-  QCOMPARE( object.value( u"model"_s ).toString(), u"gpt-5.4"_s );
+  auto codex = router.providerSettings( Provider::Codex );
+  codex.model = u"missing-model"_s;
+  router.setProviderSettings( Provider::Codex, codex );
+  router.startChatRequest( Provider::Codex, { message }, false );
+  QTRY_COMPARE( finished.count(), 2 );
+  QVERIFY( !finished.at( 1 ).at( 1 ).toBool() );
+  QVERIFY( finished.at( 1 ).at( 4 ).toString().contains( u"code=model_not_found"_s ) );
+  const auto *catalog = router.providerCatalog( QgsAiProviderModelCatalog::Source::Codex );
+  QTRY_VERIFY( !catalog->models().isEmpty() && catalog->models().first().id == "new-account-model"_L1 );
+  QCOMPARE( server.requestCount, 5 );
+  QCOMPARE( QJsonDocument::fromJson( server.requestBodies.at( 3 ) ).object().value( u"model"_s ).toString(), u"missing-model"_s );
+}
+
+void TestQgsAiModelRouter::codexKeepsPastedId()
+{
+  const auto guard = isolateProviderState();
+  using Provider = QgsAiModelRouter::Provider;
+  QgsAiModelRouter router;
+  QgsAiModelRouter::ProviderSettings codexSettings = router.providerSettings( Provider::Codex );
+  codexSettings.model = u"  a-new-model-id  "_s;
+  router.setProviderSettings( Provider::Codex, codexSettings );
+
+  // A custom ID stays selected through a restart and is sent unchanged.
+  QgsAiModelRouter reloaded;
+  QCOMPARE( reloaded.providerSettings( Provider::Codex ).model, u"a-new-model-id"_s );
+  const QJsonObject object = QJsonDocument::fromJson( reloaded.buildRequestPayload( Provider::Codex, {}, true ) ).object();
+  QCOMPARE( object.value( u"model"_s ).toString(), u"a-new-model-id"_s );
+  QVERIFY( object.value( u"stream"_s ).toBool() );
   QVERIFY( object.contains( u"input"_s ) );
 }
 
-void TestQgsAiModelRouter::codexModelFallback()
+void TestQgsAiModelRouter::apiCatalogsUseProviderCredentials()
 {
-  QgsSettings settings;
-  settings.remove( u"ai/provider/codex"_s );
+  const auto guard = isolateProviderState();
+  QgsAiTestLoopbackServer server;
+  QVERIFY( server.listen( QHostAddress::LocalHost ) );
+  server.requestHandler = []( const QByteArray &request, const QByteArray &, QgsAiTestLoopbackServer::ScriptedResponse &response ) {
+    if ( request.startsWith( "GET /api/openai/v1/models " ) && request.contains( "Bearer openai-catalog-test" ) )
+      response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"data":[{"id":"gpt-image-fixture"},{"id":"gpt-new-fixture"}]})" );
+    else if ( request.startsWith( "GET /api/anthropic/v1/models?" ) && request.contains( "anthropic-catalog-test" ) )
+      response = QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"data":[{"id":"claude-old","lifecycle":"retired"},{"id":"claude-new","display_name":"New Claude","lifecycle":"active"}]})" );
+    else
+      response = QgsAiTestLoopbackServer::jsonResponse( 401, "Unauthorized", "{}" );
+    return true;
+  };
+  const QString processor = QgsNetworkAccessManager::setRequestPreprocessor( [&server]( QNetworkRequest *request ) {
+    QUrl url = request->url();
+    if ( url.host() != "api.openai.com"_L1 && url.host() != "api.anthropic.com"_L1 )
+      return;
+    url.setPath( ( url.host() == "api.openai.com"_L1 ? u"/api/openai"_s : u"/api/anthropic"_s ) + url.path() );
+    url.setScheme( u"http"_s );
+    url.setHost( u"127.0.0.1"_s );
+    url.setPort( server.serverPort() );
+    request->setUrl( url );
+  } );
+  const auto removeProcessor = qScopeGuard( [processor]() { QgsNetworkAccessManager::removeRequestPreprocessor( processor ); } );
 
   QgsAiModelRouter router;
-  QgsAiModelRouter::ProviderSettings codexSettings = router.providerSettings( QgsAiModelRouter::Provider::Codex );
-  codexSettings.model = u"gpt-5"_s;
-  router.setProviderSettings( QgsAiModelRouter::Provider::Codex, codexSettings );
-
-  QCOMPARE( router.providerSettings( QgsAiModelRouter::Provider::Codex ).model, u"gpt-5.4"_s );
-
-  QgsAiChatMessage message;
-  message.role = QgsAiChatRole::User;
-  message.content = u"hello"_s;
-  const QJsonObject object = QJsonDocument::fromJson( router.buildRequestPayload( QgsAiModelRouter::Provider::Codex, { message }, false ) ).object();
-  QCOMPARE( object.value( u"model"_s ).toString(), u"gpt-5.4"_s );
-
-  settings.remove( u"ai/provider/codex"_s );
+  using Provider = QgsAiModelRouter::Provider;
+  using Source = QgsAiProviderModelCatalog::Source;
+  QVERIFY( router.storeApiKey( Provider::OpenAi, u"openai-catalog-test"_s ) );
+  QVERIFY( router.storeApiKey( Provider::Claude, u"anthropic-catalog-test"_s ) );
+  router.refreshProviderCatalogs();
+  QTRY_COMPARE( server.requestCount, 2 );
+  const auto *openAi = router.providerCatalog( Source::OpenAi );
+  const auto *claude = router.providerCatalog( Source::Anthropic );
+  QTRY_COMPARE( openAi->models().size(), 1 );
+  QTRY_COMPARE( claude->models().size(), 1 );
+  QCOMPARE( openAi->models().first().id, u"gpt-new-fixture"_s );
+  QCOMPARE( claude->models().first().id, u"claude-new"_s );
+  QCOMPARE( claude->models().first().label, u"New Claude"_s );
 }
 
 void TestQgsAiModelRouter::extractChatGptAccountIdFromIdToken()

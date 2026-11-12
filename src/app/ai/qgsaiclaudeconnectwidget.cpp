@@ -67,12 +67,17 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
       : 0
   );
   layout->addWidget( mCredentialMode );
-  mSubscriptionModel = new QComboBox( this );
+  using Source = QgsAiProviderModelCatalog::Source;
+  auto *subscriptionCatalog = router ? router->providerCatalog( Source::ClaudeCode ) : new QgsAiProviderModelCatalog( Source::ClaudeCode, this );
+  QWidget *subscriptionPicker = subscriptionCatalog->createPicker(
+    mSubscriptionModel,
+    QgsSettings().value( u"ai/provider/claude/code/model"_s, u"default"_s ).toString(),
+    u"https://code.claude.com/docs/en/model-config"_s,
+    [subscriptionCatalog]() { subscriptionCatalog->refresh( {}, true ); },
+    this
+  );
   mSubscriptionModel->setObjectName( u"aiClaudeSubscriptionModel"_s );
-  mSubscriptionModel->setEditable( true );
-  mSubscriptionModel->addItems( { u"sonnet"_s, u"opus"_s, u"haiku"_s } );
-  mSubscriptionModel->setCurrentText( QgsSettings().value( u"ai/provider/claude/code/model"_s, u"sonnet"_s ).toString() );
-  layout->addWidget( mSubscriptionModel );
+  layout->addWidget( subscriptionPicker );
   mLogin = new QgsAiClaudeCodeAuth( this );
   mConnectButton = new QPushButton( tr( "Connect Claude subscription" ), this );
   mConnectButton->setObjectName( u"aiClaudeConnectButton"_s );
@@ -86,7 +91,11 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   layout->addWidget( buttons );
 
   connect( mConnectButton, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::startLogin );
-  connect( mLogin, &QgsAiClaudeCodeAuth::statusChanged, this, [this]( bool ready, const QString &message ) {
+  connect( mLogin, &QgsAiClaudeCodeAuth::statusChanged, this, [this, subscriptionCatalog]( bool ready, const QString &message ) {
+    if ( ready )
+      subscriptionCatalog->refresh();
+    else
+      subscriptionCatalog->reset();
     const int wait = QgsAiClaudeCodeAuth::cooldownSeconds();
     setConnectionState(
       !ready && wait > 0 ? ConnectionState::RateLimited
@@ -113,11 +122,12 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   connect( install, &QPushButton::clicked, this, []() { QDesktopServices::openUrl( QUrl( u"https://code.claude.com/docs/en/setup"_s ) ); } );
   auto *executable = new QPushButton( tr( "Locate Claude Code…" ), this );
   layout->addWidget( executable );
-  connect( executable, &QPushButton::clicked, this, [this]() {
+  connect( executable, &QPushButton::clicked, this, [this, subscriptionCatalog]() {
     const QString path = QFileDialog::getOpenFileName( this, tr( "Select the official Claude Code executable" ), QgsAiClaudeCodeAuth::executablePath() );
     if ( path.isEmpty() )
       return;
     QgsSettings().setValue( u"ai/provider/claude/code/executable"_s, path );
+    subscriptionCatalog->reset();
     refreshStatus();
   } );
 
@@ -139,29 +149,32 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   mApiKeyEdit->setObjectName( u"aiClaudeApiKeyLineEdit"_s );
   mApiKeyEdit->setPlaceholderText( tr( "API key — leave empty to keep the saved key" ) );
   form->addWidget( mApiKeyEdit );
-  mModelCombo = new QComboBox( advanced );
-  mModelCombo->setEditable( true );
-  mModelCombo->addItems( { u"claude-sonnet-5"_s, u"claude-opus-4-8"_s, u"claude-haiku-4-5"_s } );
-  if ( router )
-    mModelCombo->setCurrentText(
-      QgsSettings()
-        .value(
-          u"ai/provider/claude/apiModel"_s,
-          router->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ApiKey ? router->providerSettings( QgsAiModelRouter::Provider::Claude ).model
-                                                                                                                                    : QgsAiModelRouter::defaultClaudeModel()
-        )
-        .toString()
-    );
-  form->addWidget( mModelCombo );
+  auto *apiCatalog = router ? router->providerCatalog( Source::Anthropic ) : new QgsAiProviderModelCatalog( Source::Anthropic, this );
+  const QString configuredApiModel = router && router->providerSettings( QgsAiModelRouter::Provider::Claude ).credentialMode == QgsAiModelRouter::CredentialMode::ApiKey
+                                       ? router->providerSettings( QgsAiModelRouter::Provider::Claude ).model
+                                       : QgsAiModelRouter::defaultClaudeModel();
+  const QString apiModel = QgsSettings().value( u"ai/provider/claude/apiModel"_s, configuredApiModel ).toString();
+  form->addWidget( apiCatalog->createPicker(
+    mModelCombo,
+    apiModel,
+    u"https://platform.claude.com/docs/en/models/overview"_s,
+    [router]() {
+      if ( router )
+        router->refreshProviderCatalog( Source::Anthropic, true );
+    },
+    advanced
+  ) );
   auto *use = new QPushButton( tr( "Use in this chat" ), advanced );
   use->setObjectName( u"aiClaudeUseButton"_s );
   layout->addWidget( use );
   connect( use, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::useRequested );
-  connect( mCredentialMode, qOverload<int>( &QComboBox::currentIndexChanged ), this, [this, advanced]( int ) {
-    mSubscriptionModel->setEnabled( usesSubscription() );
+  connect( mCredentialMode, qOverload<int>( &QComboBox::currentIndexChanged ), this, [this, advanced, subscriptionPicker]( int ) {
+    subscriptionPicker->setVisible( usesSubscription() );
     advanced->setCollapsed( usesSubscription() );
+    if ( mRouter && !usesSubscription() )
+      mRouter->refreshProviderCatalog( Source::Anthropic );
   } );
-  mSubscriptionModel->setEnabled( usesSubscription() );
+  subscriptionPicker->setVisible( usesSubscription() );
   refreshStatus();
 }
 
@@ -178,7 +191,7 @@ bool QgsAiClaudeConnectWidget::usesSubscription() const
 
 QString QgsAiClaudeConnectWidget::modelText() const
 {
-  return ( usesSubscription() ? mSubscriptionModel : mModelCombo )->currentText().trimmed();
+  return QgsAiProviderModelCatalog::pickerValue( usesSubscription() ? mSubscriptionModel : mModelCombo );
 }
 
 QString QgsAiClaudeConnectWidget::pendingApiKey() const
