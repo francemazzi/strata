@@ -229,6 +229,26 @@ namespace
     return qEnvironmentVariable( "STRATA_RUN_LIVE_AI_TESTS" ).trimmed() == "1"_L1;
   }
 
+  QgsAiTestLoopbackServer::ScriptedResponse codexOAuthResponse()
+  {
+    return QgsAiTestLoopbackServer::
+      jsonResponse( 200, "OK", R"({"access_token":"synthetic-access","id_token":"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiZml4dHVyZS1hY2NvdW50In19.sig"})" );
+  }
+
+  [[nodiscard]] auto redirectCodexToLoopback( const QgsAiTestLoopbackServer &server )
+  {
+    const QString processor = QgsNetworkAccessManager::setRequestPreprocessor( [port = server.serverPort()]( QNetworkRequest *request ) {
+      QUrl url = request->url();
+      if ( url.host() != "auth.openai.com"_L1 && url.host() != "chatgpt.com"_L1 )
+        return;
+      url.setScheme( u"http"_s );
+      url.setHost( u"127.0.0.1"_s );
+      url.setPort( port );
+      request->setUrl( url );
+    } );
+    return qScopeGuard( [processor]() { QgsNetworkAccessManager::removeRequestPreprocessor( processor ); } );
+  }
+
   // Neutralizes env API-key fallbacks, wipes per-provider settings and the active
   // selection so a resolve/availability test starts from a known-empty state; the
   // returned guard restores everything (incl. the active provider) when destroyed.
@@ -273,6 +293,8 @@ class TestQgsAiModelRouter : public QObject
     void buildPayloadForOpenRouterToolUseOptimized();
     void codexAutomaticUsesAccountCatalog();
     void codexKeepsPastedId();
+    void codexStreamUsesResponsesEvents_data();
+    void codexStreamUsesResponsesEvents();
     void apiCatalogsUseProviderCredentials();
     void extractChatGptAccountIdFromIdToken();
     void sanitizeSecrets();
@@ -494,22 +516,13 @@ void TestQgsAiModelRouter::codexAutomaticUsesAccountCatalog()
   QgsAiTestLoopbackServer server;
   QVERIFY( server.listen( QHostAddress::LocalHost ) );
   server.responses = {
-    QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"access_token":"synthetic-access","id_token":"e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiZml4dHVyZS1hY2NvdW50In19.sig"})" ),
+    codexOAuthResponse(),
     QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"models":[{"slug":"hidden","visibility":"hide"},{"slug":"account-model","display_name":"Account model","visibility":"list","supported_in_api":false}]})" ),
     QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]})" ),
     QgsAiTestLoopbackServer::jsonResponse( 400, "Bad Request", R"({"error":{"message":"Model is not available","code":"model_not_found"}})" ),
     QgsAiTestLoopbackServer::jsonResponse( 200, "OK", R"({"models":[{"slug":"new-account-model","visibility":"list"}]})" )
   };
-  const QString processor = QgsNetworkAccessManager::setRequestPreprocessor( [&server]( QNetworkRequest *request ) {
-    QUrl url = request->url();
-    if ( url.host() != "auth.openai.com"_L1 && url.host() != "chatgpt.com"_L1 )
-      return;
-    url.setScheme( u"http"_s );
-    url.setHost( u"127.0.0.1"_s );
-    url.setPort( server.serverPort() );
-    request->setUrl( url );
-  } );
-  const auto removeProcessor = qScopeGuard( [processor]() { QgsNetworkAccessManager::removeRequestPreprocessor( processor ); } );
+  const auto removeProcessor = redirectCodexToLoopback( server );
 
   QgsAiModelRouter router;
   using Provider = QgsAiModelRouter::Provider;
@@ -540,6 +553,122 @@ void TestQgsAiModelRouter::codexAutomaticUsesAccountCatalog()
   QTRY_VERIFY( !catalog->models().isEmpty() && catalog->models().first().id == "new-account-model"_L1 );
   QCOMPARE( server.requestCount, 5 );
   QCOMPARE( QJsonDocument::fromJson( server.requestBodies.at( 3 ) ).object().value( u"model"_s ).toString(), u"missing-model"_s );
+}
+
+void TestQgsAiModelRouter::codexStreamUsesResponsesEvents_data()
+{
+  QTest::addColumn<QByteArray>( "contentType" );
+  QTest::addColumn<QByteArrayList>( "chunks" );
+  QTest::addColumn<QString>( "expectedText" );
+  QTest::addColumn<QString>( "expectedError" );
+  QTest::addColumn<bool>( "expectToolCall" );
+
+  const QByteArrayList reply = {
+    ": keep alive\r\n\r\nev",
+    "ent: response.created\r\ndata: {\"type\":\"response.created\"}\r\n\r\n",
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Caff\xc3",
+    "\xa8\"}\n\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"private reasoning\"}\n\n",
+    "data: {\"type\":\"response.output_text.delta\",\"delta\":\" pronto\"}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"served-model\",\"usage\":{\"input_tokens\":6,\"output_tokens\":2}}}"
+  };
+  const QString expected = u"Caffè pronto"_s;
+  QTest::newRow( "plain-content-type" ) << QByteArray( "text/plain; charset=utf-8" ) << reply << expected << QString() << false;
+  QTest::newRow( "event-stream-content-type" ) << QByteArray( "text/event-stream" ) << reply << expected << QString() << false;
+  QTest::newRow( "no-content-type" ) << QByteArray() << reply << expected << QString() << false;
+  QTest::newRow( "empty-stream" ) << QByteArray( "text/plain" ) << QByteArrayList { "data: [DONE]\n\n" } << QString() << u"without text or tool calls"_s << false;
+  QTest::newRow( "malformed-stream" ) << QByteArray( "text/plain" ) << QByteArrayList { "data: {broken json}\n\n" } << QString() << u"malformed streaming response"_s << false;
+  QTest::newRow( "stream-error" )
+    << QByteArray( "text/plain" )
+    << QByteArrayList { "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"synthetic upstream failure\"}}}\n\n" }
+    << QString()
+    << u"synthetic upstream failure"_s
+    << false;
+  QTest::newRow( "tool-call" )
+    << QByteArray( "text/plain" )
+    << QByteArrayList{
+         "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_fixture\",\"name\":\"echo\"}}\n\n",
+         "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"text\\\":\\\"ciao\\\"}\"}\n\n",
+         reply.last(),
+       }
+    << QString() << QString() << true;
+}
+
+void TestQgsAiModelRouter::codexStreamUsesResponsesEvents()
+{
+  QFETCH( QByteArray, contentType );
+  QFETCH( QByteArrayList, chunks );
+  QFETCH( QString, expectedText );
+  QFETCH( QString, expectedError );
+  QFETCH( bool, expectToolCall );
+
+  const auto isolate = isolateProviderState();
+  QgsAiSecretStore::useForSession( QgsAiCodexOAuthClient::refreshTokenSettingKey(), u"synthetic-refresh"_s );
+  const auto clear = qScopeGuard( []() { QgsAiCodexOAuthClient::clearRefreshToken(); } );
+  QgsSettings settings;
+  const QString retriesKey = u"ai/network/maxRetries"_s;
+  const QVariant previousRetries = settings.value( retriesKey );
+  settings.setValue( retriesKey, 0 );
+  const auto restoreRetries = qScopeGuard( [&]() {
+    if ( previousRetries.isValid() )
+      settings.setValue( retriesKey, previousRetries );
+    else
+      settings.remove( retriesKey );
+  } );
+
+  QgsAiTestLoopbackServer server;
+  QVERIFY( server.listen( QHostAddress::LocalHost ) );
+  const auto removeProcessor = redirectCodexToLoopback( server );
+  QgsAiTestLoopbackServer::ScriptedResponse response;
+  if ( !contentType.isEmpty() )
+    response.headers.append( { QByteArrayLiteral( "Content-Type" ), contentType } );
+  response.sseChunks = chunks;
+  response.interChunkDelayMs = 50;
+  server.responses = { codexOAuthResponse(), response };
+
+  QgsAiModelRouter router;
+  using Provider = QgsAiModelRouter::Provider;
+  router.setActiveProvider( Provider::Codex );
+  auto codex = router.providerSettings( Provider::Codex );
+  codex.model = u"account-model"_s;
+  router.setProviderSettings( Provider::Codex, codex );
+  QSignalSpy progress( &router, &QgsAiModelRouter::requestProgress );
+  QSignalSpy finished( &router, &QgsAiModelRouter::requestFinished );
+  QSignalSpy toolCalls( &router, &QgsAiModelRouter::toolCallsRequested );
+  QSignalSpy usage( &router, &QgsAiModelRouter::usageReported );
+  router.startChatRequest( Provider::Codex, { userMessage( u"hello"_s ) }, true );
+
+  QTRY_COMPARE_WITH_TIMEOUT( finished.count() + toolCalls.count(), 1, 10000 );
+  QCOMPARE( server.requestCount, 2 );
+  QString streamedText;
+  for ( const QList<QVariant> &event : progress )
+    streamedText += event.at( 1 ).toString();
+  QCOMPARE( streamedText, expectedText );
+
+  if ( expectToolCall )
+  {
+    QCOMPARE( finished.count(), 0 );
+    const auto args = toolCalls.at( 0 );
+    QVERIFY( args.at( 2 ).toString().isEmpty() );
+    const auto calls = args.at( 3 ).value<QList<QgsAiToolCall>>();
+    QCOMPARE( calls.size(), 1 );
+    QCOMPARE( calls.first().id, u"call_fixture"_s );
+    QCOMPARE( calls.first().name, u"echo"_s );
+    QCOMPARE( calls.first().args.value( u"text"_s ).toString(), u"ciao"_s );
+  }
+  else
+  {
+    QCOMPARE( toolCalls.count(), 0 );
+    const auto args = finished.at( 0 );
+    QCOMPARE( args.at( 1 ).toBool(), expectedError.isEmpty() );
+    QCOMPARE( args.at( 3 ).toString(), expectedText );
+    QVERIFY2( args.at( 4 ).toString().contains( expectedError ), qPrintable( args.at( 4 ).toString() ) );
+  }
+  if ( expectedError.isEmpty() )
+  {
+    QCOMPARE( usage.count(), 1 );
+    QCOMPARE( usage.at( 0 ).at( 2 ).toString(), u"served-model"_s );
+    QCOMPARE( usage.at( 0 ).at( 3 ).value<QgsAiUsage>().promptTokens, static_cast<qint64>( 6 ) );
+  }
 }
 
 void TestQgsAiModelRouter::codexKeepsPastedId()

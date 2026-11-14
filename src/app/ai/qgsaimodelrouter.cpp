@@ -33,6 +33,7 @@
 
 #include <QBuffer>
 #include <QByteArray>
+#include <QByteArrayView>
 #include <QDateTime>
 #include <QFile>
 #include <QHash>
@@ -88,6 +89,24 @@ namespace
   // Loading a large model and generating on local hardware is far slower than a
   // cloud API: the cloud transfer timeout would abort legitimate turns.
   constexpr int LOCAL_DEFAULT_TIMEOUT_SECONDS = 600;
+
+  bool beginsWithSseField( QByteArrayView body )
+  {
+    if ( body.startsWith( "\xef\xbb\xbf" ) )
+      body = body.sliced( 3 );
+    // A stream can start with empty lines or SSE keep-alive comments.
+    while ( !body.isEmpty() )
+    {
+      const qsizetype newline = body.indexOf( '\n' );
+      const QByteArrayView line = body.first( newline < 0 ? body.size() : newline ).trimmed();
+      if ( !line.isEmpty() && !line.startsWith( ':' ) )
+        return line.startsWith( "event:" ) || line.startsWith( "data:" );
+      if ( newline < 0 )
+        break;
+      body = body.sliced( newline + 1 );
+    }
+    return false;
+  }
 
   QString extractTextRecursive( const QJsonValue &value )
   {
@@ -2049,6 +2068,7 @@ bool QgsAiModelRouter::dispatchRequest( RequestContext &context )
   context.attempt++;
   // Reset per-attempt state so a retry doesn't inherit partial data from a failed attempt.
   context.streamingBuffer.clear();
+  context.lineStream = false;
   context.aggregatedText.clear();
   context.stopReason.clear();
   context.toolCalls.clear();
@@ -2273,6 +2293,8 @@ QString QgsAiModelRouter::extractTextFromStreamEvent( Provider provider, const Q
   const QString eventType = object.value( u"type"_s ).toString();
   if ( eventType == "response.output_text.delta"_L1 )
     return object.value( u"delta"_s ).toString();
+  if ( provider == Provider::Codex )
+    return QString();
 
   // Fallback to old behavior for legacy Chat Completions style chunks
   const QString directDelta = object.value( u"delta"_s ).toString();
@@ -2660,44 +2682,65 @@ void QgsAiModelRouter::absorbOllamaChunk( const QJsonObject &object, RequestCont
 
 void QgsAiModelRouter::onReplyReadyRead()
 {
-  QNetworkReply *reply = qobject_cast<QNetworkReply *>( sender() );
+  consumeReplyData( qobject_cast<QNetworkReply *>( sender() ), false );
+}
+
+void QgsAiModelRouter::consumeReplyData( QNetworkReply *reply, bool atEnd )
+{
   RequestContext *context = contextFromReply( reply );
-  if ( !reply || !context )
+  if ( !context )
     return;
 
-  context->streamingBuffer += QString::fromUtf8( reply->readAll() );
-  // Line-oriented streams only: SSE, or Ollama's NDJSON (one JSON object per line).
-  const QString contentType = reply->header( QNetworkRequest::ContentTypeHeader ).toString();
-  if ( !contentType.contains( "text/event-stream"_L1 ) && !contentType.contains( "application/x-ndjson"_L1 ) )
-    return;
+  // Keep the wire bytes until we have a complete line: a read can split UTF-8.
+  context->streamingBuffer += reply->readAll();
+  const bool codex = context->provider == Provider::Codex;
+  if ( !context->lineStream )
+  {
+    const int status = reply->attribute( QNetworkRequest::HttpStatusCodeAttribute ).toInt();
+    if ( codex && status >= 400 )
+      return; // Let the JSON HTTP error handler read the entire envelope.
+    const QByteArray contentType = reply->rawHeader( "Content-Type" ).split( ';' ).first().trimmed().toLower();
+    context->lineStream = contentType == "text/event-stream" || contentType == "application/x-ndjson" || ( codex && beginsWithSseField( context->streamingBuffer ) );
+    if ( !context->lineStream )
+      return;
+  }
+  if ( context->streamingBuffer.startsWith( "\xef\xbb\xbf" ) )
+    context->streamingBuffer.remove( 0, 3 );
+
+  const QPointer<QgsAiModelRouter> router( this );
+  const QPointer<QNetworkReply> activeReply( reply );
   while ( true )
   {
-    const int lineEnd = context->streamingBuffer.indexOf( '\n' );
-    if ( lineEnd < 0 )
+    const qsizetype lineEnd = context->streamingBuffer.indexOf( '\n' );
+    if ( lineEnd < 0 && ( !atEnd || context->streamingBuffer.isEmpty() ) )
       break;
 
-    const QString rawLine = context->streamingBuffer.left( lineEnd ).trimmed();
-    context->streamingBuffer.remove( 0, lineEnd + 1 );
+    const qsizetype lineSize = lineEnd < 0 ? context->streamingBuffer.size() : lineEnd;
+    const QByteArray rawLine = context->streamingBuffer.left( lineSize ).trimmed();
+    context->streamingBuffer.remove( 0, lineEnd < 0 ? lineSize : lineSize + 1 );
     if ( rawLine.isEmpty() )
       continue;
 
     // SSE comment lines (e.g. OpenRouter's ": OPENROUTER PROCESSING" keep-alives) are not data.
-    if ( rawLine.startsWith( ':'_L1 ) )
+    if ( rawLine.startsWith( ':' ) || rawLine.startsWith( "event:" ) )
       continue;
 
-    QString dataLine = rawLine;
-    const bool isDataLine = dataLine.startsWith( "data:"_L1 );
+    QByteArray dataLine = rawLine;
+    const bool isDataLine = dataLine.startsWith( "data:" );
     if ( isDataLine )
       dataLine = dataLine.mid( 5 ).trimmed();
-    if ( dataLine == "[DONE]"_L1 )
+    if ( dataLine == "[DONE]" )
       continue;
 
-    const QJsonDocument doc = QJsonDocument::fromJson( dataLine.toUtf8() );
+    const QJsonDocument doc = QJsonDocument::fromJson( dataLine );
     if ( !doc.isObject() )
     {
       // A corrupted data frame can silently lose tool-call arguments: log it.
-      if ( isDataLine )
-        QgsMessageLog::logMessage( u"Skipping malformed SSE data line for request id=%1: %2"_s.arg( context->requestId, sanitizeErrorText( dataLine.left( 200 ) ) ), u"AI"_s, Qgis::MessageLevel::Warning, false );
+      if ( isDataLine && codex && context->midStreamError.isEmpty() )
+        context->midStreamError = tr( "Codex returned a malformed streaming response." );
+      else if ( isDataLine && !codex )
+        QgsMessageLog::
+          logMessage( u"Skipping malformed SSE data line for request id=%1: %2"_s.arg( context->requestId, sanitizeErrorText( QString::fromUtf8( dataLine.left( 200 ) ) ) ), u"AI"_s, Qgis::MessageLevel::Warning, false );
       continue;
     }
 
@@ -2708,7 +2751,9 @@ void QgsAiModelRouter::onReplyReadyRead()
     // event (Anthropic / OpenAI Responses).
     if ( context->midStreamError.isEmpty() )
     {
-      const QJsonValue errorValue = event.value( u"error"_s );
+      const QString eventType = event.value( u"type"_s ).toString();
+      const bool codexFailed = codex && eventType == "response.failed"_L1;
+      const QJsonValue errorValue = codexFailed ? event.value( u"response"_s ).toObject().value( u"error"_s ) : event.value( u"error"_s );
       if ( errorValue.isObject() )
       {
         const QJsonObject errorObj = errorValue.toObject();
@@ -2716,11 +2761,13 @@ void QgsAiModelRouter::onReplyReadyRead()
         if ( message.isEmpty() && errorObj.contains( u"code"_s ) )
           message = u"Provider returned error code %1."_s.arg( errorObj.value( u"code"_s ).toVariant().toString() );
         const int status = errorObj.value( u"code"_s ).toInt();
-        if ( status >= 400 && status <= 599 ) context->midStreamStatus = status;
-        const QString applicationCode = errorObj.value( u"error_code"_s ).toString();
+        if ( status >= 400 && status <= 599 )
+          context->midStreamStatus = status;
+        const QString applicationCode = errorObj.value( u"error_code"_s ).toString( codex ? errorObj.value( u"code"_s ).toString() : QString() );
         context->applicationErrorCode = applicationCode;
         context->retryForbidden = ( errorObj.contains( u"recoverable"_s ) && !errorObj.value( u"recoverable"_s ).toBool() ) || errorObj.value( u"partial_output"_s ).toBool();
-        if ( !applicationCode.isEmpty() ) message += u" code=%1"_s.arg( applicationCode );
+        if ( !applicationCode.isEmpty() )
+          message += u" code=%1"_s.arg( applicationCode );
         if ( !message.isEmpty() )
           context->midStreamError = message;
         if ( errorObj.contains( u"retry_after"_s ) )
@@ -2734,9 +2781,16 @@ void QgsAiModelRouter::onReplyReadyRead()
       {
         context->midStreamError = errorValue.toString();
       }
-      else if ( event.value( u"type"_s ).toString() == "error"_L1 && !event.value( u"message"_s ).toString().isEmpty() )
+      else if ( eventType == "error"_L1 && !event.value( u"message"_s ).toString().isEmpty() )
       {
         context->midStreamError = event.value( u"message"_s ).toString();
+      }
+      if ( codex && context->midStreamError.isEmpty() )
+      {
+        if ( codexFailed || eventType == "error"_L1 )
+          context->midStreamError = tr( "Codex reported a streaming error." );
+        else if ( eventType == "response.incomplete"_L1 )
+          context->midStreamError = tr( "Codex did not complete the response." );
       }
     }
 
@@ -2748,7 +2802,13 @@ void QgsAiModelRouter::onReplyReadyRead()
       continue;
 
     context->aggregatedText += chunk;
-    emit requestProgress( context->requestId, chunk );
+    const QString requestId = context->requestId;
+    emit requestProgress( requestId, chunk );
+    if ( !router )
+      return;
+    context = contextFromReply( activeReply );
+    if ( !context )
+      return;
   }
 }
 
@@ -2879,7 +2939,12 @@ QString QgsAiModelRouter::composeHttpErrorMessage( Provider provider, int httpSt
 
 void QgsAiModelRouter::onReplyFinished()
 {
-  QNetworkReply *reply = qobject_cast<QNetworkReply *>( sender() );
+  const QPointer<QNetworkReply> activeReply( qobject_cast<QNetworkReply *>( sender() ) );
+  const QPointer<QgsAiModelRouter> router( this );
+  consumeReplyData( activeReply, true );
+  if ( !router )
+    return;
+  QNetworkReply *reply = activeReply.data();
   RequestContext *context = contextFromReply( reply );
   if ( !reply || !context )
     return;
@@ -2890,13 +2955,9 @@ void QgsAiModelRouter::onReplyFinished()
   const QNetworkReply::NetworkError networkError = reply->error();
   const qint64 latencyMs = std::max<qint64>( 0, QDateTime::currentMSecsSinceEpoch() - context->startedAtMs );
 
-  // Read body once: may contain success text or structured error.
-  // For streamed error responses the server may deliver the JSON error in a
-  // single chunk that readyRead already drained into streamingBuffer; fall
-  // back to it so we don't lose the error message.
-  QByteArray responseBody = reply->readAll();
-  if ( responseBody.isEmpty() && !context->streamingBuffer.isEmpty() )
-    responseBody = context->streamingBuffer.toUtf8();
+  // Stream events were already consumed. For regular replies the buffer still
+  // contains the whole body, including any JSON error sent before finished().
+  const QByteArray responseBody = std::move( context->streamingBuffer );
   QString responseText = context->aggregatedText;
   if ( responseText.isEmpty() && !responseBody.isEmpty() )
   {
@@ -2922,8 +2983,10 @@ void QgsAiModelRouter::onReplyFinished()
       if ( !doc.object().value( u"model"_s ).toString().isEmpty() )
         context->responseModel = doc.object().value( u"model"_s ).toString();
     }
-    else if ( httpStatus < 400 )
+    else if ( httpStatus < 400 && context->provider != Provider::Codex )
       responseText = QString::fromUtf8( responseBody );
+    else if ( httpStatus < 400 && networkError == QNetworkReply::NoError )
+      context->midStreamError = tr( "Codex returned an unreadable response." );
   }
 
   // Providers can deliver errors inside the SSE stream over HTTP 200. An empty

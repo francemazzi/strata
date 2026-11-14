@@ -21,6 +21,7 @@
 #include "qgsaimodels.h"
 
 #include <functional>
+#include <QByteArray>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -293,7 +294,8 @@ class APP_EXPORT QgsAiModelRouter : public QObject
         QString retryScope;
         bool retryForbidden = false;
         QString applicationErrorCode;
-        QString streamingBuffer;
+        QByteArray streamingBuffer;
+        bool lineStream = false;
         QString aggregatedText;
         QString stopReason;                       // "end_turn", "tool_use", "stop", etc.
         QList<PendingToolCall> toolCalls;         // collected during streaming/parse
@@ -312,6 +314,7 @@ class APP_EXPORT QgsAiModelRouter : public QObject
 
     QString requestScope( Provider provider ) const;
     bool dispatchRequest( RequestContext &context );
+    void consumeReplyData( QNetworkReply *reply, bool atEnd );
     void finishRequest( const QString &requestId, bool success, const QString &responseText, const QString &errorMessage, int httpStatus, int retryCount, bool retriable, qint64 latencyMs );
     void queueFailedRequestFinish( const QString &requestId, const QString &errorMessage );
     void clearRequestTransport( RequestContext &context );
