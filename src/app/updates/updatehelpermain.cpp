@@ -11,11 +11,13 @@
 #include <QSysInfo>
 #include <QThread>
 #include <QProcess>
+#ifdef Q_OS_MACOS
+#include "qgsbundledqcaprovider_p.h"
+#endif
 using namespace Qt::StringLiterals;
 int main( int argc, char **argv )
 {
   QCoreApplication app( argc, argv );
-  QCA::Initializer crypto;
   if ( app.arguments().size() != 2 )
     return 2;
   const QString path = app.arguments().at( 1 );
@@ -39,12 +41,30 @@ int main( int argc, char **argv )
   const QByteArray manifest = QByteArray::fromBase64( job.value( u"manifest"_s ).toString().toUtf8() );
   QgsUpdatePackage package;
   QString error;
+#ifdef Q_OS_MACOS
+  const QString bundledProvider = QgsBundledQcaProvider::path();
+  const bool useBundledProvider = QFile::exists( bundledProvider );
+  // The desktop disables discovery after registering its own provider. The
+  // helper inherits its environment and needs to register the provider again.
+  if ( useBundledProvider )
+    qputenv( "QCA_NO_PLUGINS", "1" );
+#endif
+  QCA::Initializer crypto;
+#ifdef Q_OS_MACOS
+  if ( useBundledProvider && !QgsBundledQcaProvider::registerProvider( bundledProvider, error ) )
+    return fail( error );
+#endif
   if (
     !QgsUpdateManifest::verify( manifest, job.value( u"signature"_s ).toString().toUtf8(), &error )
     || !QgsUpdateManifest::select( manifest, job.value( u"currentVersion"_s ).toString(), job.value( u"platform"_s ).toString(), QSysInfo::buildCpuArchitecture(), package, &error )
     || !QgsUpdateManifest::verifyFile( job.value( u"package"_s ).toString(), package, &error )
   )
     return fail( error );
+#ifdef Q_OS_MACOS
+  // The relaunched desktop must initialize its own bundled provider.
+  if ( useBundledProvider )
+    qunsetenv( "QCA_NO_PLUGINS" );
+#endif
 #ifdef Q_OS_WIN
   // Run from a private copy: Windows cannot replace loaded executables or DLLs.
   // Copying is performed by the helper, never on the application's UI thread.

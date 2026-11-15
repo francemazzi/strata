@@ -113,6 +113,8 @@ cmake -S "$QCA_SRC" -B "$QCA_BUILD" -G Ninja \
 cmake --build "$QCA_BUILD" -j "$NPROC"
 sudo cmake --install "$QCA_BUILD"
 sudo ldconfig
+QCA_OPENSSL_PLUGIN="$(find "$QCA_BUILD" -type f -name 'libqca-ossl.so' -print -quit)"
+test -f "$QCA_OPENSSL_PLUGIN"
 
 echo "==> Relaxing Qt6 minimum version 6.6.0 -> 6.4.0 (noble ships 6.4.2)"
 # Noble's qt6-base-dev is 6.4.2; QGIS upstream requires >= 6.6.0. We patch
@@ -265,6 +267,9 @@ echo "==> Installing into ${APPDIR}"
 rm -rf "${APPDIR}"
 mkdir -p "${APPDIR}"
 DESTDIR="" cmake --install build
+# QCA discovers providers dynamically. linuxdeploy cannot infer this plugin
+# from the desktop executable's linked libraries.
+install -Dm755 "$QCA_OPENSSL_PLUGIN" "${APPDIR}/usr/lib/qt6/plugins/crypto/libqca-ossl.so"
 stage_appimage_python_runtime
 verify_appimage_pyqgis_runtime
 
@@ -324,7 +329,7 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # subdir of usr/lib that linuxdeploy does not search by default). Make them
 # discoverable via LD_LIBRARY_PATH and pass them as explicit --library args.
 export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib/qgis:${APPDIR}/usr/lib/x86_64-linux-gnu:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-LIBRARY_ARGS=()
+LIBRARY_ARGS=( "--library" "${APPDIR}/usr/lib/qt6/plugins/crypto/libqca-ossl.so" )
 while IFS= read -r -d '' lib; do
   LIBRARY_ARGS+=( "--library" "$lib" )
 done < <(find "${APPDIR}/usr/lib" -maxdepth 3 -name 'libqgis_*.so*' -print0)
@@ -352,6 +357,30 @@ if ! [[ "${APPIMAGE_OFFSET}" =~ ^[0-9]+$ ]]; then
 fi
 file "${OUTPUT}"
 python3 scripts/ci/verify_crs_runtime.py "./${OUTPUT}" --output crs-runtime-linux.json
+(
+  # The fixture has a valid signature and no installable packages. Reaching
+  # version selection confirms the shipped helper loaded its crypto provider.
+  qa_dir="$(mktemp -d)"
+  trap 'rm -r "$qa_dir"' EXIT
+  python3 - "$qa_dir/install.json" <<'PY'
+import base64
+import json
+from pathlib import Path
+import sys
+
+fixtures = Path("tests/testdata/updates")
+Path(sys.argv[1]).write_text(json.dumps({
+    "manifest": base64.b64encode((fixtures / "valid-manifest.json").read_bytes()).decode(),
+    "signature": (fixtures / "valid-manifest.sig").read_text(),
+    "currentVersion": "0.0.0",
+    "platform": "linux",
+}))
+PY
+  result=0
+  "./${OUTPUT}" --strata-apply-update "$qa_dir/install.json" || result=$?
+  test "$result" -eq 1
+  grep -Fx 'No newer stable update is available.' "$qa_dir/install.json.result"
+)
 
 echo "==> Done"
 ls -lh Strata-*.AppImage

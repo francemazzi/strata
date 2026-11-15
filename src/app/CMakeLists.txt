@@ -891,6 +891,7 @@ set_target_properties(strata-update-helper PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 if(WIN32)
   target_link_libraries(strata-update-helper PRIVATE wintrust crypt32 shell32)
 elseif(APPLE)
+  target_include_directories(strata-update-helper PRIVATE ${CMAKE_SOURCE_DIR}/src/core/auth)
   target_link_libraries(strata-update-helper PRIVATE "-framework Security" "-framework CoreFoundation")
 endif()
 add_dependencies(qgis strata-update-helper)
