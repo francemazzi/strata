@@ -64,6 +64,9 @@ int main( int argc, char **argv )
   // The relaunched desktop must initialize its own bundled provider.
   if ( useBundledProvider )
     qunsetenv( "QCA_NO_PLUGINS" );
+  // A direct launch skips the bundle's LSEnvironment. Keep Python caches out
+  // of the signed bundle on both successful updates and recovery launches.
+  qputenv( "PYTHONDONTWRITEBYTECODE", "1" );
 #endif
 #ifdef Q_OS_WIN
   // Run from a private copy: Windows cannot replace loaded executables or DLLs.

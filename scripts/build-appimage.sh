@@ -362,6 +362,9 @@ python3 scripts/ci/verify_crs_runtime.py "./${OUTPUT}" --output crs-runtime-linu
   # version selection confirms the shipped helper loaded its crypto provider.
   qa_dir="$(mktemp -d)"
   trap 'rm -r "$qa_dir"' EXIT
+  qa_app="$(realpath "$OUTPUT")"
+  (cd "$qa_dir" && "$qa_app" --appimage-extract 'usr/lib/qt6/plugins/crypto/libqca-ossl.so' >/dev/null)
+  test -s "$qa_dir/squashfs-root/usr/lib/qt6/plugins/crypto/libqca-ossl.so"
   python3 - "$qa_dir/install.json" <<'PY'
 import base64
 import json
@@ -377,7 +380,8 @@ Path(sys.argv[1]).write_text(json.dumps({
 }))
 PY
   result=0
-  "./${OUTPUT}" --strata-apply-update "$qa_dir/install.json" || result=$?
+  env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QCA_PLUGIN_PATH \
+    "$qa_app" --strata-apply-update "$qa_dir/install.json" || result=$?
   test "$result" -eq 1
   grep -Fx 'No newer stable update is available.' "$qa_dir/install.json.result"
 )
