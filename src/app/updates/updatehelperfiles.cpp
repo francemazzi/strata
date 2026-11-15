@@ -3,9 +3,67 @@
 #include <QFile>
 #include <QFileInfo>
 #include <zip.h>
+#ifdef Q_OS_MACOS
+#include <QDirIterator>
+#include <QProcess>
+#include <filesystem>
+#endif
 using namespace Qt::StringLiterals;
+#ifdef Q_OS_MACOS
+namespace
+{
+  bool remainsInside( const QDir &root, const QString &path )
+  {
+    const QString relative = root.relativeFilePath( path );
+    return !path.isEmpty() && relative != ".."_L1 && !relative.startsWith( "../"_L1 ) && !QDir::isAbsolutePath( relative );
+  }
+
+  bool isSafeBundleLink( const QFileInfo &entry, const QDir &packageRoot )
+  {
+    const QString resolved = entry.canonicalFilePath();
+    if ( !remainsInside( packageRoot, resolved ) )
+      return false;
+    std::error_code error;
+    const auto link = std::filesystem::read_symlink( QFile::encodeName( entry.filePath() ).constData(), error );
+    if ( error || link.is_absolute() )
+      return false;
+    const QString lexicalTarget = QDir::cleanPath( entry.absolutePath() + u'/' + QFile::decodeName( link.c_str() ) );
+    return remainsInside( packageRoot, lexicalTarget );
+  }
+} // namespace
+#endif
+
 bool UpdateHelper::copyTree( const QString &source, const QString &target, QString *error, bool overwrite )
 {
+#ifdef Q_OS_MACOS
+  Q_UNUSED( overwrite )
+  const QString canonicalSource = QFileInfo( source ).canonicalFilePath();
+  if ( canonicalSource.isEmpty() )
+  {
+    *error = u"Cannot locate update bundle."_s;
+    return false;
+  }
+  const QDir bundle( canonicalSource );
+  QDirIterator entries( canonicalSource, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDirIterator::Subdirectories );
+  while ( entries.hasNext() )
+  {
+    const QFileInfo entry = entries.nextFileInfo();
+    if ( entry.isSymLink() && !isSafeBundleLink( entry, bundle ) )
+    {
+      *error = u"Unsafe package symlink."_s;
+      return false;
+    }
+  }
+  // Signatures on scripts are stored in extended attributes. Preserve them
+  // along with the original symlinks before verifying the staged bundle.
+  QProcess copy;
+  copy.start( u"/usr/bin/ditto"_s, { u"--extattr"_s, canonicalSource, target } );
+  if ( !copy.waitForFinished( 120000 ) || copy.exitStatus() != QProcess::NormalExit || copy.exitCode() != 0 )
+  {
+    *error = u"Cannot stage the signed macOS bundle."_s;
+    return false;
+  }
+#else
   if ( !QDir().mkpath( target ) )
   {
     *error = u"Cannot create staging directory."_s;
@@ -18,7 +76,6 @@ bool UpdateHelper::copyTree( const QString &source, const QString &target, QStri
     if ( entry.isSymLink() )
     {
       const QString resolved = entry.canonicalFilePath();
-      // Framework symlinks are preserved only when their target remains inside the package tree.
       const QString relative = directory.relativeFilePath( resolved );
       if ( relative.startsWith( "../"_L1 ) || resolved.isEmpty() || !QFile::link( relative, destination ) )
       {
@@ -46,8 +103,10 @@ bool UpdateHelper::copyTree( const QString &source, const QString &target, QStri
       QFile::setPermissions( destination, entry.permissions() );
     }
   }
+#endif
   return true;
 }
+
 bool UpdateHelper::extractZip( const QString &source, const QString &target, QString *error )
 {
   int code = 0;

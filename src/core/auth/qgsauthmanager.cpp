@@ -40,9 +40,6 @@ using namespace Qt::StringLiterals;
 
 #ifdef HAVE_AUTH
 #include <QtCrypto>
-#if defined( QGIS_MAC_BUNDLE )
-#include "qgsbundledqcaprovider_p.h"
-#endif
 #endif
 
 #ifndef QT_NO_SSL
@@ -69,6 +66,10 @@ using namespace Qt::StringLiterals;
 #include "qgsruntimeprofiler.h"
 #include "qgssettingsentryimpl.h"
 #include "qgssettingstree.h"
+
+#if defined( HAVE_AUTH ) && defined( QGIS_MAC_BUNDLE )
+#include "qgsbundledqcaprovider_p.h"
+#endif
 
 QgsAuthManager *QgsAuthManager::sInstance = nullptr;
 
