@@ -29,13 +29,6 @@ for (const platform of platforms) {
   files.set(name, { name, sha256: await sha256(join(directory, name)) });
 }
 validateWindowsReport(await readJson(join(directory, 'windows-verification.json')), platformAssets(release.assets, 'windows'), checkoutSha());
-const updateAcceptancePath = join(directory, 'updater-acceptance.json');
-if (!await access(updateAcceptancePath).then(() => true, () => false)) {
-  console.log('Updater acceptance is incomplete; release remains an unsealed draft.');
-  process.exit(0);
-}
-validateUpdateAcceptance(await readJson(updateAcceptancePath), { tag, sourceSha: checkoutSha() });
-files.set('updater-acceptance.json', { name: 'updater-acceptance.json', sha256: await sha256(updateAcceptancePath) });
 const updateFiles = await Promise.all([...files.values()].filter(file => /\.(exe|zip|dmg|AppImage)$/.test(file.name)).map(async file => ({ ...file, size: (await stat(join(directory, file.name))).size })));
 const updateManifest = createUpdateManifest({ tag, sourceSha: checkoutSha(), files: updateFiles });
 const publicHeader = await readFile('src/app/updates/update-public-key.h', 'utf8');
@@ -46,6 +39,17 @@ for (const [name, data] of [['update-manifest.json', updateManifest], ['update-m
   await uploadFile(tag, join(directory, name));
   files.set(name, { name, sha256: await sha256(join(directory, name)) });
 }
+if (process.env.PREPARE_UPDATE_ONLY === 'true') {
+  console.log('Signed update metadata is ready for acceptance on the draft.');
+  process.exit(0);
+}
+const updateAcceptancePath = join(directory, 'updater-acceptance.json');
+if (!await access(updateAcceptancePath).then(() => true, () => false)) {
+  console.log('Updater acceptance is incomplete; release remains an unsealed draft.');
+  process.exit(0);
+}
+validateUpdateAcceptance(await readJson(updateAcceptancePath), { tag, sourceSha: checkoutSha() });
+files.set('updater-acceptance.json', { name: 'updater-acceptance.json', sha256: await sha256(updateAcceptancePath) });
 const identity = `https://github.com/${process.env.GITHUB_WORKFLOW_REF || ''}`;
 if (!/^https:\/\/github\.com\/francemazzi\/strata\/\.github\/workflows\/sign-release-assets\.yml@refs\/(heads\/master|tags\/strata-v[^/]+)$/.test(identity)) {
   throw new Error('Sealing requires the trusted GitHub signing workflow.');
