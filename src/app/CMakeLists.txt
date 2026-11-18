@@ -343,6 +343,7 @@ if (ENABLE_AI_ASSISTANT)
     ai/qgsaichatpromptedit.cpp
     ai/qgsaichathistorystore.cpp
     ai/qgsaiclaudemigration.cpp
+    ai/qgsaiclaudeauthorizationwidget.cpp
     ai/qgsaiclaudeconnectwidget.cpp
     ai/qgsaiclaudecodeauth.cpp
     ai/qgsaiclaudemcpbridge.cpp
@@ -598,6 +599,9 @@ endif()
 # Putting IMAGE_RCC_SRCS into qgis_app lib is causing problems when the lib is
 # loaded (by plugin for example) in test unit (qgis_layoutpicturetest).
 add_library(qgis_app ${LIBRARY_TYPE} ${QGIS_APP_SRCS})
+if(WIN32 AND ENABLE_AI_ASSISTANT)
+  target_link_libraries(qgis_app PRIVATE shell32)
+endif()
 if(QGISPOSTFIX)
   set_target_properties(qgis_app PROPERTIES
      RUNTIME_OUTPUT_NAME qgis_app${QGISPOSTFIX}

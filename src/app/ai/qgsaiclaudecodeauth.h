@@ -19,6 +19,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
+#include <QUrl>
 
 // Only the unmodified official CLI handles subscription credentials.
 class APP_EXPORT QgsAiClaudeCodeAuth : public QObject
@@ -37,20 +38,28 @@ class APP_EXPORT QgsAiClaudeCodeAuth : public QObject
     void login();
     void logout();
     void cancel();
+    bool submitAuthorizationCode( const QString &code );
     bool isBusy() const { return mProcess.state() != QProcess::NotRunning; }
   signals:
     void statusChanged( bool connected, const QString &message );
+    void authorizationUrlChanged( const QUrl &url );
 
   private:
     void begin( const QString &operation );
     void run( const QStringList &arguments );
     void finished( int exitCode );
     void fail( const QString &message );
+    void readLoginOutput( QByteArray &pendingLine, const QByteArray &bytes );
+    void clearAuthorization();
     QProcess mProcess;
     QTimer mTimer;
     QByteArray mOutput;
+    QByteArray mLoginStdout;
+    QByteArray mLoginStderr;
     QString mOperation;
     bool mCheckingVersion = false;
     bool mRateLimited = false;
+    bool mAuthorizationUrlAvailable = false;
+    bool mAuthorizationCodeSubmitted = false;
 };
 #endif

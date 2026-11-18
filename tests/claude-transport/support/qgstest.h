@@ -6,6 +6,12 @@
 #include <QScopeGuard>
 #include "qgssettings.h"
 using namespace Qt::StringLiterals;
+#ifdef QT_WIDGETS_LIB
+#include <QApplication>
+using StrataTestApplication = QApplication;
+#else
+using StrataTestApplication = QCoreApplication;
+#endif
 #define QGSTEST_MAIN( TestObject )                                                    \
   int main( int argc, char **argv )                                                   \
   {                                                                                   \
@@ -15,7 +21,7 @@ using namespace Qt::StringLiterals;
     qputenv( "QGIS_CUSTOM_CONFIG_PATH", profile.path().toUtf8() );                    \
     QSettings::setDefaultFormat( QSettings::IniFormat );                              \
     QSettings::setPath( QSettings::IniFormat, QSettings::UserScope, profile.path() ); \
-    QCoreApplication app( argc, argv );                                               \
+    StrataTestApplication app( argc, argv );                                          \
     TestObject tc;                                                                    \
     return QTest::qExec( &tc, argc, argv );                                           \
   }

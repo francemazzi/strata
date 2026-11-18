@@ -25,6 +25,7 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QUrlQuery>
 #include <QVersionNumber>
 #include "moc_qgsaiclaudecodeauth.cpp"
 using namespace Qt::StringLiterals;
@@ -82,20 +83,19 @@ QgsAiClaudeCodeAuth::QgsAiClaudeCodeAuth( QObject *parent )
   connect( &mTimer, &QTimer::timeout, this, [this]() { fail( tr( "Claude Code did not finish sign-in in time. Try connecting again." ) ); } );
   connect( &mProcess, &QProcess::readyReadStandardOutput, this, [this]() {
     const QByteArray bytes = mProcess.readAllStandardOutput();
-    if ( mOperation == "login"_L1 )
-      mRateLimited |= bytes.contains( "429" ) || bytes.toLower().contains( "rate limit" );
-    // Login output can contain an authorization URL: never retain or log it.
     if ( mCheckingVersion || mOperation == "status"_L1 )
     {
       mOutput += bytes;
       if ( mOutput.size() > 32768 )
         fail( tr( "Claude Code returned an invalid status response." ) );
     }
+    else if ( mOperation == "login"_L1 )
+      readLoginOutput( mLoginStdout, bytes );
   } );
   connect( &mProcess, &QProcess::readyReadStandardError, this, [this]() {
     const QByteArray bytes = mProcess.readAllStandardError();
-    if ( mOperation == "login"_L1 )
-      mRateLimited |= bytes.contains( "429" ) || bytes.toLower().contains( "rate limit" );
+    if ( mOperation == "login"_L1 && !mCheckingVersion )
+      readLoginOutput( mLoginStderr, bytes );
   } );
   connect( &mProcess, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this, [this]( int code, QProcess::ExitStatus ) { finished( code ); } );
   connect( &mProcess, &QProcess::errorOccurred, this, [this]( QProcess::ProcessError error ) {
@@ -105,6 +105,7 @@ QgsAiClaudeCodeAuth::QgsAiClaudeCodeAuth( QObject *parent )
 }
 QgsAiClaudeCodeAuth::~QgsAiClaudeCodeAuth()
 {
+  blockSignals( true );
   cancel();
 }
 void QgsAiClaudeCodeAuth::cancel()
@@ -112,11 +113,83 @@ void QgsAiClaudeCodeAuth::cancel()
   mTimer.stop();
   mOperation.clear();
   mOutput.clear();
+  clearAuthorization();
   if ( mProcess.state() != QProcess::NotRunning )
   {
     mProcess.kill();
     mProcess.waitForFinished( 1000 );
   }
+}
+void QgsAiClaudeCodeAuth::clearAuthorization()
+{
+  mLoginStdout.clear();
+  mLoginStderr.clear();
+  mAuthorizationCodeSubmitted = false;
+  if ( mAuthorizationUrlAvailable )
+  {
+    mAuthorizationUrlAvailable = false;
+    emit authorizationUrlChanged( QUrl() );
+  }
+}
+
+void QgsAiClaudeCodeAuth::readLoginOutput( QByteArray &pendingLine, const QByteArray &bytes )
+{
+  mRateLimited |= bytes.contains( "429" ) || bytes.toLower().contains( "rate limit" );
+  if ( mAuthorizationUrlAvailable )
+    return;
+
+  // Claude Code prints the manual browser URL even when the automatic launch
+  // succeeds. Pass only the official authorization link through to the UI.
+  // Never log raw login output or save the link in settings.
+  constexpr qsizetype maxLineSize = 8192;
+  static const QRegularExpression urlPattern( uR"(https://[^\s\x1b\x07]+)"_s );
+  pendingLine += bytes;
+  qsizetype newline;
+  while ( ( newline = pendingLine.indexOf( '\n' ) ) >= 0 )
+  {
+    const QByteArray line = pendingLine.first( newline );
+    pendingLine.remove( 0, newline + 1 );
+    if ( line.size() > maxLineSize )
+      continue;
+
+    auto matches = urlPattern.globalMatch( QString::fromUtf8( line ) );
+    while ( matches.hasNext() )
+    {
+      const QUrl url( matches.next().captured(), QUrl::StrictMode );
+      if ( !url.isValid() || url.scheme() != "https"_L1 || !url.userInfo().isEmpty() || url.port() != -1 || url.hasFragment() )
+        continue;
+      if ( ( url.host() != "claude.com"_L1 && url.host() != "claude.ai"_L1 ) || ( url.path() != "/cai/oauth/authorize"_L1 && url.path() != "/oauth/authorize"_L1 ) )
+        continue;
+
+      const QUrlQuery query( url );
+      const QString callback = query.queryItemValue( u"redirect_uri"_s, QUrl::FullyDecoded );
+      if ( callback != "https://platform.claude.com/oauth/code/callback"_L1 && callback != "https://console.anthropic.com/oauth/code/callback"_L1 )
+        continue;
+
+      mLoginStdout.clear();
+      mLoginStderr.clear();
+      mAuthorizationUrlAvailable = true;
+      emit authorizationUrlChanged( url );
+      return;
+    }
+  }
+  if ( pendingLine.size() > maxLineSize )
+    pendingLine.clear();
+}
+
+bool QgsAiClaudeCodeAuth::submitAuthorizationCode( const QString &code )
+{
+  if ( !mAuthorizationUrlAvailable || mAuthorizationCodeSubmitted || mProcess.state() != QProcess::Running )
+    return false;
+
+  const QString trimmed = code.trimmed();
+  static const QRegularExpression codePattern( u"^[!-~]{1,4096}$"_s );
+  if ( !codePattern.match( trimmed ).hasMatch() )
+    return false;
+
+  const QByteArray input = trimmed.toUtf8() + '\n';
+  mAuthorizationCodeSubmitted = mProcess.write( input ) == input.size();
+  return mAuthorizationCodeSubmitted;
 }
 void QgsAiClaudeCodeAuth::fail( const QString &message )
 {
@@ -198,6 +271,7 @@ void QgsAiClaudeCodeAuth::finished( int exitCode )
       fail( tr( "Claude Code sign-in was not completed. Return to the official sign-in flow and try again later." ) );
       return;
     }
+    clearAuthorization();
     mOperation = u"status"_s;
     run( { u"auth"_s, u"status"_s } );
     return;

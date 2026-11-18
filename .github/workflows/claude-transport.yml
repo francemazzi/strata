@@ -1,6 +1,11 @@
 name: Claude native transport
 on:
   workflow_dispatch:
+    inputs:
+      verify_official_claude_cli:
+        description: Verify the manual sign-in URL with the official Claude Code executable on Windows
+        type: boolean
+        default: false
   push:
     branches: ['fix/claude-code-subscription']
   pull_request:
@@ -42,7 +47,20 @@ jobs:
         run: cmake -S tests/claude-transport -B build/claude-transport
       - name: Build
         run: cmake --build build/claude-transport --config Release --parallel 2
-      - name: Test native process and MCP lifecycle
+      - name: Prepare official Claude Code for the Windows sign-in check
+        if: runner.os == 'Windows' && inputs.verify_official_claude_cli
+        shell: pwsh
+        run: |
+          $release = 'https://downloads.claude.ai/claude-code-releases/2.1.283'
+          $cli = Join-Path $env:RUNNER_TEMP 'claude.exe'
+          $checksum = (Invoke-RestMethod "$release/manifest.json").platforms.'win32-x64'.checksum
+          curl.exe --fail --location --retry 2 "$release/win32-x64/claude.exe" --output $cli
+          if ($LASTEXITCODE -ne 0 -or !$checksum -or (Get-FileHash $cli).Hash.ToLowerInvariant() -ne $checksum) {
+            throw 'Claude Code download failed verification'
+          }
+          "STRATA_TEST_CLAUDE_REAL_EXECUTABLE=$cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BROWSER=$(Join-Path $env:SystemRoot 'System32\where.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Test native process, sign-in and MCP lifecycle
         run: ctest --test-dir build/claude-transport -C Release --output-on-failure --output-junit claude-transport-results.xml
       - name: Preserve native test evidence
         if: always()

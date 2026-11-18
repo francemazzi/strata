@@ -18,7 +18,9 @@
 #include <cstdio>
 #include <QCoreApplication>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -54,9 +56,28 @@ inline int fakeClaudeMain( int argc, char **argv )
   }
   if ( args[1] == "auth"_L1 )
   {
+    const bool manualLogin = scenario.startsWith( "manual_auth_" );
+    const QString loginMarker = u"claude-test-manual-login"_s;
+    if ( manualLogin && args.value( 2 ) == "login"_L1 )
+    {
+      FILE *out = scenario == "manual_auth_stderr" ? stderr : stdout;
+      fputs( "https://claude.com.example/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback\r\n", out );
+      fputs( "https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fexample.org%2Foauth%2Fcode%2Fcallback\r\n", out );
+      // Some Claude Code versions print the URL as a terminal hyperlink.
+      fputs( "\033]8;;https://claude.com/cai/oauth/", out );
+      fflush( out );
+      QThread::msleep( 60 );
+      fputs( "authorize?state=synthetic&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback\033\\Link\033]8;;\033\\\r\nPaste code here if prompted > ", out );
+      fflush( out );
+      QFile input;
+      if ( !input.open( stdin, QIODevice::ReadOnly ) || input.readLine().trimmed() != "synthetic-code#state" )
+        return 19;
+      QFile marker( loginMarker );
+      return marker.open( QIODevice::WriteOnly ) ? 0 : 20;
+    }
     if ( args.value( 2 ) == "status"_L1 )
     {
-      QJsonObject status { { u"loggedIn"_s, scenario != "signed_out" }, { u"authMethod"_s, scenario == "api_key" ? u"api_key"_s : u"claude.ai"_s } };
+      QJsonObject status { { u"loggedIn"_s, scenario != "signed_out" && ( !manualLogin || QFile::exists( loginMarker ) ) }, { u"authMethod"_s, scenario == "api_key" ? u"api_key"_s : u"claude.ai"_s } };
       const QByteArray json = QJsonDocument( status ).toJson();
       fwrite( json.constData(), 1, static_cast<size_t>( json.size() ), stdout );
     }

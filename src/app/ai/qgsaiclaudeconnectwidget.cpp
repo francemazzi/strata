@@ -15,6 +15,7 @@
 
 #include "qgsaiclaudeconnectwidget.h"
 
+#include "qgsaiclaudeauthorizationwidget.h"
 #include "qgsaiclaudecodeauth.h"
 #include "qgssettings.h"
 #include <QFileDialog>
@@ -89,6 +90,7 @@ QgsAiClaudeConnectWidget::QgsAiClaudeConnectWidget( QgsAiModelRouter *router, QW
   buttonRow->addWidget( mConnectButton );
   buttonRow->addWidget( mLogoutButton );
   layout->addWidget( buttons );
+  layout->addWidget( new QgsAiClaudeAuthorizationWidget( mLogin, this ) );
 
   connect( mConnectButton, &QPushButton::clicked, this, &QgsAiClaudeConnectWidget::startLogin );
   connect( mLogin, &QgsAiClaudeCodeAuth::statusChanged, this, [this, subscriptionCatalog]( bool ready, const QString &message ) {
